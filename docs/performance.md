@@ -1,5 +1,7 @@
 # Initial measured performance
 
+This report preserves the first renderer proof timings. Later measurements and ownership checks are in [progress.md](progress.md), [native viewport evidence](../reviews/viewport-implementation.md) and [timeline/export evidence](../reviews/timeline-implementation.md). The later desktop uses suspended process creation, Job assignment before resume and owned encoder cleanup; the missing launcher described at the end of this initial report has been implemented and verified.
+
 Measured October 14, 2026 on NVIDIA RTX4070Ti (12282MiB, driver595.79), Ryzen9950X, Blender4.5.2 LTS (`ab25eae04993`), Rust1.95.0, and the installed FFmpeg2022-05-23 build. Cycles device selection explicitly enabled OptiX and disabled CPU/CUDA alternatives. Peak host/GPU memory and other desktop GPU load were not instrumented, so these are single observed runs rather than a statistical benchmark.
 
 | Actual job | Still request | Animation request | Median animation frame | Encoding | End-to-end proof |

@@ -119,9 +119,9 @@ Use meaningful tests before substantive implementation, watch their expected fai
 
 **Interfaces:** `LayerSchedule::uniform(height_mm, first_mm, build_height_mm) -> Result<LayerSchedule>`; `build_bead_mesh(segments: &[BeadSegment]) -> Result<Mesh>`; `load_stl(path: &Path, millimeters_per_unit: f64) -> Result<Mesh>`; `Mesh::write_binary(path: &Path) -> Result<()>`; `Mesh::bounds() -> Result<Bounds>`.
 
-- [ ] Tests:20mm/.20 gives100 intervals; .30first/.20later gives0,.30,.50; invalid/nonfinite/budget rejection; known stadium cross-section bounds/area; bead Z extends from nozzleZ-height to nozzleZ; correct outward winding; corners preserve extents; binary/ASCII STL including `solid` binary header; invalid counts/NaN/empty; binary snapshot overflow/index checks.
-- [ ] Implement finite/bounded canonical geometry, physical schedules and independently capped stadium beads; document corner approximation. STL keeps original silhouette and source-unit assumption; omit only exact zero-area faces with a visible report, never tolerance-based topology repair.
-- [ ] Run `cargo test`, format and strict Clippy. Record actual test counts.
+- [x] Tests:20mm/.20 gives100 intervals; .30first/.20later gives0,.30,.50; invalid/nonfinite/budget rejection; known stadium cross-section bounds/area; bead Z extends from nozzleZ-height to nozzleZ; correct outward winding; corners preserve extents; binary/ASCII STL including `solid` binary header; invalid counts/NaN/empty; binary snapshot overflow/index checks.
+- [x] Implement finite/bounded canonical geometry, physical schedules and independently capped stadium beads; document corner approximation. STL keeps original silhouette and source-unit assumption; omit only exact zero-area faces with a visible report, never tolerance-based topology repair.
+- [x] Run `cargo test`, format and strict Clippy. Record actual test counts.
 
 **Deliverable:** Tested geometry that can feed the rendering proof and later native view.
 
@@ -131,9 +131,9 @@ Use meaningful tests before substantive implementation, watch their expected fai
 
 **Interfaces:** `parse_gcode(text: &str, options: &ParseOptions) -> Result<ToolpathData>`; CLI `turninator prepare <input.stl|input.gcode> --out <job-directory> [--layer-height <mm>] [--first-layer-height <mm>] [--filament-diameter <mm>]` writes meshbin and scene JSON. CLI `turninator fixture --out <directory>` generates a deterministic layered toolpath fixture.
 
-- [ ] Tests: absolute/relative XYZ/E, dialect mode-reset behavior, G92, extrusion debt/partial repayment, E-only moves, travel/Z-hop, first/variable layer metadata, width-volume inference, malformed compact words, unsupported arcs/volumetric/nonplanar paths, no empty output or guessed support exclusion.
-- [ ] Implement a sequential planar single-tool subset with explicit assumptions/provenance, bounded parsing and clear unsupported errors. Retain feature labels; do not advertise full slicer coverage.
-- [ ] Run the fixture through the actual CLI and inspect physical bounds/triangle counts; malformed input creates no publishable job. Run `cargo test` and strict checks.
+- [x] Tests: absolute/relative XYZ/E, dialect mode-reset behavior, G92, extrusion debt/partial repayment, E-only moves, travel/Z-hop, first/variable layer metadata, width-volume inference, malformed compact words, unsupported arcs/volumetric/nonplanar paths, no empty output or guessed support exclusion.
+- [x] Implement a sequential planar single-tool subset with explicit assumptions/provenance, bounded parsing and clear unsupported errors. Retain feature labels; do not advertise full slicer coverage.
+- [x] Run the fixture through the actual CLI and inspect physical bounds/triangle counts; malformed input creates no publishable job. Run `cargo test` and strict checks.
 
 **Deliverable:** Runnable real geometric layer input, with a documented route for supported user G-code.
 
@@ -143,10 +143,10 @@ Use meaningful tests before substantive implementation, watch their expected fai
 
 **Interfaces:** `worker.py` implements protocol1; `prove-render.py --job <directory> --blender <exe> --ffmpeg <exe> --engine <eevee|cycles> [--size <pixels>] [--frames <count>] [--still-size <pixels>]`.
 
-- [ ] Test binary reader corruption/index validation and actual CLI-generated scene loading. Run parser/reader tests before implementation.
-- [ ] Probe exact tool/device identity; render a still and another request in the same Blender process, produce events/progress, exercise failure/shutdown. Own cleanup in a finally block with finite probe waits.
-- [ ] Render real bead fixtures with both engines; produce a full80-frame960 GIF and4K still on the selected recipe. Verify GIF with decoded delays/loop/dimensions, inspect actual artifacts, record timings/counts and shader/build identities.
-- [ ] Exercise encoder failure/damaged frame/occupied destination handling; retain frames. Verify no unrelated Blender processes are touched.
+- [x] Test binary reader corruption/index validation and actual CLI-generated scene loading. Run parser/reader tests before implementation.
+- [x] Probe exact tool/device identity; render a still and another request in the same Blender process, produce events/progress, exercise failure/shutdown. Own cleanup in a finally block with finite probe waits.
+- [x] Render real bead fixtures with both engines; produce a full80-frame960 GIF and4K still on the selected recipe. Verify GIF with decoded delays/loop/dimensions, inspect actual artifacts, record timings/counts and shader/build identities.
+- [x] Exercise encoder failure/damaged frame/occupied destination handling; retain frames. Verify no unrelated Blender processes are touched.
 
 **Deliverable:** Visible geometric layers in actual PNG/GIF artifacts, not an untested renderer stub. This is the intended first implementation milestone.
 
@@ -154,31 +154,41 @@ Use meaningful tests before substantive implementation, watch their expected fai
 
 **Files:** `src/app.rs`, `src/viewport/`, `src/render/`, `src/export/jobs.rs`, native event tests.
 
-- [ ] Add eframe/egui with compatible wgpu device, drop/Open supported inputs, async revision-safe loading, neutral opaque orbit/pan/zoom and physical settings.
-- [ ] Integrate worker epochs/hidden Job Object ownership, rendered preview, immutable output requests, progress/cancel, verified encoding and output playback.
-- [ ] Render original STL Layer Appearance in both paths; matching physical pitch/camera/pose with explicit approximation status.
-- [ ] Validate the launched desktop flow, rapid edits/stale import, cancellation/restart and native GPU contention while exporting. Compilation alone does not prove desktop behavior.
+- [x] Add eframe/egui with compatible wgpu device, drop/Open supported inputs, async revision-safe loading, neutral opaque orbit/pan/zoom and physical settings.
+- [x] Integrate worker epochs/hidden Job Object ownership, rendered preview, immutable output requests, progress/cancel, verified encoding and output playback.
+- [x] Render original STL Layer Appearance in both paths; matching physical pitch/camera/pose with explicit approximation status.
+- [x] Validate the launched desktop flow, rapid edits/stale import, cancellation/restart and native GPU contention while exporting. Compilation alone does not prove desktop behavior.
 
 **Deliverable:** First usable application with G-code beads and STL studio modes.
 
 ### Task 5: Complete outputs and projects
 
-- [ ] Four-view shared-scale camera/edge/layout tests and real sheets, independent PNG alpha, optional MP4 from matching frames.
-- [ ] Versioned projects/settings, edited pitch preservation, missing/changed source relocation, encode retry/recovery UI, cache ownership and bounded disk policy.
-- [ ] Supported tool-build documentation, font/dependency notices, fresh-settings smoke and runtime checks.
+- [x] Four-view shared-scale camera/edge/layout tests and real sheets, independent PNG alpha, optional MP4 from matching frames.
+- [x] Versioned projects/settings, edited pitch preservation, missing/changed source relocation, encode retry/recovery UI, cache ownership and bounded disk policy.
+- [x] Supported tool-build documentation, font/dependency notices, fresh-settings smoke and runtime checks.
 
 **Deliverable:** All primary outputs and reproducible local saved setups.
 
 ### Task 6: Expand real printing and inspection
 
-- [ ] Joined bead paths, variable widths, supported arcs/firmware flavors, feature/tool display, metadata adapters and explicit adaptive schedules, each with real fixtures and false-assumption diagnostics.
-- [ ] Compare a bounded STL stepped-envelope experiment on cube/wedge/dome/holes/thin walls against original/bead/photo references. Choose whether to extend, keep experimental, or obtain toolpaths from an external slicer. Midlayer slicing is an explicitly selected approximation.
-- [ ] OIT/section inspection with actual infill, optional reliable caps on supported solid meshes, build-up animation and multi-material mapping. Add resin after testing overlapping bead/internal-interface limitations.
+- [x] Joined bead paths, variable widths, supported arcs/firmware flavors, feature/tool display, metadata adapters and explicit adaptive schedules, each with real fixtures and false-assumption diagnostics.
+- [x] Compare a bounded STL stepped-envelope experiment on cube/wedge/dome/holes/thin walls against original/bead/photo references. Choose whether to extend, keep experimental, or obtain toolpaths from an external slicer. Midlayer slicing is an explicitly selected approximation.
+- [x] OIT/section inspection with actual infill, optional reliable caps on supported solid meshes, build-up animation and multi-material mapping. Add resin after testing overlapping bead/internal-interface limitations.
 
 **Deliverable:** Broader realistic print visualization without asserting unmeasured physical defects or universal file support.
+
+### Task 7: Additional TODO motion and model actions
+
+- [x] Explicit H.264/AV1 output controls with actual codec/timing verification and verified-frame reuse.
+- [x] Paired full-model/section PNG and turntable outputs with actual deposited gaps, bounded caps and honest geometric metrics.
+- [x] Click a visible triangle to align its normal down through presentation rotation, retaining the physical build frame; validate nearest picking and rotated rendered surfaces.
+- [x] Authored camera keyframes with transition times, orbit/pan, signed whole-turn spirals, easing, duration and loop closure; shared native/export sampling and saved projects.
+- [x] Complete-layer G-code build-up combined with materials/studios/palettes, resin/Cycles, camera motion, sections and paired layouts. Selected static stages also support PNG/sheets/fixed-stage clips; sampled angles/stages persist in projects.
+
+These items use the same bounded source/import contract as the main plan. Build-up reconstructs deposited layers, not printer elapsed time, nozzle travel or filament dynamics. No printer photographs were supplied; stepped STL remains an explicitly selected experiment after original/stepped/bead comparisons. Physical stability and fused-resin optical behavior are outside the implemented normal-alignment and mesh-illustration contracts.
 
 ## 8. Completion evidence
 
 The full release is complete only after: supported sources load with visible assumptions; layers remain attached through presentation/animation; real G-code deposition paths render with intended width/height; all three output modes decode correctly; complete loops visibly retain detail without objectionable shimmer; runtime cancellation/races preserve valid work and destinations; projects reproduce print setup; and measured hardware/tool/artifact evidence is recorded.
 
-The current request authorizes beginning this plan now. Report the concrete first milestone achieved and what remains, with runnable commands and actual sample artifacts. Keep progress markers separate from the design, so future work can resume without repeating completed tasks.
+The user subsequently authorized completing the entire plan and todo.md. All task checklists now reflect the implemented bounded contracts and recorded checks. Release/package identities, actual desktop results, geometry/rendering comparisons and remaining physical-fidelity limitations are recorded in docs/progress.md and the linked review/evidence files. Future work can extend the documented printer/slicer subset and material models without repeating completed tasks.

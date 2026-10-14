@@ -1,3 +1,5 @@
-- Add output file options - maybe we want to compress using AV1 or something.
-- Some kind of crazy section analysis + turntable combo. Maybe side by side?
--
+- [x] Add output file options - maybe we want to compress using AV1 or something.
+- [x] Some kind of crazy section analysis + turntable combo. Maybe side by side?
+- [x] A "settle on face" option for making a face "down" for the model.
+- [x] View-to-view transitions: left to top, spiral around while approaching the vertical axis, panning shot, etc. I imagine these as key frames that the user would set and then pick the transition time for, though we'll need more depth and complexity for something like spirals.
+- [x] G-code buildup animation. This would "play" the G-code back so we could see the part being constructed. This will look absolutely amazing in combination with translucent, resin-like materials and raytracing! We need to be able to use this kind of model-actioning with any of our scene options.
