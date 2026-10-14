@@ -66,7 +66,7 @@ def load_scene_spec(path):
         raise ValueError("mesh_path must be absolute")
     if spec.get("geometry_kind") not in ("beads", "original"):
         raise ValueError("unsupported geometry_kind")
-    if spec.get("bead_layout") not in (None, "independent_stadium_v1"):
+    if spec.get("bead_layout") not in (None, "independent_stadium_v1", "joined_stadium_v1"):
         raise ValueError("unsupported bead_layout")
     if spec.get("bead_layout") is not None and spec["geometry_kind"] != "beads":
         raise ValueError("bead_layout requires bead geometry")
@@ -89,6 +89,8 @@ def load_scene_spec(path):
         raise ValueError("warnings must be strings")
     if spec.get("camera") is not None:
         validate_camera(spec["camera"])
+    if spec.get("section") is not None:
+        validate_section(spec["section"])
     if spec.get("material_preset", "matte_pla") not in ("matte_pla", "clay", "silk_pla", "glossy_plastic", "resin"):
         raise ValueError("unsupported material preset")
     if spec.get("studio_preset", "light") not in ("light", "dark", "diagram"):
@@ -115,6 +117,99 @@ def validate_camera(camera):
     _finite_number(camera.get("vertical_fov_degrees"), "camera field of view", 1, 150)
 
 
+def validate_section(section):
+    if not isinstance(section, dict) or type(section.get("axis")) is not int or section["axis"] not in (0,1,2):
+        raise ValueError("section axis must be 0, 1 or 2")
+    _finite_number(section.get("position_mm"), "section position")
+    if type(section.get("keep_positive")) is not bool or type(section.get("cap")) is not bool:
+        raise ValueError("section keep_positive/cap must be boolean")
+
+
+def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_kind):
+    """Cut a disposable render mesh; a plane never fills an infill envelope."""
+    import bpy
+    import bmesh
+    from mathutils import Vector
+    validate_section(section)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    if geometry_kind == "original":
+        # STL can duplicate identical triangle corners. Exact equality only;
+        # no tolerance merging of gaps or proximity-based mesh repair.
+        bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=0.0)
+    closed = bool(bm.faces) and all(edge.is_manifold and edge.is_contiguous for edge in bm.edges)
+    original_volume = abs(bm.calc_volume(signed=True))*1e9 if closed else None
+    bm.to_mesh(obj.data)
+    bm.free()
+    axis = Vector((1 if i == section["axis"] else 0 for i in range(3)))
+    normal = rotation @ axis
+    plane = rotation @ (axis * (section["position_mm"] * 0.001)) - Vector((center_xy[0],center_xy[1],bottom))
+    direction = normal if section["keep_positive"] else -normal
+    center = sum((Vector(corner) for corner in obj.bound_box), Vector()) / 8
+    anchor = center + normal * ((plane-center).dot(normal))
+    warnings = []
+    if geometry_kind == "beads":
+        warnings.append("Bead source volume is an algebraic mesh-volume estimate; overlaps between paths are not assessed.")
+    do_cap = section["cap"] and closed
+    if section["cap"] and not closed:
+        warnings.append("Open or inconsistently wound geometry: section remains uncapped; area/volume unavailable.")
+    distances = [(vertex.co-plane).dot(direction) for vertex in obj.data.vertices]
+    tolerance = max(extent*1e-7, 1e-9)
+    intersects = bool(distances) and min(distances) < -tolerance and max(distances) > tolerance
+    if do_cap and intersects:
+        bpy.ops.mesh.primitive_cube_add(size=2, location=anchor+direction*extent*4)
+        cutter = bpy.context.object
+        cutter.name = "DisposableSectionHalfspace"
+        cutter.rotation_euler = direction.to_track_quat("Z", "Y").to_euler()
+        cutter.scale = (extent*4,extent*4,extent*4)
+        modifier = obj.modifiers.new("PhysicalSection", "BOOLEAN")
+        modifier.operation = "INTERSECT"
+        modifier.solver = "EXACT"
+        modifier.use_self = True
+        modifier.use_hole_tolerant = True
+        modifier.object = cutter
+        bpy.context.view_layer.objects.active = obj
+        try:
+            bpy.ops.object.modifier_apply(modifier=modifier.name)
+        finally:
+            bpy.data.objects.remove(cutter, do_unlink=True)
+    elif not do_cap or distances and max(distances) <= tolerance:
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bmesh.ops.bisect_plane(bm, geom=list(bm.verts)+list(bm.edges)+list(bm.faces),
+                              plane_co=plane, plane_no=direction, dist=tolerance,
+                              clear_inner=True, clear_outer=False)
+        bm.to_mesh(obj.data)
+        bm.free()
+    obj.data.update()
+    area = 0.0
+    cap_material = bpy.data.materials.new("SectionCutSurface")
+    cap_material.use_nodes = True
+    cap_bsdf = cap_material.node_tree.nodes.get("Principled BSDF")
+    cap_bsdf.inputs["Base Color"].default_value = (0.5,0.18,0.065,1)
+    cap_bsdf.inputs["Roughness"].default_value = 0.65
+    obj.data.materials.append(cap_material)
+    cap_index = len(obj.data.materials)-1
+    for polygon in obj.data.polygons:
+        if abs((polygon.center-plane).dot(normal)) <= tolerance*5 and abs(polygon.normal.dot(normal)) > 0.999:
+            area += polygon.area*1e6
+            polygon.use_smooth = False
+            if do_cap:
+                polygon.material_index = cap_index
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    closed_after = bool(bm.faces) and all(edge.is_manifold for edge in bm.edges)
+    volume = abs(bm.calc_volume(signed=True))*1e9 if closed_after else 0.0 if not bm.faces else None
+    bm.free()
+    obj.data.calc_loop_triangles()
+    return {"axis":section["axis"],"position_mm":section["position_mm"],"keep_positive":section["keep_positive"],
+            "capped":do_cap,"closed_input":closed,"cross_section_area_mm2":area if do_cap else None,
+            "original_volume_mm3":original_volume,"remaining_volume_mm3":volume,
+            "volume_basis":"Original: signed closed-mesh volume magnitude, additive for separate shells. Remaining: closed cut-mesh volume magnitude.",
+            "output_triangles":len(obj.data.loop_triangles),"warnings":warnings,
+            "meaning":"Geometric intersection of the modeled mesh; not strength, mass, or measured print behavior."}
+
+
 def turntable_angles(frame_count, start_degrees):
     if isinstance(frame_count, bool) or not isinstance(frame_count, int) or not 1 <= frame_count <= 10000:
         raise ValueError("frame_count outside 1..10000")
@@ -130,10 +225,30 @@ def rotation_envelope(points):
     return {"center": center, "radius": radius, "height": high[2] - low[2], "bottom": low[2]}
 
 
-def bead_smooth_flags(triangles, layout):
+def bead_smooth_flags(triangles, layout, side_ranges=None):
     """Only the explicitly tagged Rust producer promises side/side/start/end quads."""
     if layout is None:
         return [False] * len(triangles)
+    if layout == "joined_stadium_v1":
+        if not isinstance(side_ranges,list) or not side_ranges:
+            raise ValueError("joined_stadium_v1 requires explicit bead_side_face_ranges")
+        flags = [False]*len(triangles)
+        previous_end = 0
+        for face_range in side_ranges:
+            if (not isinstance(face_range,list) or len(face_range) != 2
+                    or any(type(value) is not int for value in face_range)):
+                raise ValueError("joined bead side range must contain two integers")
+            start,end = face_range
+            if start < previous_end or start < 0 or end > len(triangles) or end <= start or (end-start)%64:
+                raise ValueError("joined bead side ranges overlap or exceed the declared mesh")
+            for index in range(start,end,2):
+                a,b,d = triangles[index]
+                aa,dd,c = triangles[index+1]
+                if aa != a or dd != d or len({a,b,c,d}) != 4 or b-a != d-c or b-a not in (1,-31):
+                    raise ValueError("joined side faces do not match the 32-vertex ring contract")
+                flags[index:index+2] = [True,True]
+            previous_end = end
+        return flags
     if layout != "independent_stadium_v1" or len(triangles) % 4:
         raise ValueError("unsupported or incomplete independent_stadium_v1 layout")
     flags = []
@@ -152,6 +267,66 @@ def bead_smooth_flags(triangles, layout):
 def studio_power(extent, nominal_power):
     # Lights are centimeters away: metre-scale default wattages overexpose them.
     return nominal_power * 0.01 * (extent / 0.1) ** 2
+
+
+def default_camera_half_angle(width, height):
+    """70 mm lens / 36 mm horizontal sensor; fit the smaller image angle."""
+    return math.atan(36.0 / (2*70.0) * min(1.0, height/width))
+
+
+def crease_edges(vertices, triangles, crease_degrees=35):
+    """Exact-coordinate topology, solely for visible design-edge overlay."""
+    canonical = {}
+    ids = []
+    for index, point in enumerate(vertices):
+        ids.append(canonical.setdefault(tuple(point), index))
+    edges = {}
+    threshold = math.cos(math.radians(crease_degrees))
+    for face in triangles:
+        a, b, c = (vertices[i] for i in face)
+        u, v = ([b[i]-a[i] for i in range(3)], [c[i]-a[i] for i in range(3)])
+        normal = (u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0])
+        length = math.sqrt(sum(value*value for value in normal))
+        if length == 0:
+            continue
+        normal = tuple(value/length for value in normal)
+        for i, j in ((0,1),(1,2),(2,0)):
+            key = tuple(sorted((ids[face[i]], ids[face[j]])))
+            if key not in edges:
+                edges[key] = [normal, 1, False]
+            else:
+                prior = edges[key]
+                prior[1] += 1
+                prior[2] = prior[2] or sum(x*y for x,y in zip(prior[0],normal)) < threshold
+    return [edge for edge, (_, count, sharp) in edges.items() if count != 2 or sharp]
+
+
+def add_design_edges(vertices, triangles, displayed_positions, pixel_mm, scene):
+    import bpy
+    edges = crease_edges(vertices, triangles)
+    if len(edges) > 200_000:
+        raise ValueError("diagram design-edge budget exceeded (200000); simplify input before diagram export")
+    curves = bpy.data.curves.new("DesignEdges", "CURVE")
+    curves.dimensions = "3D"
+    curves.resolution_u = 1
+    curves.bevel_depth = max(pixel_mm * 0.0004, 0.00000001)
+    curves.bevel_resolution = 0
+    curves.resolution_u = 1
+    for a, b in edges:
+        spline = curves.splines.new("POLY")
+        spline.points.add(1)
+        spline.points[0].co = (*displayed_positions[a], 1)
+        spline.points[1].co = (*displayed_positions[b], 1)
+    edge_object = bpy.data.objects.new("DesignEdges", curves)
+    scene.collection.objects.link(edge_object)
+    material = bpy.data.materials.new("DesignEdgeInk")
+    material.use_nodes = True
+    material.node_tree.nodes.clear()
+    emission = material.node_tree.nodes.new("ShaderNodeEmission")
+    emission.inputs["Color"].default_value = (0.018, 0.022, 0.03, 1)
+    output = material.node_tree.nodes.new("ShaderNodeOutputMaterial")
+    material.node_tree.links.new(emission.outputs[0], output.inputs["Surface"])
+    curves.materials.append(material)
 
 
 def apply_layer_appearance(material, mesh, source_positions_mm, spec):
@@ -233,7 +408,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     import bpy
     from mathutils import Euler, Vector, Matrix
     vertices, triangles = read_mesh(spec["mesh_path"])
-    smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout")) if spec["geometry_kind"] == "beads" else None
+    smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout"), spec.get("bead_side_face_ranges")) if spec["geometry_kind"] == "beads" else None
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     for block in list(bpy.data.meshes):
@@ -242,7 +417,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     for block in list(bpy.data.materials):
         if not block.users:
             bpy.data.materials.remove(block)
-    for collection in (bpy.data.cameras, bpy.data.lights):
+    for collection in (bpy.data.cameras, bpy.data.lights, bpy.data.curves):
         for block in list(collection):
             if not block.users:
                 collection.remove(block)
@@ -295,7 +470,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     preset = spec.get("material_preset", "matte_pla")
     if preset == "silk_pla":
         bsdf.inputs["Metallic"].default_value = 0.18
-        bsdf.inputs["Anisotropic IOR Level"].default_value = 0.65
+        bsdf.inputs["Anisotropic"].default_value = 0.65
     elif preset == "glossy_plastic":
         bsdf.inputs["Coat Weight"].default_value = 0.35
         bsdf.inputs["Coat Roughness"].default_value = 0.12
@@ -312,6 +487,10 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     obj.data.materials.append(material)
     if spec.get("layer_appearance", False):
         apply_layer_appearance(material, mesh, vertices, spec)
+    section_analysis = None
+    if spec.get("section") is not None:
+        section_analysis = apply_section(obj,spec["section"],rotation,(cx,cy),bottom,
+                                         max(envelope["radius"]*2,envelope["height"],0.001),spec["geometry_kind"])
     radius = envelope["radius"]
     height = envelope["height"]
     sphere_radius = max(math.hypot(radius, height * 0.5), 0.0001)
@@ -322,7 +501,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     camera = bpy.data.objects.new("Camera", camera_data)
     scene.collection.objects.link(camera)
     scene.camera = camera
-    half_angle = math.atan(camera_data.sensor_width / (2 * camera_data.lens))
+    half_angle = default_camera_half_angle(scene.render.resolution_x, scene.render.resolution_y)
     distance = sphere_radius / math.sin(half_angle) * 1.10
     direction = Vector((1.25, -1.7, 1.0)).normalized()
     camera.location = target + direction * distance
@@ -345,8 +524,21 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         camera_data.lens = camera_data.sensor_height / (2 * math.tan(math.radians(chosen["vertical_fov_degrees"]) / 2))
         camera_data.clip_start = max(0.000001, distance * 0.0001)
         camera_data.clip_end = max(distance * 100, sphere_radius * 100)
+        if spec.get("fit_turntable", False):
+            target = Vector((0, 0, envelope["height"] * 0.5))
+            half = math.radians(chosen["vertical_fov_degrees"]) * 0.5
+            aspect = scene.render.resolution_x / scene.render.resolution_y
+            half = math.atan(math.tan(half) * min(aspect, 1))
+            distance = sphere_radius / math.sin(half) * 1.1
+            camera.location = target + direction * distance
+            camera_data.ortho_scale = 2 * sphere_radius * 1.1 / min(aspect, 1)
+            camera_data.clip_start = max(0.000001, distance * 0.0001)
+            camera_data.clip_end = distance * 100
     extent = max(radius * 2, height, 0.001)
     studio = spec.get("studio_preset", "light")
+    if studio == "diagram" and spec["geometry_kind"] == "original":
+        pixel_mm = spec.get("camera", {}).get("ortho_span_mm", extent * 1000) / scene.render.resolution_y
+        add_design_edges(vertices, triangles, points, pixel_mm, scene)
     if not transparent and studio != "diagram":
         bpy.ops.mesh.primitive_plane_add(size=extent * 200, location=(0, 0, -0.00001))
         floor = bpy.context.object
@@ -384,4 +576,4 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
             digest.update(chunk)
     return obj, {"geometry_hash": digest.hexdigest(), "vertices": len(vertices),
                  "triangles": len(triangles), "bounds_m": envelope,
-                 "device": device_info, "warnings": spec["warnings"]}
+                 "device": device_info, "warnings": spec["warnings"],"section_analysis":section_analysis}

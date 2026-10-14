@@ -110,6 +110,8 @@ def render(request):
     angles = turntable_angles(request.get("frame_count", 80) if mode == "turntable" else 1,
                               request.get("start_angle_degrees", 0.0))
     spec = load_scene_spec(request["scene_path"])
+    if mode == "turntable":
+        spec["fit_turntable"] = True
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = [output_dir / (f"frame_{i:04d}.png" if mode == "turntable" else "still.png") for i in range(len(angles))]
     # Initial worker refuses overwrites; the controller owns unique job directories.

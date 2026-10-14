@@ -62,6 +62,19 @@ class MeshTests(unittest.TestCase):
 
 
 class SceneTests(unittest.TestCase):
+    def test_section_contract_requires_physical_plane(self):
+        valid={"axis":0,"position_mm":2.5,"keep_positive":True,"cap":True}
+        scene.validate_section(valid)
+        for key,value in (("axis",3),("position_mm",float("nan")),("cap","yes"),("keep_positive",0)):
+            with self.assertRaises(ValueError):scene.validate_section(dict(valid,**{key:value}))
+
+    def test_diagram_edges_exclude_coplanar_triangle_diagonal(self):
+        vertices=[(0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.)]
+        edges=scene.crease_edges(vertices,[(0,1,2),(0,2,3)])
+        self.assertEqual(len(edges),4)
+        self.assertNotIn((0,2),edges)
+        self.assertNotIn((2,0),edges)
+
     def test_camera_rejects_parallel_up_and_invalid_projection(self):
         valid = dict(target_mm=[0, 0, 5], direction=[0, -1, 1], up=[0, 0, 1],
                      projection="perspective", distance_mm=50, vertical_fov_degrees=35, ortho_span_mm=20)
@@ -126,6 +139,29 @@ class SceneTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_default_camera_accounts_for_the_narrower_panel_dimension(self):
+        square = scene.default_camera_half_angle(128,128)
+        wide = scene.default_camera_half_angle(128,96)
+        self.assertLess(wide,square)
+        self.assertAlmostEqual(math.tan(wide)/math.tan(square),96/128)
+        self.assertEqual(scene.default_camera_half_angle(96,128),square)
+
+    def test_joined_ranges_smooth_sides_only_and_reject_bad_contract(self):
+        triangles = [(i, (i+1)%32, 32+(i+1)%32) for i in range(32)]
+        faces = []
+        for i, face in enumerate(triangles):
+            faces.extend((face, (i, 32+(i+1)%32,32+i)))
+        faces.extend([(64,1,0),(65,32,33)])
+        flags = scene.bead_smooth_flags(faces,"joined_stadium_v1",[[0,64]])
+        self.assertEqual(flags,[True]*64+[False]*2)
+        for ranges in (None, [[0,65]], [[0,64],[0,64]], [[0,128]], [[True,64]]):
+            with self.assertRaises(ValueError):
+                scene.bead_smooth_flags(faces,"joined_stadium_v1",ranges)
+        broken = faces.copy()
+        broken[1] = (0,33,99)
+        with self.assertRaises(ValueError):
+            scene.bead_smooth_flags(broken,"joined_stadium_v1",[[0,64]])
+
     def test_reuse_requires_matching_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

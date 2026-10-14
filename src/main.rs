@@ -68,11 +68,25 @@ fn new_directory(path: &Path) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h" | "help") {
+    if args.is_empty() {
+        return turninator::app::run(Default::default());
+    }
+    if matches!(args[0].as_str(), "--help" | "-h" | "help") {
         println!("{HELP}");
         return Ok(());
     }
     match args[0].as_str() {
+        "gui" => {
+            let values = options(&args[1..])?;
+            if values.keys().any(|key| !["--open", "--data-dir", "--smoke-output"].contains(&key.as_str())) {
+                return Err("gui accepts --open, --data-dir, and --smoke-output".into());
+            }
+            turninator::app::run(turninator::app::LaunchOptions {
+                open: values.get("--open").map(PathBuf::from),
+                data_directory: values.get("--data-dir").map(PathBuf::from),
+                smoke_output: values.get("--smoke-output").map(PathBuf::from),
+            })
+        }
         "fixture" => {
             let values = options(&args[1..])?;
             if values.keys().any(|key| key != "--out") {
