@@ -1,15 +1,30 @@
 use super::{
     beads::{MAX_BEAD_SEGMENTS, validate_segment},
-    schedule::{MAX_LAYERS, validate_height},
+    schedule::{LayerSchedule, MAX_LAYERS, validate_height},
 };
 use crate::{Result, print::beads::BeadSegment};
 use std::{collections::BTreeMap, f64::consts::PI};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GcodeDialect {
+    #[default]
+    Marlin,
+    Klipper,
+}
 
 #[derive(Clone, Debug)]
 pub struct ParseOptions {
     pub layer_height_mm: f64,
     pub first_layer_height_mm: f64,
     pub filament_diameter_mm: f64,
+    pub dialect: GcodeDialect,
+    pub allow_arcs: bool,
+    /// Explicit normalized toolchange contract: shared XYZ frame/global E counter,
+    /// no implicit tool offset, parking, purge, script or firmware motion.
+    pub allow_tool_changes: bool,
+    pub chord_error_mm: f64,
+    pub homing_position_mm: Option<[f64; 3]>,
+    pub layer_schedule: Option<LayerSchedule>,
 }
 
 impl Default for ParseOptions {
@@ -18,6 +33,12 @@ impl Default for ParseOptions {
             layer_height_mm: 0.2,
             first_layer_height_mm: 0.2,
             filament_diameter_mm: 1.75,
+            dialect: GcodeDialect::Marlin,
+            allow_arcs: false,
+            allow_tool_changes: false,
+            chord_error_mm: 0.02,
+            homing_position_mm: None,
+            layer_schedule: None,
         }
     }
 }
@@ -31,6 +52,18 @@ pub struct ToolpathData {
 pub fn parse_gcode(text: &str, options: &ParseOptions) -> Result<ToolpathData> {
     validate_height(options.layer_height_mm)?;
     validate_height(options.first_layer_height_mm)?;
+    if !options.chord_error_mm.is_finite() || !(0.001..=1.0).contains(&options.chord_error_mm) {
+        return Err("arc chord error must be in 0.001..=1 mm".into());
+    }
+    if options
+        .homing_position_mm
+        .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1e7))
+    {
+        return Err("homing position must be finite and within coordinate budget".into());
+    }
+    if let Some(schedule) = &options.layer_schedule {
+        LayerSchedule::explicit(schedule.boundaries_mm.clone())?;
+    }
     if !options.filament_diameter_mm.is_finite()
         || !(0.1..=10.).contains(&options.filament_diameter_mm)
     {
@@ -43,10 +76,23 @@ pub fn parse_gcode(text: &str, options: &ParseOptions) -> Result<ToolpathData> {
     let mut result = ToolpathData {
         segments: Vec::new(),
         warnings: vec![format!(
-            "Estimated stadium beads, not physical deposition prediction. Assumed filament diameter {} mm; default first/later heights {}/{} mm when HEIGHT metadata is absent. Initial position/counters are zero and positioning is absolute; supported single-tool Marlin subset only. Independent capped segments overlap at corners.",
+            "Estimated stadium beads, not physical deposition prediction. Assumed filament diameter {} mm; default first/later heights {}/{} mm when HEIGHT metadata is absent. Initial position/counters are zero and positioning is absolute; only the explicitly selected firmware subset is interpreted.",
             options.filament_diameter_mm, options.first_layer_height_mm, options.layer_height_mm
         )],
     };
+    result.warnings.push(format!(
+        "Selected {:?} dialect; arc support {} with <= {} mm chord error.",
+        options.dialect, options.allow_arcs, options.chord_error_mm
+    ));
+    if options.allow_tool_changes {
+        result.warnings.push("Tool changes assume normalized shared XYZ coordinates and a global E counter; implicit tool offsets, parking, purge and macros are not simulated. Retraction debt is tracked per tool.".into());
+    }
+    if let Some(position) = options.homing_position_mm {
+        result.warnings.push(format!("G28 homing uses explicitly supplied physical position {position:?} mm and resets selected-axis coordinate offsets."));
+    }
+    if options.layer_schedule.is_some() {
+        result.warnings.push("Explicit adaptive layer boundaries supplied; every depositing Z must match a boundary. Heights are not automatically inferred.".into());
+    }
     for (index, line) in text.lines().enumerate() {
         let source_line = index + 1;
         if source_line > 2_000_000 || line.len() > 16_384 {
@@ -108,6 +154,8 @@ struct State {
     deposition_z: Option<f64>,
     layer_index: u32,
     prime_warning: bool,
+    tool: u32,
+    tool_debts: BTreeMap<u32, f64>,
 }
 
 impl Default for State {
@@ -126,6 +174,8 @@ impl Default for State {
             deposition_z: None,
             layer_index: 0,
             prime_warning: false,
+            tool: 0,
+            tool_debts: BTreeMap::new(),
         }
     }
 }
@@ -136,19 +186,19 @@ impl State {
             return Ok(());
         };
         match key.trim() {
-            "HEIGHT" => {
+            "HEIGHT" | "LAYER_HEIGHT" | "layer_height" => {
                 let h = value.trim().parse::<f64>()?;
                 validate_height(h)?;
                 self.height = Some(h);
             }
-            "WIDTH" => {
+            "WIDTH" | "LINE_WIDTH" | "line_width" => {
                 let w = value.trim().parse::<f64>()?;
                 if !w.is_finite() || w <= 0. || w > 10. {
                     return Err("invalid WIDTH metadata in millimeters".into());
                 }
                 self.width = Some(w);
             }
-            "TYPE" => self.feature = value.trim().to_string(),
+            "TYPE" | "FEATURE" | "feature" => self.feature = value.trim().to_string(),
             _ => {}
         }
         Ok(())
@@ -164,9 +214,11 @@ impl State {
         result: &mut ToolpathData,
     ) -> Result<()> {
         match (family,number) {
-            ('G',0|1)=> { allowed(p,"XYZEF")?; self.motion(p,line,options,result)?; }
-            ('G',20|21)=> { allowed(p,"")?; self.unit=if number==20 {25.4} else {1.}; }
-            ('G',90|91)=> { allowed(p,"")?;self.xyz_absolute=number==90;self.e_override=None; }
+            ('G',0|1)=> { allowed(p,"XYZEF")?; self.motion(p,line,options,result,None)?; }
+            ('G',2|3) if options.allow_arcs=>{allowed(p,"XYZEFIJR")?;self.arc_motion(p,number==2,line,options,result)?;}
+            ('G',17)=>allowed(p,"")?,
+            ('G',20|21)=> { allowed(p,"")?;if number==20 && options.dialect==GcodeDialect::Klipper {return Err("Klipper does not support G20 inch mode".into());}self.unit=if number==20 {25.4} else {1.}; }
+            ('G',90|91)=> { allowed(p,"")?;self.xyz_absolute=number==90;if options.dialect==GcodeDialect::Marlin {self.e_override=None;} }
             ('M',82|83)=> { allowed(p,"")?;self.e_override=Some(number==82); }
             ('G',92)=> {
                 allowed(p,"XYZE")?;
@@ -176,14 +228,16 @@ impl State {
                 }
                 if let Some(value)=p.get(&'E') { self.e_position=value*self.unit; }
             }
-            ('T',0)=> { allowed(p,"")?; }
-            ('M',104|109)=> { allowed(p,"SRT")?; if p.get(&'T').is_some_and(|&t|t!=0.) { return Err("only tool 0 is supported".into()); } }
+            ('T',0) if !options.allow_tool_changes=> { allowed(p,"")?; }
+            ('T',_) if options.allow_tool_changes && number<16=> { allowed(p,"")?;self.tool_debts.insert(self.tool,self.retract_debt);self.tool=number;self.retract_debt = *self.tool_debts.get(&number).unwrap_or(&0.); }
+            ('G',28) if options.homing_position_mm.is_some()=>{allowed(p,"XYZ")?;if p.values().any(|&v|v!=0.) {return Err("homing axis flags must have no value or zero".into());}let home=options.homing_position_mm.unwrap();for (i,axis) in ['X','Y','Z'].into_iter().enumerate() {if p.is_empty() || p.contains_key(&axis) {self.position[i]=home[i];self.offsets[i]=0.;}}}
+            ('M',104|109)=> { allowed(p,"SRT")?; if p.get(&'T').is_some_and(|&t|t.fract()!=0. || !(0. ..16.).contains(&t) || (t!=0. && !options.allow_tool_changes)) { return Err("temperature command selects an unsupported tool".into()); } }
             ('M',140|190)=>allowed(p,"SR")?,
             ('M',106)=>allowed(p,"SP")?,
             ('M',107)=>allowed(p,"P")?,
             ('M',105|114|115|400)=>allowed(p,"")?,
             ('G',4)=>allowed(p,"PS")?,
-            _=>return Err(format!("unsupported command {family}{number}; geometry-affecting modes, homing, arcs, volumetric extrusion, tools and macros are not guessed").into()),
+            _=>return Err(format!("unsupported command {family}{number}; modes, homing, arcs, volumetric extrusion, tools and macros require an explicit supported contract").into()),
         }
         if self
             .position
@@ -198,12 +252,160 @@ impl State {
         Ok(())
     }
 
+    fn e_absolute(&self, options: &ParseOptions) -> bool {
+        match options.dialect {
+            GcodeDialect::Marlin => self.e_override.unwrap_or(self.xyz_absolute),
+            GcodeDialect::Klipper => self.xyz_absolute && self.e_override.unwrap_or(true),
+        }
+    }
+
+    fn arc_motion(
+        &mut self,
+        p: &BTreeMap<char, f64>,
+        clockwise: bool,
+        line: usize,
+        options: &ParseOptions,
+        result: &mut ToolpathData,
+    ) -> Result<()> {
+        let start = self.position;
+        let end: [f64; 3] = std::array::from_fn(|i| {
+            p.get(&['X', 'Y', 'Z'][i]).map_or(start[i], |value| {
+                if self.xyz_absolute {
+                    value * self.unit + self.offsets[i]
+                } else {
+                    start[i] + value * self.unit
+                }
+            })
+        });
+        if (end[2] - start[2]).abs() > 1e-8 {
+            return Err("only planar XY arcs are supported; helical/vase arcs are rejected".into());
+        }
+        if end.iter().any(|v| !v.is_finite() || v.abs() > 1e7) {
+            return Err("arc endpoint exceeds coordinate budget".into());
+        }
+        let has_center = p.contains_key(&'I') || p.contains_key(&'J');
+        if has_center == p.contains_key(&'R') {
+            return Err("arc requires either I/J center offsets or R, never both".into());
+        }
+        let center = if let Some(r) = p.get(&'R') {
+            let radius = r * self.unit;
+            let dx = end[0] - start[0];
+            let dy = end[1] - start[1];
+            let chord = dx.hypot(dy);
+            if chord <= 1e-10 || radius == 0. || chord > 2. * radius.abs() {
+                return Err("invalid R arc radius/endpoints; full circles require I/J".into());
+            }
+            let offset = (radius * radius - chord * chord * 0.25).max(0.).sqrt();
+            let sign = if clockwise ^ (radius < 0.) { -1. } else { 1. };
+            [
+                (start[0] + end[0]) * 0.5 - sign * dy / chord * offset,
+                (start[1] + end[1]) * 0.5 + sign * dx / chord * offset,
+            ]
+        } else {
+            [
+                start[0] + p.get(&'I').copied().unwrap_or(0.) * self.unit,
+                start[1] + p.get(&'J').copied().unwrap_or(0.) * self.unit,
+            ]
+        };
+        if center.iter().any(|v| !v.is_finite() || v.abs() > 1e7) {
+            return Err("arc center exceeds coordinate budget".into());
+        }
+        let radius = (start[0] - center[0]).hypot(start[1] - center[1]);
+        let end_radius = (end[0] - center[0]).hypot(end[1] - center[1]);
+        if radius <= 1e-10
+            || !radius.is_finite()
+            || (radius - end_radius).abs() > options.chord_error_mm * 0.25
+        {
+            return Err(
+                "arc endpoints disagree with the center radius beyond the error budget".into(),
+            );
+        }
+        let first = (start[1] - center[1]).atan2(start[0] - center[0]);
+        let last = (end[1] - center[1]).atan2(end[0] - center[0]);
+        let mut sweep = if clockwise {
+            -(first - last).rem_euclid(2. * PI)
+        } else {
+            (last - first).rem_euclid(2. * PI)
+        };
+        if start[0] == end[0] && start[1] == end[1] {
+            sweep = if clockwise { -2. * PI } else { 2. * PI };
+        }
+        if sweep.abs() < 1e-12 {
+            return Err("arc sweep is too small to resolve".into());
+        }
+        // Half the error budget is reserved for endpoint radius rounding.
+        let maximum_angle =
+            (2. * (1. - (options.chord_error_mm * 0.5 / radius).min(1.)).acos()).min(PI / 8.);
+        if maximum_angle <= 0. {
+            return Err("arc exceeds numeric subdivision precision".into());
+        }
+        let steps = (sweep.abs() / maximum_angle).ceil() as usize;
+        if steps == 0
+            || steps > MAX_BEAD_SEGMENTS
+            || result.segments.len() + steps > MAX_BEAD_SEGMENTS
+        {
+            return Err("arc subdivision exceeds bead budget".into());
+        }
+        let initial_e = self.e_position;
+        let total_e = p.get(&'E').map_or(0., |value| {
+            if self.e_absolute(options) {
+                value * self.unit - initial_e
+            } else {
+                value * self.unit
+            }
+        });
+        if !total_e.is_finite() || total_e.abs() > 1e9 {
+            return Err("arc extrusion exceeds budget".into());
+        }
+        let length = radius * sweep.abs() / steps as f64;
+        for index in 1..=steps {
+            let progress = index as f64 / steps as f64;
+            let angle = first + sweep * progress;
+            let point = if index == steps {
+                end
+            } else {
+                [
+                    center[0] + radius * angle.cos(),
+                    center[1] + radius * angle.sin(),
+                    start[2],
+                ]
+            };
+            let mut command = BTreeMap::new();
+            for (axis, key) in ['X', 'Y', 'Z'].into_iter().enumerate() {
+                command.insert(
+                    key,
+                    if self.xyz_absolute {
+                        (point[axis] - self.offsets[axis]) / self.unit
+                    } else {
+                        (point[axis] - self.position[axis]) / self.unit
+                    },
+                );
+            }
+            if p.contains_key(&'E') {
+                command.insert(
+                    'E',
+                    if self.e_absolute(options) {
+                        (initial_e + total_e * progress) / self.unit
+                    } else {
+                        total_e / steps as f64 / self.unit
+                    },
+                );
+            }
+            if let Some(feed) = p.get(&'F') {
+                command.insert('F', *feed);
+            }
+            self.motion(&command, line, options, result, Some(length))?;
+        }
+        Ok(())
+    }
+
     fn motion(
         &mut self,
         p: &BTreeMap<char, f64>,
         line: usize,
         options: &ParseOptions,
         result: &mut ToolpathData,
+        length_override: Option<f64>,
     ) -> Result<()> {
         if p.get(&'F').is_some_and(|&f| f <= 0.) {
             return Err("feed rate must be positive".into());
@@ -220,7 +422,7 @@ impl State {
         }
         let delta_e = if let Some(value) = p.get(&'E') {
             let commanded = value * self.unit;
-            if self.e_override.unwrap_or(self.xyz_absolute) {
+            if self.e_absolute(options) {
                 let delta = commanded - self.e_position;
                 self.e_position = commanded;
                 delta
@@ -247,7 +449,8 @@ impl State {
         if (self.position[2] - old[2]).abs() > 1e-8 {
             return Err("nonplanar depositing move is unsupported".into());
         }
-        let length = (self.position[0] - old[0]).hypot(self.position[1] - old[1]);
+        let length = length_override
+            .unwrap_or_else(|| (self.position[0] - old[0]).hypot(self.position[1] - old[1]));
         if length <= 1e-10 {
             if !self.prime_warning {
                 result.warnings.push(
@@ -270,11 +473,31 @@ impl State {
         if self.layer_index as usize >= MAX_LAYERS {
             return Err("deposition layer budget exceeded".into());
         }
-        let h = self.height.unwrap_or(if self.layer_index == 0 {
-            options.first_layer_height_mm
+        let schedule_height = if let Some(schedule) = &options.layer_schedule {
+            let boundary = schedule
+                .boundaries_mm
+                .iter()
+                .position(|&boundary| (boundary - z).abs() <= 1e-7)
+                .ok_or("depositing Z does not match an explicit layer boundary")?;
+            if boundary == 0 {
+                return Err("deposition at the build bed is unsupported".into());
+            }
+            self.layer_index = (boundary - 1) as u32;
+            let height = schedule.boundaries_mm[boundary] - schedule.boundaries_mm[boundary - 1];
+            if self.height.is_some_and(|h| (h - height).abs() > 1e-7) {
+                return Err("HEIGHT metadata conflicts with explicit layer schedule".into());
+            }
+            Some(height)
         } else {
-            options.layer_height_mm
-        });
+            None
+        };
+        let h = schedule_height
+            .or(self.height)
+            .unwrap_or(if self.layer_index == 0 {
+                options.first_layer_height_mm
+            } else {
+                options.layer_height_mm
+            });
         if z < h - 1e-8 {
             return Err("estimated bead extends below the build bed; provide correct first-layer height/HEIGHT metadata".into());
         }
@@ -291,7 +514,7 @@ impl State {
             volume_mm3: volume,
             source_line: line,
             feature: self.feature.clone(),
-            tool: 0,
+            tool: self.tool,
             layer_index: self.layer_index,
             width_source: if self.width.is_some() {
                 "WIDTH metadata"
@@ -299,7 +522,9 @@ impl State {
                 "extrusion volume and assumed filament diameter"
             }
             .into(),
-            height_source: if self.height.is_some() {
+            height_source: if schedule_height.is_some() {
+                "configured explicit layer schedule"
+            } else if self.height.is_some() {
                 "HEIGHT metadata"
             } else if self.layer_index == 0 {
                 "configured first layer"
@@ -362,6 +587,13 @@ fn tokenize(code: &str) -> Result<Vec<(char, f64)>> {
             }
         }
         if digits == 0 {
+            if result.first() == Some(&('G', 28.))
+                && matches!(key, b'X' | b'Y' | b'Z')
+                && i == start
+            {
+                result.push((key as char, 0.));
+                continue;
+            }
             return Err(format!("word {} requires a decimal number", key as char).into());
         }
         let value = code[start..i].parse::<f64>()?;

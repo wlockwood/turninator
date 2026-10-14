@@ -159,6 +159,7 @@ fn run() -> Result<()> {
                             layer_height_mm: height,
                             first_layer_height_mm: first,
                             filament_diameter_mm: number(&values, "--filament-diameter", 1.75)?,
+                            ..Default::default()
                         },
                     )?;
                     let count = parsed.segments.len();

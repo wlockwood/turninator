@@ -235,6 +235,7 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
                     layer_height_mm: options.layer_height_mm,
                     first_layer_height_mm: options.first_layer_height_mm,
                     filament_diameter_mm: options.filament_diameter_mm,
+                    ..Default::default()
                 },
             )?;
             let count = parsed.segments.len();
