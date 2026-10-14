@@ -301,7 +301,10 @@ pub fn run_export(
                 1
             },
     )?;
-    let recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
+    let mut recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
+    if request.kind == ExportKind::Diagram {
+        recipe["diagram_recipe"] = json!({"version":2,"views":["TOP","ISO","FRONT","RIGHT"],"dimension":"largest_visible_projected_extent_mm","framing_padding":1.4});
+    }
     let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&recipe)?));
     // Encoding changes must be recorded without invalidating compatible PNGs.
     let encoding_recipe = match request.kind {
@@ -651,8 +654,9 @@ fn unit(a: [f64; 3]) -> [f64; 3] {
     a.map(|v| v / d)
 }
 pub fn diagram_cameras(dimensions: [f64; 3], width: u32, height: u32) -> [Value; 4] {
-    let directions = [[0., -1., 0.], [1., 0., 0.], [0., 0., 1.], [1., -1., 1.]];
-    let ups = [[0., 0., 1.], [0., 0., 1.], [0., 1., 0.], [0., 0., 1.]];
+    // Row-major sheet: TOP / ISO, FRONT / RIGHT.
+    let directions = [[0., 0., 1.], [1., -1., 1.], [0., -1., 0.], [1., 0., 0.]];
+    let ups = [[0., 1., 0.], [0., 0., 1.], [0., 0., 1.], [0., 0., 1.]];
     let mut span = 0.0_f64;
     for i in 0..4 {
         let direction = unit(directions[i]);
@@ -672,7 +676,8 @@ pub fn diagram_cameras(dimensions: [f64; 3], width: u32, height: u32) -> [Value;
             .max(projected_height)
             .max(projected_width * height as f64 / width as f64);
     }
-    span = (span * 1.1).max(0.001);
+    // Reserve the same annotation clearance in every view while retaining shared scale.
+    span = (span * 1.4).max(0.001);
     let distance = dimensions
         .iter()
         .map(|d| d * d)
@@ -683,6 +688,121 @@ pub fn diagram_cameras(dimensions: [f64; 3], width: u32, height: u32) -> [Value;
     std::array::from_fn(
         |i| json!({"target_mm":[0.,0.,dimensions[2]*0.5],"direction":directions[i],"up":ups[i],"projection":"orthographic","vertical_fov_degrees":35.,"ortho_span_mm":span,"distance_mm":distance}),
     )
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct DiagramDimension {
+    pub min_mm: [f64; 2],
+    pub max_mm: [f64; 2],
+    /// 0 is horizontal; 1 is vertical in the view's camera plane.
+    pub axis: usize,
+    pub length_mm: f64,
+}
+
+/// Measure referenced vertices, not projected corners of the 3D bounding box.
+/// Coordinates are relative to the full-source camera target, even for a partial build.
+pub fn diagram_measurements(
+    mesh: &crate::mesh::Mesh,
+    cameras: &[Value; 4],
+    visible_triangles: Option<&[bool]>,
+) -> Result<[Option<DiagramDimension>; 4]> {
+    let bounds = mesh.bounds()?;
+    if visible_triangles.is_some_and(|mask| mask.len() != mesh.triangles.len()) {
+        return Err("dimension visibility must match source triangles".into());
+    }
+    let center = std::array::from_fn::<_, 3, _>(|i| (bounds.min[i] + bounds.max[i]) * 0.5);
+    let mut referenced = vec![false; mesh.positions.len()];
+    for (index, triangle) in mesh.triangles.iter().enumerate() {
+        if visible_triangles.is_none_or(|mask| mask[index]) {
+            for &vertex in triangle {
+                referenced[vertex as usize] = true;
+            }
+        }
+    }
+    let mut output = [None; 4];
+    for (index, camera) in cameras.iter().enumerate() {
+        let direction: [f64; 3] = serde_json::from_value(camera["direction"].clone())?;
+        let up: [f64; 3] = serde_json::from_value(camera["up"].clone())?;
+        if direction.iter().chain(&up).any(|v| !v.is_finite())
+            || dot(direction, direction) == 0.
+            || dot(cross(up, direction), cross(up, direction)) == 0.
+        {
+            return Err("dimension camera needs finite independent direction/up vectors".into());
+        }
+        let direction = unit(direction);
+        let right = unit(cross(up, direction));
+        let up = cross(direction, right);
+        let mut min_mm = [f64::INFINITY; 2];
+        let mut max_mm = [f64::NEG_INFINITY; 2];
+        for (point, used) in mesh.positions.iter().zip(&referenced) {
+            if !used {
+                continue;
+            }
+            let offset = std::array::from_fn(|i| point[i] - center[i]);
+            for (axis, value) in [dot(offset, right), dot(offset, up)]
+                .into_iter()
+                .enumerate()
+            {
+                min_mm[axis] = min_mm[axis].min(value);
+                max_mm[axis] = max_mm[axis].max(value);
+            }
+        }
+        if min_mm[0].is_finite() {
+            let axis = usize::from(max_mm[1] - min_mm[1] > max_mm[0] - min_mm[0]);
+            output[index] = Some(DiagramDimension {
+                min_mm,
+                max_mm,
+                axis,
+                length_mm: max_mm[axis] - min_mm[axis],
+            });
+        }
+    }
+    Ok(output)
+}
+
+fn diagram_stage_visibility(
+    mesh: &crate::mesh::Mesh,
+    scene: &Value,
+    stage: Option<BuildStage>,
+) -> Result<Option<Vec<bool>>> {
+    let Some(stage) = stage else {
+        return Ok(None);
+    };
+    let ranges = scene["layer_face_ranges"]
+        .as_array()
+        .ok_or("build-stage dimensions require layer faces")?;
+    let layer_ids = ranges
+        .iter()
+        .map(|r| {
+            r["layer_index"]
+                .as_u64()
+                .ok_or("invalid dimension layer index")
+        })
+        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()?;
+    if stage.visible_layers as usize > layer_ids.len() {
+        return Err("build stage exceeds deposited layers".into());
+    }
+    let cutoff = stage
+        .visible_layers
+        .checked_sub(1)
+        .and_then(|i| layer_ids.iter().nth(i as usize))
+        .copied();
+    let mut visible = vec![false; mesh.triangles.len()];
+    for range in ranges {
+        let start = range["start_triangle"]
+            .as_u64()
+            .ok_or("invalid dimension face start")? as usize;
+        let end = range["end_triangle"]
+            .as_u64()
+            .ok_or("invalid dimension face end")? as usize;
+        if start >= end || end > visible.len() {
+            return Err("dimension layer range exceeds source mesh".into());
+        }
+        if cutoff.is_some_and(|last| range["layer_index"].as_u64().is_some_and(|id| id <= last)) {
+            visible[start..end].fill(true);
+        }
+    }
+    Ok(Some(visible))
 }
 
 fn render_diagram(
@@ -700,12 +820,18 @@ fn render_diagram(
     let bounds = data.bounds()?;
     let dimensions = std::array::from_fn(|i| bounds.max[i] - bounds.min[i]);
     let cameras = diagram_cameras(dimensions, layout.panel_width, layout.panel_height);
+    let visibility = diagram_stage_visibility(&data, scene, request.build_stage)?;
+    let measurements = diagram_measurements(&data, &cameras, visibility.as_deref())?;
     let mut sheet = image::RgbaImage::from_pixel(
         request.size,
         request.size,
         image::Rgba([255, 255, 255, 255]),
     );
-    let labels = ["FRONT", "RIGHT", "TOP", "ISOMETRIC"];
+    let labels = ["TOP", "ISO", "FRONT", "RIGHT"];
+    write_json(
+        &directory.join("four-view-dimensions.json"),
+        &json!({"units":"mm","views":labels,"measurements":measurements}),
+    )?;
     for index in 0..4 {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
@@ -748,6 +874,15 @@ fn render_diagram(
         let x = layout.margin + (index as u32 % 2) * (layout.panel_width + layout.margin);
         let y = layout.margin
             + (index as u32 / 2) * (layout.panel_height + layout.label_height + layout.margin);
+        if let Some(dimension) = measurements[index] {
+            draw_dimension(
+                &mut panel,
+                dimension,
+                cameras[index]["ortho_span_mm"]
+                    .as_f64()
+                    .ok_or("diagram span missing")?,
+            );
+        }
         image::imageops::overlay(&mut sheet, &panel, x as i64, y as i64);
         draw_label(
             &mut sheet,
@@ -773,6 +908,92 @@ fn render_diagram(
     )
 }
 
+fn dimension_line(image: &mut image::RgbaImage, a: [i32; 2], b: [i32; 2]) {
+    let steps = (b[0] - a[0]).abs().max((b[1] - a[1]).abs()).max(1);
+    let thickness = (image.height() / 1000).max(1) as i32;
+    for step in 0..=steps {
+        let x = a[0] + ((b[0] - a[0]) as f64 * f64::from(step) / f64::from(steps)).round() as i32;
+        let y = a[1] + ((b[1] - a[1]) as f64 * f64::from(step) / f64::from(steps)).round() as i32;
+        for dy in 0..thickness {
+            for dx in 0..thickness {
+                if x + dx >= 0
+                    && y + dy >= 0
+                    && x + dx < image.width() as i32
+                    && y + dy < image.height() as i32
+                {
+                    image[((x + dx) as u32, (y + dy) as u32)] = image::Rgba([35, 40, 48, 255]);
+                }
+            }
+        }
+    }
+}
+
+fn draw_dimension(panel: &mut image::RgbaImage, dimension: DiagramDimension, span_mm: f64) {
+    let pixels_per_mm = panel.height() as f64 / span_mm;
+    let left = (panel.width() as f64 * 0.5 + dimension.min_mm[0] * pixels_per_mm).round() as i32;
+    let right = (panel.width() as f64 * 0.5 + dimension.max_mm[0] * pixels_per_mm).round() as i32;
+    let top = (panel.height() as f64 * 0.5 - dimension.max_mm[1] * pixels_per_mm).round() as i32;
+    let bottom = (panel.height() as f64 * 0.5 - dimension.min_mm[1] * pixels_per_mm).round() as i32;
+    let value = dimension.length_mm;
+    let text = if value >= 0.01 {
+        format!("{value:.2} mm")
+    } else if value >= 0.000001 {
+        format!("{value:.6} mm")
+    } else {
+        format!("{value:.2e}").replace('e', "E") + " mm"
+    };
+    let scale = (panel.height() / 180).max(1);
+    let mut label = image::RgbaImage::from_pixel(
+        text.len() as u32 * 6 * scale,
+        11 * scale,
+        image::Rgba([255; 4]),
+    );
+    let (label_width, label_height) = label.dimensions();
+    draw_label(&mut label, &text, 0, 0, label_width, label_height);
+    let gap = (panel.height() / 180).max(2) as i32;
+    let arrow = (panel.height() / 100).max(3) as i32;
+    let (label, x, y) = if dimension.axis == 0 {
+        let line_y = (bottom + gap + label_height as i32 + 2).min(panel.height() as i32 - 2);
+        dimension_line(panel, [left, line_y], [right, line_y]);
+        for (end, direction) in [(left, 1), (right, -1)] {
+            dimension_line(panel, [end, bottom + gap], [end, line_y + arrow / 2]);
+            for sign in [-1, 1] {
+                dimension_line(
+                    panel,
+                    [end, line_y],
+                    [end + direction * arrow, line_y + sign * arrow / 2],
+                );
+            }
+        }
+        (
+            label,
+            (left + right - label_width as i32) / 2,
+            line_y - label_height as i32 - 2,
+        )
+    } else {
+        let line_x = (right + gap + label_height as i32 + 2).min(panel.width() as i32 - 2);
+        dimension_line(panel, [line_x, top], [line_x, bottom]);
+        for (end, direction) in [(top, 1), (bottom, -1)] {
+            dimension_line(panel, [right + gap, end], [line_x + arrow / 2, end]);
+            for sign in [-1, 1] {
+                dimension_line(
+                    panel,
+                    [line_x, end],
+                    [line_x + sign * arrow / 2, end + direction * arrow],
+                );
+            }
+        }
+        (
+            image::imageops::rotate270(&label),
+            line_x - label_height as i32 - 2,
+            (top + bottom - label_width as i32) / 2,
+        )
+    };
+    let x = x.clamp(0, panel.width().saturating_sub(label.width()) as i32);
+    let y = y.clamp(0, panel.height().saturating_sub(label.height()) as i32);
+    image::imageops::overlay(panel, &label, i64::from(x), i64::from(y));
+}
+
 fn draw_label(image: &mut image::RgbaImage, text: &str, x: u32, y: u32, width: u32, height: u32) {
     let scale = (height / 11).max(1);
     let text_width = text.len() as u32 * 6 * scale;
@@ -795,6 +1016,20 @@ fn draw_label(image: &mut image::RgbaImage, text: &str, x: u32, y: u32, width: u
             'M' => [17, 27, 21, 21, 17, 17, 17],
             'E' => [31, 16, 16, 30, 16, 16, 31],
             'C' => [14, 17, 16, 16, 16, 17, 14],
+            '0' => [14, 17, 19, 21, 25, 17, 14],
+            '1' => [4, 12, 4, 4, 4, 4, 14],
+            '2' => [14, 17, 1, 2, 4, 8, 31],
+            '3' => [30, 1, 1, 14, 1, 1, 30],
+            '4' => [2, 6, 10, 18, 31, 2, 2],
+            '5' => [31, 16, 16, 30, 1, 1, 30],
+            '6' => [14, 16, 16, 30, 17, 17, 14],
+            '7' => [31, 1, 2, 4, 8, 8, 8],
+            '8' => [14, 17, 17, 14, 17, 17, 14],
+            '9' => [14, 17, 17, 15, 1, 1, 14],
+            '.' => [0, 0, 0, 0, 0, 12, 12],
+            'm' => [0, 0, 26, 21, 21, 21, 21],
+            '-' => [0, 0, 0, 31, 0, 0, 0],
+            '+' => [0, 4, 4, 31, 4, 4, 0],
             _ => [0; 7],
         };
         for (row, bits) in rows.iter().enumerate() {
@@ -811,6 +1046,21 @@ fn draw_label(image: &mut image::RgbaImage, text: &str, x: u32, y: u32, width: u
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    #[test]
+    fn dimension_labels_render_digits_decimal_and_millimetres() {
+        for character in "0123456789.m".chars() {
+            let mut image = image::RgbaImage::from_pixel(40, 30, image::Rgba([255; 4]));
+            super::draw_label(&mut image, &character.to_string(), 0, 0, 40, 30);
+            assert!(
+                image.pixels().any(|p| p[0] < 100),
+                "missing dimension glyph {character}"
+            );
         }
     }
 }

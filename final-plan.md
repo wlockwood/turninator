@@ -163,7 +163,7 @@ Use meaningful tests before substantive implementation, watch their expected fai
 
 ### Task 5: Complete outputs and projects
 
-- [x] Four-view shared-scale camera/edge/layout tests and real sheets, independent PNG alpha, optional MP4 from matching frames.
+- [x] Four-view shared-scale camera/edge/layout tests and real sheets: TOP / ISO above FRONT / RIGHT, with one largest visible projected dimension in mm per view; independent PNG alpha, optional MP4 from matching frames.
 - [x] Versioned projects/settings, edited pitch preservation, missing/changed source relocation, encode retry/recovery UI, cache ownership and bounded disk policy.
 - [x] Supported tool-build documentation, font/dependency notices, fresh-settings smoke and runtime checks.
 

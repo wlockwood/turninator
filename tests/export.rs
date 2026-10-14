@@ -21,8 +21,11 @@ fn four_view_layout_and_cameras_keep_one_physical_scale() {
         layout.panel_width,
         layout.panel_height,
     );
-    assert_eq!(cameras[0]["direction"], serde_json::json!([0., -1., 0.]));
-    assert_eq!(cameras[2]["up"], serde_json::json!([0., 1., 0.]));
+    assert_eq!(cameras[0]["direction"], serde_json::json!([0., 0., 1.]));
+    assert_eq!(cameras[0]["up"], serde_json::json!([0., 1., 0.]));
+    assert_eq!(cameras[1]["direction"], serde_json::json!([1., -1., 1.]));
+    assert_eq!(cameras[2]["direction"], serde_json::json!([0., -1., 0.]));
+    assert_eq!(cameras[3]["direction"], serde_json::json!([1., 0., 0.]));
     assert!(
         cameras
             .iter()

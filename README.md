@@ -18,7 +18,7 @@ Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leav
 
 - GIF defaults: 960 square, 80 frames, 20 fps, four seconds, infinite looping. The studio plays the actual encoded GIF.
 - PNG defaults: 4096 square, Cycles/OptiX, optional transparent background independent of material transmission.
-- Four-view sheets: shared-scale orthographic Front, Right, Top and Iso, design edges and labels.
+- Four-view sheets: TOP / ISO above FRONT / RIGHT at a shared orthographic scale, with design edges and one millimetre dimension per view. Each annotation measures the larger visible projected width or height; selected deposited stages use their visible geometry.
 - MP4: explicit H.264 or AV1, capability checks and verified timing. Unavailable AV1 does not silently become H.264. Matching requests reuse verified frames.
 - Section exports: full model beside a cutaway through the whole turntable; reliable caps/statistics require closed input. G-code cuts retain deposited gaps.
 - Build-up exports: complete deposited layers, including adaptive heights, combined with resin/Cycles, studio lighting, tool/feature colors, camera motion and capped or paired sections. Selected stages also export to PNGs and four-view sheets; zero layers produces an empty build.
