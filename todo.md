@@ -1,0 +1,3 @@
+- Add output file options - maybe we want to compress using AV1 or something.
+- Some kind of crazy section analysis + turntable combo. Maybe side by side?
+-

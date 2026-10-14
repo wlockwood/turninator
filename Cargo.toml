@@ -1,0 +1,9 @@
+[package]
+name = "turninator"
+version = "0.1.0"
+edition = "2024"
+description = "Physical print geometry and local rendering studio"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"

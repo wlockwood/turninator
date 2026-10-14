@@ -1,0 +1,6 @@
+/target/
+/artifacts/
+__pycache__/
+*.pyc
+/.commit-check/
+/.turninator/
