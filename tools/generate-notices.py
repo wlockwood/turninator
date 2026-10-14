@@ -61,6 +61,7 @@ def render_notices(metadata, supplements):
              "Includes build dependencies as a conservative superset of the linked application. "
              "Versions and license expressions below are upstream package declarations; "
              "the reproduced texts retain their original attribution and terms.\n",
+             "License hashes identify original source bytes; display normalizes line endings and trailing whitespace.\n",
              "This file does not assign a license to Turninator or the user's models. "
              "Blender, FFmpeg and ffprobe are not bundled. Their separate installations retain "
              "their own notices and terms. Embedded egui fonts include Hack, Noto Emoji, "
@@ -87,7 +88,7 @@ def render_notices(metadata, supplements):
                 parts.append(f"Source omitted from crate archive; retrieved at exact upstream commit: {notice['url']}\n")
             fence = "~" * max(4, max((len(match[0]) + 1 for match in re.finditer(r"~+", notice["text"])), default=4))
             parts.append(f"\n{fence}text\n{notice['text'].rstrip()}\n{fence}\n")
-    return "\n".join(parts)
+    return "\n".join(line.rstrip() for line in "\n".join(parts).splitlines()) + "\n"
 
 
 def file_inventory(directory):
@@ -153,7 +154,7 @@ def main():
     args = parser.parse_args()
     metadata = json.loads(args.metadata.read_text(encoding="utf-8-sig"))
     supplements = json.loads(args.supplements.read_text(encoding="utf-8")) if args.supplements.exists() else {}
-    args.output.write_text(render_notices(metadata, supplements), encoding="utf-8")
+    args.output.write_text(render_notices(metadata, supplements), encoding="utf-8", newline="\n")
     if args.package:
         write_manifest(args.package, args.source_root, metadata, args.profile, args.tool, args.prebuilt)
     print(f"Notices: {len(resolved_packages(metadata))} exact resolved third-party packages -> {args.output}")

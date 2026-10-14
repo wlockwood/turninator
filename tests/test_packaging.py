@@ -50,6 +50,17 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "dependency.*no license"):
                 self.notices.render_notices(self.metadata(directory), {})
 
+    def test_notice_output_normalizes_windows_line_endings_without_losing_attribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = self.metadata(directory)
+            data = b"Copyright Example 2026  \r\nPermission remains unchanged.\r\n"
+            (Path(directory) / "dependency/LICENSE").write_bytes(data)
+            text = self.notices.render_notices(metadata, {})
+            self.assertNotIn("\r", text)
+            self.assertTrue(all(line == line.rstrip() for line in text.splitlines()))
+            self.assertIn("Copyright Example 2026", text)
+            self.assertIn(self.notices.digest(data), text)
+
     def test_supplement_hash_is_checked(self):
         with tempfile.TemporaryDirectory() as directory:
             supplemental = {"dependency@1.2.3": [{"path": "LICENSE", "url": "https://example.invalid/exact-commit/LICENSE",
