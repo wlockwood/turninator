@@ -79,7 +79,11 @@ impl RenderService {
                         task.request.kind,
                         ExportKind::Gif | ExportKind::Mp4 | ExportKind::SectionTurntable
                     ) {
-                        task.request.frame_count
+                        if let Some(timeline) = &task.request.timeline {
+                            timeline.frame_count()?
+                        } else {
+                            task.request.frame_count
+                        }
                     } else {
                         4
                     };
@@ -88,18 +92,50 @@ impl RenderService {
                     } else {
                         1
                     };
-                    let reserve =
-                        u64::from(task.request.size).pow(2) * 8 * u64::from(frames) * panels;
-                    cache.check_budget(task.cache_budget_bytes, reserve)?;
-                    fs::create_dir_all(&task.request.job_dir)?;
                     let mesh_path = task.request.job_dir.join("mesh.bin");
-                    task.mesh.write_binary(&mesh_path)?;
                     let mut scene = task.scene.clone();
-                    scene["mesh_path"] = serde_json::json!(fs::canonicalize(mesh_path)?);
+                    // Resolve the owned parent before creating either immutable snapshot.
+                    scene["mesh_path"] = serde_json::json!(
+                        fs::canonicalize(&task.request.job_dir)?.join("mesh.bin")
+                    );
                     let scene_bytes = serde_json::to_vec(&scene)?;
                     if scene_bytes.len() > 1024 * 1024 {
                         return Err("render scene exceeds 1 MiB byte budget".into());
                     }
+                    let timeline_bytes = if let Some(timeline) = &task.request.timeline {
+                        let mut timeline = timeline.clone();
+                        timeline.buildup |=
+                            task.request.animation == crate::export::AnimationMode::BuildUp;
+                        let bytes = serde_json::to_vec(&timeline.worker_frames()?)?;
+                        if bytes.len() > 8 * 1024 * 1024 {
+                            return Err("timeline states exceed 8 MiB budget".into());
+                        }
+                        bytes.len() as u64
+                    } else {
+                        0
+                    };
+                    let mesh_bytes = 20u64
+                        .checked_add(
+                            (task.mesh.positions.len() as u64)
+                                .checked_mul(12)
+                                .ok_or("snapshot size overflow")?,
+                        )
+                        .and_then(|n| {
+                            n.checked_add((task.mesh.triangles.len() as u64).checked_mul(12)?)
+                        })
+                        .ok_or("snapshot size overflow")?;
+                    let reserve = u64::from(task.request.size)
+                        .checked_pow(2)
+                        .and_then(|n| n.checked_mul(8))
+                        .and_then(|n| n.checked_mul(u64::from(frames)))
+                        .and_then(|n| n.checked_mul(panels))
+                        .and_then(|n| n.checked_add(mesh_bytes))
+                        .and_then(|n| n.checked_add(scene_bytes.len() as u64))
+                        .and_then(|n| n.checked_add(timeline_bytes))
+                        .and_then(|n| n.checked_add(1024 * 1024))
+                        .ok_or("snapshot reservation overflow")?;
+                    cache.check_budget(task.cache_budget_bytes, reserve)?;
+                    task.mesh.write_binary(&mesh_path)?;
                     fs::write(&task.request.scene_path, scene_bytes)?;
                     let changed = last_tools.as_ref().is_none_or(|p| {
                         p.blender != task.tools.blender

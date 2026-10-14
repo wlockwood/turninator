@@ -98,3 +98,36 @@ fn model_loading_reports_assumed_units_and_preserves_source_hash() {
     assert_eq!(model.source_hash.len(), 64);
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn adaptive_build_slider_roundtrip_retains_the_selected_complete_layer() {
+    let directory = std::env::temp_dir().join(format!(
+        "turninator-stage-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("layers.gcode");
+    let mut source = "G90\nM83\n;WIDTH:0.4\n;HEIGHT:0.2\n".to_owned();
+    for height in [0.3, 0.7, 1.1, 1.3] {
+        source.push_str(&format!("G1X0Y0Z{height}\nG1X8E1\n"));
+    }
+    fs::write(&path, &source).unwrap();
+    let model = load_model(&path, &ImportSettings::default()).unwrap();
+    assert_eq!(turninator::presentation::visible_layer_count(&model, 0.), 0);
+    for (i, height) in model.layer_tops_mm.iter().enumerate() {
+        let slider_height = f64::from(*height as f32);
+        assert_eq!(
+            turninator::presentation::visible_layer_count(&model, slider_height),
+            i + 1
+        );
+        assert_eq!(
+            turninator::presentation::visible_layer_height(&model, slider_height),
+            *height
+        );
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+    fs::remove_dir_all(directory).unwrap();
+}

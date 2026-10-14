@@ -8,6 +8,8 @@ A local Windows studio for STL and supported G-code, configurable print layers, 
 
 Running turninator.exe without arguments opens the studio. Drag a model into the window or use Open model. Drag to orbit, right-drag to pan, and scroll to zoom. The default layer pitch is **0.20 mm**; first-layer height is independent. Build rotation changes the print frame; presentation rotation keeps layers attached to the part.
 
+**Presentation pose → Settle on face** lets you click a visible triangle and point its face down. Layers retain their build orientation. This aligns a face; it does not calculate physical stability.
+
 STL Layer Appearance preserves the original silhouette. G-code creates actual rounded bead surfaces, optionally joined at contiguous path corners. Source assumptions, units and tool/feature labels are visible in the sidebar. Ghost/Xray modes use approximate transparency; native sections are uncapped. G-code build-up reveals complete deposited layers, including adaptive heights.
 
 ## Tools and outputs
@@ -19,13 +21,16 @@ Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leav
 - Four-view sheets: shared-scale orthographic Front, Right, Top and Iso, design edges and labels.
 - MP4: explicit H.264 or AV1, capability checks and verified timing. Unavailable AV1 does not silently become H.264. Matching requests reuse verified frames.
 - Section exports: full model beside a cutaway through the whole turntable; reliable caps/statistics require closed input. G-code cuts retain deposited gaps.
-- Build-up exports: real deposited layers and tool/feature colors with fixed full-model framing. Build-up and sections are separate export choices.
+- Build-up exports: complete deposited layers, including adaptive heights, combined with resin/Cycles, studio lighting, tool/feature colors, camera motion and capped or paired sections. Selected stages also export to PNGs and four-view sheets; zero layers produces an empty build.
+- Camera timelines: record views under **Camera keyframes and motion**, set their times and outgoing orbit/pan or spiral transitions, choose easing and duration, then export GIF/MP4. Spirals add signed whole turns while approaching the next elevation. Optional model rotation and build-up use the same timeline. Projection must stay consistent between keys.
 
 Animation and PNG/sheet quality have separate controls. Native lighting approximates Blender; Render preview provides the selected material/studio result. Resin on overlapping beads retains internal interfaces and is an illustration rather than fused-resin physics. Section volume is a mesh estimate, not calibrated deposited material or strength.
 
+To author a motion, set the time slider, compose a view with orbit/pan/zoom or a canonical camera, then **Record this view**. Edit each key's outgoing transition and easing; **Play** previews the path natively. Camera loops reserve a closing transition or end at the starting camera. Build-up reveals whole deposited layers rather than reproducing printer time or nozzle motion; its last exported frame is complete.
+
 ## Projects and recovery
 
-Save .turninator projects to retain physical settings, material/palette, pose, camera and output settings. Sources are relative when possible; missing/changed files require relocation or explicit reimport. Edited pitch survives material changes.
+Save .turninator projects to retain physical settings, material/palette, pose, camera, timeline, selected deposited stage and output settings. Sources are relative when possible; missing/changed files require relocation or explicit reimport. Edited pitch survives material changes. Older projects load with the new motion fields disabled.
 
 Exports use immutable snapshots. Cancellation terminates only the owned worker/encoder tree. Failed frames remain available through **Retry retained job** or **Tools / storage → Recover / encode**. Recipes and frames are revalidated; failed encoding preserves existing output. Only marked job storage is removable, and its budget is configurable. Sources remain read-only. Defaults live under %LOCALAPPDATA%/Turninator; gui --data-dir selects another location.
 

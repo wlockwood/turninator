@@ -201,6 +201,33 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(buildup["build_up"])
         self.assertEqual(source, {"schema_version": 1, "geometry_kind": "beads"})
 
+    def test_timeline_frames_require_exact_count_valid_camera_and_monotone_build(self):
+        camera = dict(target_mm=[0,0,1],direction=[1,-1,1],up=[0,0,1],projection="perspective",distance_mm=20,vertical_fov_degrees=35,ortho_span_mm=10)
+        frames = [dict(camera=camera,angle_degrees=0,buildup_fraction=0),dict(camera=camera,angle_degrees=180,buildup_fraction=1)]
+        self.assertEqual(worker.validate_frame_states(frames,2),frames)
+        for invalid in (frames[:1],[frames[1],frames[0]],[dict(frames[0],angle_degrees=float('nan')),frames[1]],
+                        [dict(frames[0],camera=dict(camera,distance_mm=0)),frames[1]],
+                        [dict(frames[0],buildup_fraction=None),frames[1]]):
+            with self.assertRaises(ValueError): worker.validate_frame_states(invalid,2)
+
+    def test_complete_layer_selection_is_bounded_and_never_partial(self):
+        self.assertEqual([scene.layer_for_fraction([2,5,9],value) for value in (0,.2,.5,1)],[2,2,5,9])
+        for value in (-.01,1.01,float('nan'),True):
+            with self.assertRaises(ValueError): scene.layer_for_fraction([2,5],value)
+
+    def test_static_build_stage_counts_actual_layers_including_empty_bed(self):
+        self.assertEqual([scene.layer_for_count([2,5,9],n) for n in range(4)],[-1,2,5,9])
+        for count in (-1,4,1.5,True):
+            with self.assertRaises(ValueError): scene.layer_for_count([2,5,9],count)
+
+    def test_long_timeline_completion_stays_within_protocol_line_budget(self):
+        payload=dict(paths=["x"*200]*10000,frame_seconds=[.1]*10000,frame_analysis=[dict(area=1)]*10000,build_layers=list(range(50000)),frame_count=10000,total_seconds=1)
+        bounded=worker.completion_event(payload,"C:/job/render-result.json")
+        self.assertLess(len(json.dumps(bounded)),900000)
+        self.assertEqual(bounded["frame_count"],10000)
+        self.assertEqual(bounded["details_path"],"C:/job/render-result.json")
+        self.assertEqual(len(payload["paths"]),10000)
+
     def test_reuse_requires_matching_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

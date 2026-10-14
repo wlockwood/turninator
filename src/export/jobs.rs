@@ -46,6 +46,11 @@ pub struct SectionSpec {
     pub keep_positive: bool,
     pub cap: bool,
 }
+/// Number of actual deposited layers to retain; zero is an empty build plate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildStage {
+    pub visible_layers: u32,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExportRequest {
     pub job_dir: PathBuf,
@@ -65,6 +70,12 @@ pub struct ExportRequest {
     pub section: Option<SectionSpec>,
     #[serde(default)]
     pub animation: AnimationMode,
+    #[serde(default)]
+    pub timeline: Option<crate::animation::Timeline>,
+    #[serde(default)]
+    pub build_stage: Option<BuildStage>,
+    #[serde(default)]
+    pub start_angle_degrees: f64,
 }
 impl Default for ExportRequest {
     fn default() -> Self {
@@ -82,6 +93,9 @@ impl Default for ExportRequest {
             layout: ExportLayout::Single,
             section: None,
             animation: AnimationMode::Turntable,
+            timeline: None,
+            build_stage: None,
+            start_angle_degrees: 0.0,
         }
     }
 }
@@ -125,6 +139,38 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
     fs::write(&partial, serde_json::to_vec_pretty(value)?)?;
     encode::publish(&partial, path)
 }
+fn write_scene_json(path: &Path, value: &Value) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("derived render scene exceeds 1 MiB byte budget".into());
+    }
+    crate::settings::atomic_write(path, &bytes)
+}
+
+#[cfg(test)]
+mod scene_budget_tests {
+    use super::*;
+
+    #[test]
+    fn derived_scenes_keep_compact_budget_and_reject_growth_before_overwrite() {
+        let path = std::env::temp_dir().join(format!(
+            "turninator-derived-scene-{}.json",
+            std::process::id()
+        ));
+        let group = json!({"start_triangle":123456,"end_triangle":123520,"layer_index":1234});
+        let scene = json!({"layer_face_ranges":vec![group; 12000],"section":{"axis":0,"position_mm":4,"keep_positive":true,"cap":true}});
+        assert!(serde_json::to_vec(&scene).unwrap().len() < 1024 * 1024);
+        assert!(serde_json::to_vec_pretty(&scene).unwrap().len() > 1024 * 1024);
+        write_scene_json(&path, &scene).unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(original.len() <= 1024 * 1024);
+        assert_eq!(serde_json::from_slice::<Value>(&original).unwrap(), scene);
+        let oversized = json!({"warnings":["x".repeat(1024*1024)]});
+        assert!(write_scene_json(&path, &oversized).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
+    }
+}
 
 pub fn run_export(
     worker: &mut WorkerClient,
@@ -133,6 +179,36 @@ pub fn run_export(
     cancel: &AtomicBool,
     mut callback: impl FnMut(JobEvent),
 ) -> Result<ExportResult> {
+    if !request.start_angle_degrees.is_finite() || request.start_angle_degrees.abs() > 1e9 {
+        return Err("start angle must be finite and within supported range".into());
+    }
+    let mut effective_request = request.clone();
+    if let Some(timeline) = &effective_request.timeline {
+        effective_request.frame_count = timeline.frame_count()?;
+        if !matches!(
+            request.kind,
+            ExportKind::Gif | ExportKind::Mp4 | ExportKind::SectionTurntable
+        ) {
+            return Err("camera timelines require GIF or MP4 animation output".into());
+        }
+    }
+    if effective_request.timeline.is_some() || effective_request.kind == ExportKind::Diagram {
+        effective_request.start_angle_degrees = 0.;
+    }
+    let request = &effective_request;
+    if let Some(stage) = request.build_stage {
+        if stage.visible_layers > 50_000 {
+            return Err("static build stage exceeds 50000 layers".into());
+        }
+        if request.animation == AnimationMode::BuildUp
+            || request
+                .timeline
+                .as_ref()
+                .is_some_and(|timeline| timeline.buildup)
+        {
+            return Err("choose a fixed build stage or progressive build-up, not both".into());
+        }
+    }
     if !(16..=8000).contains(&request.size)
         || !(1..=4096).contains(&request.samples)
         || !(1..=10000).contains(&request.frame_count)
@@ -150,11 +226,12 @@ pub fn run_export(
         return Err("cancelled".into());
     }
     if request.animation == AnimationMode::BuildUp
-        && (request.section.is_some() || !matches!(request.kind, ExportKind::Gif | ExportKind::Mp4))
+        && !matches!(
+            request.kind,
+            ExportKind::Gif | ExportKind::Mp4 | ExportKind::SectionTurntable
+        )
     {
-        return Err(
-            "build-up supports GIF/MP4 bead animations and cannot be combined with sections".into(),
-        );
+        return Err("build-up supports GIF/MP4 bead animations".into());
     }
     if let Some(section) = &request.section {
         if section.axis > 2 || !section.position_mm.is_finite() {
@@ -224,7 +301,7 @@ pub fn run_export(
                 1
             },
     )?;
-    let recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
+    let recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
     let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&recipe)?));
     // Encoding changes must be recorded without invalidating compatible PNGs.
     let encoding_recipe = match request.kind {
@@ -240,6 +317,20 @@ pub fn run_export(
     };
     let render_dir = request.job_dir.join(&fingerprint[..20]);
     fs::create_dir_all(&render_dir)?;
+    let frame_states_path = if let Some(timeline) = &request.timeline {
+        let mut timeline = timeline.clone();
+        timeline.buildup |= request.animation == AnimationMode::BuildUp;
+        let path = render_dir.join("frame-states.json");
+        let states = serde_json::to_value(timeline.worker_frames()?)?;
+        let bytes = serde_json::to_vec(&states)?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Err("timeline states exceed 8 MiB budget".into());
+        }
+        crate::settings::atomic_write(&path, &bytes)?;
+        Some(path)
+    } else {
+        None
+    };
     let manifest = render_dir.join("job.json");
     if manifest.exists() {
         let previous: Value =
@@ -277,7 +368,7 @@ pub fn run_export(
                 total: count,
                 stage: "Rendering".into(),
             });
-            let complete=worker.request(json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"start_angle_degrees":0,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
+            let complete=worker.request(json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
             if event["kind"]=="frame"{let n=event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;callback(JobEvent::Progress{completed:n,total:count,stage:if event["payload"]["reused"]==true{"Reusing verified frames"}else{"Rendering"}.into()});if let Some(path)=event["payload"]["path"].as_str(){callback(JobEvent::Frame(path.into()));}}
             else if event["kind"]=="log" && let Some(line)=event["payload"]["message"].as_str(){callback(JobEvent::Log(line.to_owned()));}
         })?;
@@ -405,9 +496,13 @@ fn render_section(
         // Both scenes keep the complete source mesh bounds for their camera,
         // lighting and floor. Only the disposable section mesh is cut.
         let scene_path = directory.join(format!("{panel}-scene.json"));
-        write_json(&scene_path, &spec)?;
+        write_scene_json(&scene_path, &spec)?;
         let frames = directory.join(panel);
-        let complete=worker.request(json!({"request_id":format!("section-{panel}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":if animated{"turntable"}else{"still"},"engine":request.engine,"size":request.size,"width":request.size,"height":panel_height,"samples":request.samples,"frame_count":count,"start_angle_degrees":0,"transparent":request.transparent&&!animated,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
+        let frame_states_path = request
+            .timeline
+            .as_ref()
+            .map(|_| directory.join("frame-states.json"));
+        let complete=worker.request(json!({"request_id":format!("section-{panel}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":if animated{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"width":request.size,"height":panel_height,"samples":request.samples,"frame_count":count,"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animated,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
             if event["kind"]=="frame"{
                 let completed=panel_index as u32*count+event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;
                 callback(JobEvent::Progress{completed,total:count*panels.len() as u32,stage:format!("Rendering {panel} view")});
@@ -419,6 +514,22 @@ fn render_section(
                 return Err("renderer omitted section analysis".into());
             }
             write_json(&directory.join("analysis.json"), &analysis)?;
+            if let Some(per_frame) = complete["payload"]["frame_analysis"].as_array() {
+                write_json(&directory.join("frame-analysis.json"), &json!(per_frame))?;
+            } else {
+                let path = frames.join("frame-analysis.json");
+                let per_frame: Value = serde_json::from_slice(&crate::settings::read_bounded(
+                    &path,
+                    16 * 1024 * 1024,
+                )?)?;
+                if per_frame
+                    .as_array()
+                    .is_none_or(|items| items.len() != count as usize)
+                {
+                    return Err("section frame analysis count differs from animation".into());
+                }
+                write_json(&directory.join("frame-analysis.json"), &per_frame)?;
+            }
             callback(JobEvent::Analysis(analysis));
         }
     }
@@ -610,14 +721,14 @@ fn render_diagram(
             panel_scene["roughness"] = json!(0.6);
         }
         let scene_path = directory.join(format!("diagram-{index}.json"));
-        write_json(&scene_path, &panel_scene)?;
+        write_scene_json(&scene_path, &panel_scene)?;
         let frames = directory.join(format!("panel-{index}"));
         callback(JobEvent::Progress {
             completed: index as u32,
             total: 4,
             stage: format!("Rendering {}", labels[index]),
         });
-        worker.request(json!({"request_id":format!("diagram-{index}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":"still","engine":request.engine,"size":request.size,"width":layout.panel_width,"height":layout.panel_height,"samples":request.samples,"frame_count":1,"transparent":true,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|e|{if e["kind"]=="log" && let Some(s)=e["payload"]["message"].as_str(){callback(JobEvent::Log(s.into()));}})?;
+        worker.request(json!({"request_id":format!("diagram-{index}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":"still","engine":request.engine,"size":request.size,"width":layout.panel_width,"height":layout.panel_height,"samples":request.samples,"frame_count":1,"build_stage":request.build_stage,"transparent":true,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|e|{if e["kind"]=="log" && let Some(s)=e["payload"]["message"].as_str(){callback(JobEvent::Log(s.into()));}})?;
         let path = frames.join("still.png");
         encode::validate_png(&path, layout.panel_width, layout.panel_height)?;
         let mut panel = image::open(&path)?.to_rgba8();

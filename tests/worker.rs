@@ -376,9 +376,7 @@ fn native_buildup_maps_tools_reveals_geometry_and_reuses_frames_for_av1() {
     use serde_json::json;
     use std::{fs, path::Path, sync::atomic::AtomicBool};
     use turninator::{
-        export::{
-            AnimationMode, ExportKind, ExportRequest, JobEvent, SectionSpec, VideoCodec, run_export,
-        },
+        export::{AnimationMode, ExportKind, ExportRequest, JobEvent, VideoCodec, run_export},
         print::beads::{BeadSegment, build_joined_bead_mesh_with_report},
         render::{ToolPaths, WorkerClient},
     };
@@ -423,19 +421,6 @@ fn native_buildup_maps_tools_reveals_geometry_and_reuses_frames_for_av1() {
         frame_count: 8,
         ..Default::default()
     };
-    request.section = Some(SectionSpec {
-        axis: 0,
-        position_mm: 4.,
-        keep_positive: true,
-        cap: true,
-    });
-    assert!(
-        run_export(&mut worker, &tools, &request, &cancel, |_| {})
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be combined")
-    );
-    request.section = None;
     let mut frames = Vec::new();
     let output = run_export(&mut worker, &tools, &request, &cancel, |event| {
         if let JobEvent::Frame(path) = event {

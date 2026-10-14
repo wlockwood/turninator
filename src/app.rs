@@ -1,6 +1,7 @@
 //! Native studio. Import and rendering run independently of the UI thread.
 use crate::{
     Result,
+    animation::{CameraKeyframe, Easing, Timeline, Transition},
     cache::{CacheStore, JobRecord},
     export::{
         AnimationMode, ExportKind, ExportLayout, ExportRequest, ExportResult, JobEvent,
@@ -218,9 +219,17 @@ pub struct Studio {
     opacity: f32,
     buildup: bool,
     buildup_height: f32,
+    restored_stage: Option<u32>,
     buildup_playing: bool,
     last_tick: Instant,
     export_buildup: bool,
+    settle_face: bool,
+    native_rect: Option<egui::Rect>,
+    timeline: Timeline,
+    timeline_enabled: bool,
+    timeline_playing: bool,
+    timeline_time: f64,
+    timeline_angle: f32,
     adaptive_text: String,
     cache_records: Vec<(PathBuf, JobRecord)>,
     cache_usage: u64,
@@ -313,9 +322,17 @@ impl Studio {
             opacity: 0.3,
             buildup: false,
             buildup_height: 0.,
+            restored_stage: None,
             buildup_playing: false,
             last_tick: Instant::now(),
             export_buildup: false,
+            settle_face: false,
+            native_rect: None,
+            timeline: Timeline::default(),
+            timeline_enabled: false,
+            timeline_playing: false,
+            timeline_time: 0.,
+            timeline_angle: 0.,
             adaptive_text: String::new(),
             cache_records: Vec::new(),
             cache_usage: 0,
@@ -365,7 +382,7 @@ impl Studio {
                 .is_none_or(|model| model.layer_tops_mm.is_empty()),
             inspection_mode: self.inspection,
             opacity: self.opacity,
-            ..Default::default()
+            turntable_angle_degrees: self.timeline_angle,
         }
     }
     fn changed(&mut self) {
@@ -373,6 +390,11 @@ impl Studio {
         self.changed_at = Instant::now();
     }
     fn import(&mut self, path: PathBuf) {
+        self.settle_face = false;
+        self.timeline_playing = false;
+        if !self.restore_camera {
+            self.restored_stage = None;
+        }
         self.debounced_import = None;
         self.unresolved_project = None;
         self.selected_source = Some(path.clone());
@@ -401,6 +423,69 @@ impl Studio {
     fn fit(&mut self) {
         if let Some(bounds) = self.viewport.display_bounds(&self.viewport_settings()) {
             self.camera.fit(&bounds);
+        }
+    }
+    fn settle_hit(&mut self, hit: crate::viewport::FaceHit) -> Result<()> {
+        self.scene.display_rotation_degrees = crate::model::orientation::settled_display_rotation(
+            self.scene.display_rotation_degrees,
+            hit.normal_mm,
+        )?;
+        self.settle_face = false;
+        self.timeline_playing = false;
+        self.timeline_angle = 0.;
+        self.fit();
+        self.changed();
+        self.status = format!(
+            "Face {} now points down. Print layers retain their build orientation.",
+            hit.triangle_index + 1
+        );
+        Ok(())
+    }
+    fn settle_pointer(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<crate::viewport::FaceHit> {
+        if self.importing {
+            return None;
+        }
+        let settings = self.viewport_settings();
+        let model = self.model.as_ref()?;
+        let hit = self
+            .viewport
+            .pick_at(&model.picking, &self.camera, &settings, rect, pointer)?;
+        if let Err(error) = self.settle_hit(hit) {
+            self.error = Some(error.to_string());
+            return None;
+        }
+        Some(hit)
+    }
+    fn sample_timeline(&mut self) {
+        match self.timeline.sample(self.timeline_time) {
+            Ok(sample) => {
+                self.camera = sample.camera;
+                self.timeline_angle = sample.turntable_degrees as f32;
+                if let Some(fraction) = sample.buildup_fraction
+                    && let Some(model) = &self.model
+                    && !model.groups.is_empty()
+                {
+                    let count = ((fraction * model.layer_tops_mm.len() as f64).floor() as usize
+                        + 1)
+                    .min(model.layer_tops_mm.len());
+                    self.buildup_height = count
+                        .checked_sub(1)
+                        .and_then(|i| model.layer_tops_mm.get(i))
+                        .copied()
+                        .unwrap_or(0.) as f32;
+                    self.buildup = true;
+                    self.buildup_playing = false;
+                }
+                self.changed();
+            }
+            Err(error) => {
+                self.timeline_playing = false;
+                self.error = Some(error.to_string());
+            }
         }
     }
     fn save_prefs(&mut self) {
@@ -434,10 +519,25 @@ impl Studio {
             } else {
                 self.size
             };
+            let timeline = if self.timeline_enabled
+                && !preview
+                && matches!(kind, ExportKind::Gif | ExportKind::Mp4)
+            {
+                let mut timeline = self.timeline.clone();
+                timeline.buildup |= self.export_buildup;
+                Some(timeline)
+            } else {
+                None
+            };
+            let frames = timeline
+                .as_ref()
+                .map(Timeline::frame_count)
+                .transpose()?
+                .unwrap_or(80);
             let reserve = u64::from(render_size).pow(2)
                 * 8
                 * if matches!(kind, ExportKind::Gif | ExportKind::Mp4) {
-                    80
+                    u64::from(frames)
                 } else {
                     4
                 };
@@ -469,7 +569,9 @@ impl Studio {
                 },
                 self.transparent,
             );
-            if !preview && self.section && kind != ExportKind::Diagram {
+            request.timeline = timeline;
+            request.frame_count = frames;
+            if self.section && kind != ExportKind::Diagram {
                 request.section = Some(SectionSpec {
                     axis: self.section_axis,
                     position_mm: self.section_position,
@@ -497,6 +599,25 @@ impl Studio {
             } else {
                 AnimationMode::Turntable
             };
+            let animated = !preview && matches!(kind, ExportKind::Gif | ExportKind::Mp4);
+            if !animated {
+                request.start_angle_degrees = f64::from(self.timeline_angle);
+            }
+            let progressive = animated
+                && (request.animation == AnimationMode::BuildUp
+                    || request.timeline.as_ref().is_some_and(|t| t.buildup));
+            if self.buildup
+                && !progressive
+                && let Some(model) = &self.model
+                && !model.groups.is_empty()
+            {
+                request.build_stage = Some(crate::export::BuildStage {
+                    visible_layers: crate::presentation::visible_layer_count(
+                        model,
+                        f64::from(self.buildup_height),
+                    ) as u32,
+                });
+            }
             fs::write(
                 request.job_dir.join("request.json"),
                 serde_json::to_vec_pretty(&request)?,
@@ -731,6 +852,13 @@ impl Studio {
                                 generation,
                             ) {
                                 Ok(()) => {
+                                    if !self.restore_camera {
+                                        self.buildup = false;
+                                        self.buildup_playing = false;
+                                        self.timeline_enabled = false;
+                                        self.timeline = Timeline::default();
+                                        self.timeline_angle = 0.;
+                                    }
                                     self.status = format!(
                                         "{} • {} triangles",
                                         model.path.display(),
@@ -765,12 +893,26 @@ impl Studio {
                                         .is_none_or(|model| model.groups.is_empty())
                                     {
                                         self.export_buildup = false;
+                                        self.timeline.buildup = false;
+                                        self.buildup = false;
                                     }
                                     self.color_signature.clear();
                                     self.buildup_height = self
                                         .model
                                         .as_ref()
                                         .map_or(0., |m| m.bounds_mm.max[2] as f32);
+                                    if let Some(count) = self.restored_stage.take() {
+                                        self.buildup_height = self
+                                            .model
+                                            .as_ref()
+                                            .and_then(|m| {
+                                                (count as usize)
+                                                    .min(m.layer_tops_mm.len())
+                                                    .checked_sub(1)
+                                                    .map(|i| m.layer_tops_mm[i] as f32)
+                                            })
+                                            .unwrap_or(0.);
+                                    }
                                     if !self.restore_camera {
                                         self.fit();
                                     }
@@ -974,6 +1116,14 @@ impl Studio {
         self.transparent = options.transparent;
         self.codec = options.video_codec;
         self.export_buildup = options.animation == AnimationMode::BuildUp;
+        self.timeline_enabled = options.timeline.is_some();
+        self.timeline = options.timeline.unwrap_or_default();
+        self.timeline_playing = false;
+        self.timeline_time = 0.;
+        self.timeline_angle = options.start_angle_degrees as f32;
+        self.buildup = options.build_stage.is_some();
+        self.buildup_playing = false;
+        self.restored_stage = options.build_stage.map(|stage| stage.visible_layers);
         self.side_by_side = options.layout == ExportLayout::SideBySide;
         self.section = options.section.is_some();
         if let Some(section) = options.section {
@@ -999,6 +1149,8 @@ impl Studio {
         self.import(project.source_path);
     }
     fn restore_accepted_import(&mut self) {
+        self.restored_stage = None;
+        self.restore_camera = false;
         if let Some(model) = &self.model {
             self.scene.import = model.import_settings.clone();
             self.selected_source = Some(model.path.clone());
@@ -1037,9 +1189,105 @@ impl Studio {
             } else {
                 ExportLayout::Single
             },
+            timeline: self.timeline_enabled.then(|| self.timeline.clone()),
+            build_stage: self
+                .model
+                .as_ref()
+                .filter(|m| self.buildup && !m.groups.is_empty())
+                .map(|model| crate::export::BuildStage {
+                    visible_layers: crate::presentation::visible_layer_count(
+                        model,
+                        f64::from(self.buildup_height),
+                    ) as u32,
+                }),
+            start_angle_degrees: f64::from(self.timeline_angle),
         }
     }
+    fn timeline_controls(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Camera keyframes and motion", |ui| {
+            if ui.checkbox(&mut self.timeline_enabled, "Use timeline for GIF / MP4").changed() {
+                self.timeline_playing = false;
+                self.timeline_angle = 0.;
+                if self.timeline_enabled && self.timeline.keyframes.len() == 1 {
+                    self.timeline.keyframes[0].camera = self.camera.clone();
+                }
+                self.changed();
+            }
+            if !self.timeline_enabled { return; }
+            ui.add(egui::DragValue::new(&mut self.timeline.duration_seconds).range(0.05..=500.).speed(0.1).suffix(" seconds"));
+            ui.checkbox(&mut self.timeline.looping, "Close camera path into a loop");
+            ui.checkbox(&mut self.timeline.turntable, "Rotate the model too");
+            let deposited = self.model.as_ref().is_some_and(|m| !m.groups.is_empty());
+            ui.add_enabled(deposited, egui::Checkbox::new(&mut self.timeline.buildup, "Build deposited layers during motion"));
+            ui.small("20 fps. Set a time, orbit/pan to compose a view, then record it. Transition settings belong to the segment leaving each key.");
+            let scrub = ui.add(egui::Slider::new(&mut self.timeline_time, 0.0..=self.timeline.duration_seconds).text("Time (s)"));
+            let mut sample = scrub.changed();
+            if sample { self.timeline_playing = false; }
+            ui.horizontal(|ui| {
+                if ui.button("Record this view").clicked() {
+                    let key = CameraKeyframe { time_seconds: self.timeline_time, camera: self.camera.clone(), ..Default::default() };
+                    if let Some(existing) = self.timeline.keyframes.iter_mut().find(|k| (k.time_seconds - self.timeline_time).abs() < 1e-6) {
+                        existing.camera = key.camera;
+                    } else if self.timeline.keyframes.len() < 256 {
+                        self.timeline.keyframes.push(key);
+                        self.timeline.keyframes.sort_by(|a,b| a.time_seconds.total_cmp(&b.time_seconds));
+                    }
+                }
+                if ui.button(if self.timeline_playing { "Pause" } else { "Play" }).clicked()
+                    && self.timeline.validate().is_ok() {
+                        self.timeline_playing = !self.timeline_playing;
+                        self.buildup_playing = false;
+                        if self.timeline_time >= self.timeline.duration_seconds { self.timeline_time = 0.; }
+                        sample = self.timeline_playing;
+                }
+                if ui.button("Reset motion").clicked() {
+                    self.timeline = Timeline { keyframes: vec![CameraKeyframe {camera:self.camera.clone(), ..Default::default()}], ..Default::default() };
+                    self.timeline_time = 0.;
+                    self.timeline_angle = 0.;
+                    self.timeline_playing = false;
+                    self.changed();
+                }
+            });
+            let mut remove = None;
+            let mut recall = None;
+            for (index,key) in self.timeline.keyframes.iter_mut().enumerate() {
+                ui.push_id(index, |ui| {
+                    ui.collapsing(format!("View {} • {:.2} s", index+1,key.time_seconds), |ui| {
+                        if index > 0 { ui.add(egui::DragValue::new(&mut key.time_seconds).range(0.001..=self.timeline.duration_seconds).speed(0.05).suffix(" s")); }
+                        ui.small(format!("Yaw {:.1}° • elevation {:.1}° • target {:.1?}",key.camera.yaw_degrees,key.camera.pitch_degrees,key.camera.target_mm));
+                        egui::ComboBox::from_label("Outgoing motion").selected_text(format!("{:?}",key.transition)).show_ui(ui,|ui|{
+                            ui.selectable_value(&mut key.transition,Transition::Orbit,"Orbit / pan");
+                            ui.selectable_value(&mut key.transition,Transition::Spiral,"Spiral");
+                        });
+                        if key.transition == Transition::Spiral { ui.add(egui::DragValue::new(&mut key.spiral_turns).range(-100.0..=100.).speed(1.).max_decimals(0).suffix(" whole turns")); }
+                        egui::ComboBox::from_label("Easing").selected_text(format!("{:?}",key.easing)).show_ui(ui,|ui|{
+                            ui.selectable_value(&mut key.easing,Easing::Linear,"Linear");
+                            ui.selectable_value(&mut key.easing,Easing::SmoothStep,"Ease in / out");
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Load view").clicked() { recall = Some((key.camera.clone(),key.time_seconds)); }
+                            if ui.small_button("Replace with current view").clicked() { key.camera=self.camera.clone(); }
+                            if index>0 && ui.small_button("Remove").clicked() { remove=Some(index); }
+                        });
+                    });
+                });
+            }
+            if let Some(index)=remove { self.timeline.keyframes.remove(index); }
+            if let Some((camera,time))=recall {
+                self.camera=camera;
+                self.timeline_time=time;
+                self.timeline_angle=0.;
+                self.timeline_playing=false;
+                self.changed();
+            }
+            if let Err(error)=self.timeline.validate() { ui.colored_label(egui::Color32::YELLOW,error.to_string()); }
+            else if let Ok(frames)=self.timeline.frame_count() { ui.small(format!("{frames} frames • {:.2} s",self.timeline.duration_seconds)); }
+            if sample { self.sample_timeline(); }
+            ui.small("Build-up reveals complete deposited layers; it does not reproduce machine time, nozzle motion, or material flow.");
+        });
+    }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let preview_options_before = (self.engine.clone(), self.transparent);
         if let Some(model) = &self.model {
             let b = model.bounds_mm;
             ui.small(format!(
@@ -1228,6 +1476,30 @@ impl Studio {
         ui.collapsing("Presentation pose", |ui| {
             ui.label("Display rotation (keeps print layers)");
             rotation_editor(ui, &mut self.scene.display_rotation_degrees);
+            if ui
+                .add_enabled(
+                    self.model.is_some() && !self.importing,
+                    egui::Button::new(if self.settle_face {
+                        "Cancel face selection"
+                    } else {
+                        "Settle on face…"
+                    }),
+                )
+                .clicked()
+            {
+                self.settle_face = !self.settle_face;
+                self.timeline_playing = false;
+                if self.timeline_angle != 0. {
+                    self.timeline_angle = 0.;
+                    self.changed();
+                }
+            }
+            if self.settle_face {
+                ui.label("Click a visible face in Native inspection to point it down.");
+            }
+            ui.small(
+                "Uses the chosen triangle's normal; this does not simulate physical stability.",
+            );
         });
         if serde_json::to_string(&self.scene).unwrap_or_default() != before {
             self.changed();
@@ -1244,6 +1516,7 @@ impl Studio {
         ui.heading("Camera");
         ui.horizontal(|ui| {
             if ui.button("Fit").clicked() {
+                self.timeline_playing = false;
                 self.fit();
                 self.changed();
             }
@@ -1254,6 +1527,7 @@ impl Studio {
                 ("Iso", CanonicalView::Iso),
             ] {
                 if ui.button(label).clicked() {
+                    self.timeline_playing = false;
                     self.camera.canonical(view);
                     self.fit();
                     self.changed();
@@ -1264,8 +1538,10 @@ impl Studio {
             .checkbox(&mut self.camera.orthographic, "Orthographic")
             .changed()
         {
+            self.timeline_playing = false;
             self.changed();
         }
+        self.timeline_controls(ui);
         ui.checkbox(&mut self.show_edges, "Triangle edges");
         egui::ComboBox::from_label("Inspection")
             .selected_text(format!("{:?}", self.inspection))
@@ -1281,15 +1557,27 @@ impl Studio {
         if self.inspection != InspectionMode::Opaque {
             ui.add(egui::Slider::new(&mut self.opacity, 0.02..=0.95).text("Inspection opacity"));
         }
-        ui.checkbox(&mut self.buildup, "Show printed build-up");
+        if ui
+            .checkbox(&mut self.buildup, "Show printed build-up")
+            .changed()
+        {
+            self.changed();
+        }
         if self.buildup {
             let top = self
                 .model
                 .as_ref()
                 .map_or(1., |m| m.bounds_mm.max[2] as f32);
-            ui.add(
-                egui::Slider::new(&mut self.buildup_height, 0.0..=top).text("Printed height (mm)"),
-            );
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.buildup_height, 0.0..=top)
+                        .text("Printed height (mm)"),
+                )
+                .changed()
+            {
+                self.timeline_playing = false;
+                self.changed();
+            }
             ui.checkbox(&mut self.buildup_playing, "Play build-up");
         }
         ui.small("Drag to orbit • right-drag to pan • wheel to zoom");
@@ -1349,6 +1637,7 @@ impl Studio {
                 ui.selectable_value(&mut self.codec, VideoCodec::Av1, "AV1");
             });
         ui.collapsing("Section analysis", |ui| {
+            let before = (self.section,self.section_axis,self.section_position,self.section_positive,self.section_cap,self.side_by_side);
             ui.checkbox(&mut self.section, "Show section / export cutaway");
             ui.horizontal(|ui| { ui.label("Build axis"); for (axis, label) in [(0, "X"), (1, "Y"), (2, "Z")] { ui.selectable_value(&mut self.section_axis, axis, label); } });
             ui.horizontal(|ui| { ui.label("Position (mm)"); ui.add(egui::DragValue::new(&mut self.section_position).speed(0.1)); });
@@ -1358,6 +1647,7 @@ impl Studio {
             ui.small("STL sections show the modeled solid. G-code sections preserve deposited beads and voids.");
             ui.small("Native cutaway is uncapped. Reliable caps and area/volume metrics are computed during export.");
             if let Some(analysis) = &self.analysis {ui.label(serde_json::to_string_pretty(analysis).unwrap_or_default());}
+            if before != (self.section,self.section_axis,self.section_position,self.section_positive,self.section_cap,self.side_by_side) { self.changed(); }
         });
         ui.add_enabled_ui(
             self.model.is_some()
@@ -1391,6 +1681,9 @@ impl Studio {
             .changed()
         {
             self.save_prefs();
+        }
+        if (self.engine.clone(), self.transparent) != preview_options_before {
+            self.changed();
         }
     }
     fn tools_window(&mut self, ctx: &egui::Context) {
@@ -1536,6 +1829,54 @@ impl Studio {
             self.smoke_stage = 4;
         }
         if self.smoke_stage == 4 && self.preview_revision == Some(self.revision) {
+            if let Some(rect) = self.native_rect {
+                let old_import = self.scene.import.clone();
+                let mut picked = None;
+                for y in 2..=8 {
+                    for x in 2..=8 {
+                        let point =
+                            rect.min + rect.size() * egui::vec2(x as f32 / 10., y as f32 / 10.);
+                        if let Some(hit) = self.settle_pointer(rect, point) {
+                            picked = Some(hit);
+                            break;
+                        }
+                    }
+                    if picked.is_some() {
+                        break;
+                    }
+                }
+                let down = picked.and_then(|hit| {
+                    crate::model::orientation::rotation_matrix(self.scene.display_rotation_degrees)
+                        .ok()
+                        .map(|matrix| crate::model::orientation::apply(matrix, hit.normal_mm))
+                });
+                self.smoke_checks["native_pick_and_settle"] = serde_json::json!(
+                    down.is_some_and(|n| n[2] < -0.999999) && self.scene.import == old_import
+                );
+            }
+            let first = self.camera.clone();
+            let mut last = first.clone();
+            last.canonical(CanonicalView::Top);
+            last.target_mm[0] += 0.5;
+            self.timeline = Timeline {
+                duration_seconds: 0.2,
+                keyframes: vec![
+                    CameraKeyframe {
+                        camera: first,
+                        transition: Transition::Spiral,
+                        spiral_turns: 1.,
+                        easing: Easing::SmoothStep,
+                        ..Default::default()
+                    },
+                    CameraKeyframe {
+                        time_seconds: 0.2,
+                        camera: last,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            self.timeline_enabled = true;
             self.section = true;
             self.section_axis = 0;
             self.section_position = 0.75;
@@ -1577,6 +1918,12 @@ impl Studio {
             );
             self.smoke_checks["project_intent_supersedes_debounce"] =
                 serde_json::json!(self.error.is_none() && self.debounced_import.is_none());
+            self.smoke_checks["timeline_project_restored"] = serde_json::json!(
+                self.timeline_enabled
+                    && self.timeline.frame_count().ok() == Some(4)
+                    && self.timeline.keyframes.len() == 2
+                    && self.timeline.keyframes[0].spiral_turns == 1.
+            );
             if let Ok((mut project, _)) = load_project(&directory.join("smoke.turninator")) {
                 project.source_path = directory.join("missing-project-source.stl");
                 let path = directory.join("missing.turninator");
@@ -1637,6 +1984,80 @@ impl Studio {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "rendered",
             )));
+            self.size = 128;
+            self.samples = 4;
+            if let Some(model) = self.model.as_ref().filter(|m| !m.groups.is_empty()) {
+                self.section_axis = 0;
+                self.section_position = (model.bounds_mm.min[0] + model.bounds_mm.max[0]) / 2.;
+                self.section = true;
+                self.side_by_side = true;
+                self.timeline.buildup = true;
+                self.export_buildup = true;
+                self.scene.select_material("resin");
+                self.scene.color_mode = "tool".into();
+                self.scene.studio_preset = "dark".into();
+                self.engine = "cycles".into();
+                self.changed();
+            }
+            self.start_export(
+                ExportKind::Gif,
+                directory.join("camera-timeline.gif"),
+                false,
+            );
+            self.smoke_stage = 81;
+        }
+        if self.smoke_stage == 81
+            && self.busy.is_none()
+            && self.output.as_ref().is_some_and(|p| p.frames.len() == 4)
+        {
+            self.smoke_checks["timeline_export_decoded"] = serde_json::json!(
+                self.last_task.as_ref().is_some_and(|t| t.0.frame_count == 4
+                    && t.0
+                        .timeline
+                        .as_ref()
+                        .is_some_and(|t| t.keyframes.len() == 2))
+                    && self.error.is_none()
+            );
+            self.timeline.turntable = true;
+            self.timeline_time = 0.1;
+            self.sample_timeline();
+            self.smoke_checks["native_timeline_sample"] = serde_json::json!(
+                (self.timeline_angle - 180.).abs() < 0.01
+                    && self.camera.pitch_degrees > self.timeline.keyframes[0].camera.pitch_degrees
+                    && self.camera.pitch_degrees < 90.
+            );
+            self.start_export(
+                ExportKind::Still,
+                directory.join("timeline-stage-preview.png"),
+                true,
+            );
+            self.smoke_stage = 82;
+        }
+        if self.smoke_stage == 82 && self.preview_revision == Some(self.revision) {
+            self.show_output = false;
+            if self.model.as_ref().is_some_and(|m| !m.groups.is_empty()) {
+                self.smoke_checks["composed_resin_buildup_section_stage"] = serde_json::json!(
+                    self.last_task
+                        .as_ref()
+                        .is_some_and(|t| t.0.section.is_some()
+                            && t.0.layout == ExportLayout::SideBySide
+                            && t.0
+                                .build_stage
+                                .is_some_and(|stage| stage.visible_layers == 3)
+                            && t.1["material_preset"] == "resin")
+                        && self.error.is_none()
+                );
+            }
+            self.smoke_checks["timeline_sample_preview_matches_request"] = serde_json::json!(
+                self.last_task
+                    .as_ref()
+                    .is_some_and(|t| t.0.timeline.is_none()
+                        && (t.0.start_angle_degrees - 180.).abs() < 0.01
+                        && t.1["camera"] == self.camera.camera_spec())
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "timeline",
+            )));
             self.smoke_stage = 9;
         }
         let screenshots = ctx.input(|input| {
@@ -1670,7 +2091,7 @@ impl Studio {
                 image.size[1] as u32,
                 image::ColorType::Rgba8,
             );
-            if name == "rendered" {
+            if name == "timeline" {
                 let _ = fs::write(directory.join("result.json"), serde_json::json!({"model":self.model.as_ref().map(|m| &m.path), "triangles":self.viewport.triangle_count(),"revision":self.revision,"preview_revision":self.preview_revision,"error":self.error,"checks":self.smoke_checks}).to_string());
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -1683,13 +2104,32 @@ impl eframe::App for Studio {
         self.receive(&ctx);
         let elapsed = self.last_tick.elapsed().as_secs_f32();
         self.last_tick = Instant::now();
+        if self.timeline_enabled && self.timeline_playing {
+            self.timeline_time += f64::from(elapsed);
+            if self.timeline_time >= self.timeline.duration_seconds {
+                if self.timeline.looping {
+                    self.timeline_time = self
+                        .timeline_time
+                        .rem_euclid(self.timeline.duration_seconds);
+                } else {
+                    self.timeline_time = self.timeline.duration_seconds;
+                    self.timeline_playing = false;
+                }
+            }
+            self.sample_timeline();
+            ctx.request_repaint_after(Duration::from_millis(33));
+        }
         if self.buildup && self.buildup_playing {
+            let before = self.viewport_settings().buildup_height_mm;
             let top = self
                 .model
                 .as_ref()
                 .map_or(1., |m| m.bounds_mm.max[2] as f32);
             self.buildup_height = (self.buildup_height + top * elapsed / 4.)
                 % (top + self.scene.import.layer_height_mm as f32);
+            if self.viewport_settings().buildup_height_mm != before {
+                self.changed();
+            }
             ctx.request_repaint_after(Duration::from_millis(33));
         }
         let color_signature =
@@ -1769,6 +2209,7 @@ impl eframe::App for Studio {
                 ui.menu_button("Recent", |ui| {
                     for path in self.prefs.recent_files.clone() {
                         if ui.button(path.display().to_string()).clicked() {
+                            self.restore_camera = false;
                             self.import(path);
                             ui.close();
                         }
@@ -1843,10 +2284,22 @@ impl eframe::App for Studio {
                 columns[0].heading("Native inspection");
                 let before = self.camera.camera_spec();
                 let settings = self.viewport_settings();
-                self.viewport
+                let response = self
+                    .viewport
                     .show(&mut columns[0], &mut self.camera, &settings);
+                self.native_rect = Some(response.rect);
                 if self.camera.camera_spec() != before {
+                    self.timeline_playing = false;
                     self.changed();
+                }
+                if self.settle_face
+                    && !self.importing
+                    && response.clicked()
+                    && let Some(pointer) = response.interact_pointer_pos()
+                    && self.settle_pointer(response.rect, pointer).is_none()
+                {
+                    self.status =
+                        "No visible face under that point; click the model surface.".into();
                 }
                 columns[1].horizontal(|ui| {
                     ui.heading(if self.show_output {

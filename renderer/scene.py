@@ -254,6 +254,76 @@ def set_visible_layer(obj,layer):
     obj.update_tag()
 
 
+def layer_for_fraction(layers, fraction):
+    _finite_number(fraction, "build fraction", 0, 1)
+    if not layers:
+        raise ValueError("build-up requires deposited layers")
+    return layers[min(int(fraction * len(layers)), len(layers)-1)]
+
+
+def layer_for_count(layers,count):
+    if type(count) is not int or not 0<=count<=len(layers):
+        raise ValueError("fixed build stage must count 0 through the actual number of deposited layers")
+    return -1 if count==0 else layers[count-1]
+
+
+def prepare_buildup_section(obj, source_mesh, spec, envelope, layer):
+    """Reveal complete original faces before cutting; never clip a future bead cap."""
+    import bpy
+    import bmesh
+    from mathutils import Euler
+    old = obj.data
+    obj.data = source_mesh.copy()
+    if not old.users and old != source_mesh:
+        bpy.data.meshes.remove(old)
+    obj.rotation_euler.z = 0
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    remove = []
+    for group in spec["layer_face_ranges"]:
+        if group["layer_index"] > layer:
+            remove.extend(bm.faces[i] for i in range(group["start_triangle"],group["end_triangle"]))
+    bmesh.ops.delete(bm,geom=remove,context="FACES")
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    if not obj.data.polygons:
+        return {"axis":spec["section"]["axis"],"position_mm":spec["section"]["position_mm"],
+                "keep_positive":spec["section"]["keep_positive"],"capped":False,"closed_input":False,
+                "cross_section_area_mm2":0.0,"original_volume_mm3":0.0,"remaining_volume_mm3":0.0,
+                "visible_layer":layer,"visible_source_triangles":0,"output_triangles":0,
+                "warnings":[],"meaning":"Empty build stage: no deposited geometry is visible."}
+    rotation = Euler(tuple(math.radians(v) for v in spec["display_rotation_degrees"]),"XYZ").to_matrix()
+    analysis = apply_section(obj,spec["section"],rotation,envelope["center"][:2],envelope["bottom"],
+                             max(envelope["radius"]*2,envelope["height"],0.001),spec["geometry_kind"])
+    analysis["visible_layer"] = layer
+    analysis["visible_source_triangles"] = sum(g["end_triangle"]-g["start_triangle"] for g in spec["layer_face_ranges"] if g["layer_index"]<=layer)
+    # Each frame's disposable cap material can be freed after its mesh is replaced.
+    for material in list(bpy.data.materials):
+        if not material.users and material.name.startswith("SectionCutSurface"):
+            bpy.data.materials.remove(material)
+    return analysis
+
+
+def set_camera_spec(camera, chosen):
+    from mathutils import Vector, Matrix
+    validate_camera(chosen)
+    target=Vector(chosen["target_mm"])*0.001
+    direction=Vector(chosen["direction"]).normalized()
+    right=Vector(chosen["up"]).cross(direction).normalized()
+    up=direction.cross(right).normalized()
+    distance=chosen["distance_mm"]*0.001
+    camera.location=target+direction*distance
+    camera.rotation_euler=Matrix((right,up,direction)).transposed().to_euler()
+    camera.data.sensor_fit="VERTICAL"
+    camera.data.type="ORTHO" if chosen["projection"]=="orthographic" else "PERSP"
+    camera.data.ortho_scale=chosen["ortho_span_mm"]*0.001
+    camera.data.lens=camera.data.sensor_height/(2*math.tan(math.radians(chosen["vertical_fov_degrees"])/2))
+    camera.data.clip_start=max(0.000001,distance*0.0001)
+    camera.data.clip_end=max(distance*100,100.)
+
+
 def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_kind):
     """Cut a disposable render mesh; a plane never fills an infill envelope."""
     import bpy
@@ -526,6 +596,10 @@ def apply_layer_filter(material,camera,resolution_x,resolution_y,pitch_mm):
     bump=nodes.get("PhysicalLayerBump")
     if bump is None:
         return
+    for existing in list(nodes):
+        if existing.name.startswith("TurninatorFootprint"):
+            nodes.remove(existing)
+    existing_nodes=set(nodes)
     def scalar(operation,a,b=None):
         node=nodes.new("ShaderNodeMath");node.operation=operation
         for index,value in enumerate((a,b)):
@@ -556,6 +630,9 @@ def apply_layer_filter(material,camera,resolution_x,resolution_y,pitch_mm):
     fraction=scalar("MINIMUM",scalar("MAXIMUM",scalar("DIVIDE",scalar("SUBTRACT",pitch_pixels,2),2),0),1)
     gain=scalar("MULTIPLY",scalar("MULTIPLY",fraction,fraction),scalar("SUBTRACT",3,scalar("MULTIPLY",fraction,2)))
     links.new(gain,bump.inputs["Strength"])
+    for node in nodes:
+        if node not in existing_nodes:
+            node.name="TurninatorFootprint"
 
 
 def probe_devices():
@@ -587,8 +664,8 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         validate_face_groups(spec["face_groups"],len(triangles))
     if "layer_face_ranges" in spec:
         validate_layer_ranges(spec["layer_face_ranges"],len(triangles))
-    if spec.get("build_up",False) and (spec["geometry_kind"]!="beads" or spec.get("section") is not None):
-        raise ValueError("build-up requires bead geometry and cannot be combined with section cuts")
+    if spec.get("build_up",False) and spec["geometry_kind"]!="beads":
+        raise ValueError("build-up requires actual bead geometry")
     smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout"), spec.get("bead_side_face_ranges")) if spec["geometry_kind"] == "beads" else None
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
@@ -673,9 +750,11 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         apply_layer_appearance(material, mesh, vertices, spec)
     if spec.get("face_groups"):
         apply_face_groups(obj,material,spec["face_groups"])
-    build_layers = apply_buildup(obj,spec.get("layer_face_ranges")) if spec.get("build_up",False) else None
+    build_layers = None
+    if spec.get("build_up",False):
+        build_layers = validate_layer_ranges(spec.get("layer_face_ranges"),len(triangles)) if spec.get("section") is not None else apply_buildup(obj,spec.get("layer_face_ranges"))
     section_analysis = None
-    if spec.get("section") is not None:
+    if spec.get("section") is not None and not spec.get("build_up",False):
         section_analysis = apply_section(obj,spec["section"],rotation,(cx,cy),bottom,
                                          max(envelope["radius"]*2,envelope["height"],0.001),spec["geometry_kind"])
     radius = envelope["radius"]

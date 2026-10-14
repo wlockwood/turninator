@@ -208,6 +208,7 @@ impl RevisionGate {
 pub struct ImportedModel {
     pub path: std::path::PathBuf,
     pub mesh: Arc<Mesh>,
+    pub picking: Arc<crate::viewport::PickingMesh>,
     pub geometry_kind: String,
     pub source_hash: String,
     pub warnings: Vec<String>,
@@ -405,9 +406,18 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
         warnings.push("Layer Appearance preserves the original silhouette and is not a slicer toolpath prediction.".into());
     }
     let bounds_mm = mesh.bounds()?;
+    let mut picking = crate::viewport::PickingMesh::new(&mesh)?;
+    if !groups.is_empty() {
+        let mut tops = vec![0.; mesh.triangles.len()];
+        for group in &groups {
+            tops[group.start_triangle..group.end_triangle].fill(group.z_top_mm as f32);
+        }
+        picking.set_triangle_layer_tops(&tops)?;
+    }
     Ok(ImportedModel {
         path: fs::canonicalize(path)?,
         mesh: Arc::new(mesh),
+        picking: Arc::new(picking),
         geometry_kind: geometry_kind.into(),
         source_hash,
         warnings,
@@ -424,14 +434,15 @@ pub fn visible_layer_height(model: &ImportedModel, requested_mm: f64) -> f64 {
     if model.layer_tops_mm.is_empty() {
         requested_mm
     } else {
-        model
-            .layer_tops_mm
-            .iter()
-            .copied()
-            .take_while(|height| *height <= requested_mm)
-            .last()
-            .unwrap_or(0.)
+        let count = visible_layer_count(model, requested_mm);
+        count.checked_sub(1).map_or(0., |i| model.layer_tops_mm[i])
     }
+}
+/// Heights use the same f32 representation as the native build-height slider and GPU.
+pub fn visible_layer_count(model: &ImportedModel, requested_mm: f64) -> usize {
+    model
+        .layer_tops_mm
+        .partition_point(|height| *height as f32 <= requested_mm as f32)
 }
 fn compatible_segments(a: &BeadSegment, b: &BeadSegment) -> bool {
     a.end == b.start && a.tool == b.tool && a.feature == b.feature && a.layer_index == b.layer_index

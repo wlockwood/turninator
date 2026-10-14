@@ -31,6 +31,9 @@ pub struct OutputPreferences {
     pub animation: AnimationMode,
     pub section: Option<SectionSpec>,
     pub layout: ExportLayout,
+    pub timeline: Option<crate::animation::Timeline>,
+    pub build_stage: Option<crate::export::BuildStage>,
+    pub start_angle_degrees: f64,
 }
 impl Default for OutputPreferences {
     fn default() -> Self {
@@ -44,6 +47,9 @@ impl Default for OutputPreferences {
             animation: AnimationMode::Turntable,
             section: None,
             layout: ExportLayout::Single,
+            timeline: None,
+            build_stage: None,
+            start_angle_degrees: 0.,
         }
     }
 }
@@ -119,6 +125,17 @@ fn validate_project(project: &ProjectFile) -> Result<()> {
     project.scene.validate()?;
     project.camera.validate()?;
     let output = &project.output_options;
+    if let Some(timeline) = &output.timeline {
+        timeline.validate()?;
+    }
+    if !output.start_angle_degrees.is_finite()
+        || output.start_angle_degrees.abs() > 1e9
+        || output
+            .build_stage
+            .is_some_and(|stage| stage.visible_layers > 50_000)
+    {
+        return Err("invalid saved build stage or sampled angle".into());
+    }
     if !(64..=8000).contains(&output.still_size)
         || !(1..=4096).contains(&output.samples)
         || !(1..=4096).contains(&output.still_samples)

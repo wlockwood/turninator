@@ -61,6 +61,19 @@ impl Default for ViewportSettings {
     }
 }
 impl ViewportSettings {
+    pub(crate) fn effective_buildup_height(&self) -> Option<f32> {
+        self.buildup_height_mm.map(|height| {
+            if !self.buildup_complete_layers {
+                height
+            } else if height + 1e-6 < self.first_layer_height_mm {
+                0.
+            } else {
+                self.first_layer_height_mm
+                    + ((height - self.first_layer_height_mm + 1e-6) / self.layer_height_mm).floor()
+                        * self.layer_height_mm
+            }
+        })
+    }
     pub fn validate(&self) -> Result<()> {
         if self
             .color
@@ -604,6 +617,23 @@ impl Viewport {
         }
         self.bounds
     }
+    /// Pick a retained triangle at a pointer in the response rectangle returned
+    /// by `show`. Uses the same cached display center and actual render aspect.
+    pub fn pick_at(
+        &mut self,
+        picker: &super::PickingMesh,
+        camera: &OrbitCamera,
+        settings: &ViewportSettings,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<super::FaceHit> {
+        self.display_bounds(settings)?;
+        let (ndc, logical_aspect) = super::picking::pointer_coordinates(rect, pointer)?;
+        let aspect = self.target.as_ref().map_or(logical_aspect, |target| {
+            target.size[0] as f64 / target.size[1] as f64
+        });
+        picker.pick_with_shift(camera, settings, ndc, aspect, self.shift)
+    }
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -611,7 +641,7 @@ impl Viewport {
         settings: &ViewportSettings,
     ) -> egui::Response {
         let size = ui.available_size().max(egui::vec2(1., 1.));
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::drag());
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         let delta = response.drag_delta();
         if response.dragged() {
             if response.dragged_by(egui::PointerButton::Secondary)
@@ -791,24 +821,7 @@ impl Viewport {
         let vec4 = |v: [f64; 3], w: f32| [v[0] as f32, v[1] as f32, v[2] as f32, w];
         let (right, up, back) = camera.basis();
         let rows = rotation_rows(settings.display_rotation_degrees);
-        let build_height = settings
-            .buildup_height_mm
-            .map(|height| {
-                if settings.buildup_complete_layers {
-                    if height + 1e-6 < settings.first_layer_height_mm {
-                        0.
-                    } else {
-                        settings.first_layer_height_mm
-                            + ((height - settings.first_layer_height_mm + 1e-6)
-                                / settings.layer_height_mm)
-                                .floor()
-                                * settings.layer_height_mm
-                    }
-                } else {
-                    height
-                }
-            })
-            .unwrap_or(0.);
+        let build_height = settings.effective_buildup_height().unwrap_or(0.);
         let parameters = Uniforms {
             right: vec4(right, 0.),
             up: vec4(up, 0.),
@@ -1529,6 +1542,111 @@ mod tests {
         );
         viewport.clear_mesh();
         assert!(viewport.set_triangle_layer_tops(&tops).is_err());
+        assert!(block_on(scope.pop()).is_none());
+    }
+
+    #[test]
+    #[ignore = "requires an actual GPU adapter; matches click hits to rendered face colors"]
+    fn gpu_click_pick_and_settle_match_rendered_surface() {
+        use super::super::PickingMesh;
+        use crate::model::orientation::{apply, rotation_matrix, settled_display_rotation};
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        let scope = state.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mesh = Mesh {
+            positions: vec![
+                [10., 20., 30.],
+                [14., 20., 30.],
+                [14., 24., 30.],
+                [10., 24., 30.],
+                [10., 20., 34.],
+                [14., 20., 34.],
+                [14., 24., 34.],
+                [10., 24., 34.],
+            ],
+            triangles: vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ],
+        };
+        let picker = PickingMesh::new(&mesh).unwrap();
+        let mut viewport = Viewport::new(&state);
+        viewport.set_mesh(&mesh, "original", 1).unwrap();
+        let colors: Vec<_> = (0..12)
+            .map(|i| {
+                let mut color = [0.01; 3];
+                color[(i / 2) % 3] = 0.9;
+                color
+            })
+            .collect();
+        viewport.set_triangle_colors(&colors).unwrap();
+        viewport.resize([320, 240]);
+        let mut camera = OrbitCamera::default();
+        camera.canonical(super::super::CanonicalView::Front);
+        let rect = egui::Rect::from_min_size(egui::pos2(20., 50.), egui::vec2(320., 240.));
+        let mut settings = ViewportSettings::default();
+        for orthographic in [false, true] {
+            camera.orthographic = orthographic;
+            for pose in [[17., -32., 28.], [-75., 40., 110.], [0., 90., 0.]] {
+                settings.display_rotation_degrees = pose;
+                camera.fit_aspect(&viewport.display_bounds(&settings).unwrap(), 320. / 240.);
+                viewport.render(&camera, &settings);
+                let hit = viewport
+                    .pick_at(
+                        &picker,
+                        &camera,
+                        &settings,
+                        rect,
+                        rect.center() + egui::vec2(0.5, 0.5),
+                    )
+                    .unwrap();
+                let pixels = capture(&viewport);
+                let pixel = &pixels[(120 * 320 + 160) * 4..(120 * 320 + 160) * 4 + 3];
+                let channel = (hit.triangle_index / 2) % 3;
+                assert!(
+                    (0..3).all(|i| i == channel || pixel[channel] > pixel[i]),
+                    "picked face disagrees with actual pixel {pixel:?} at pose{pose:?}"
+                );
+                let next = settled_display_rotation(pose.map(f64::from), hit.normal_mm).unwrap();
+                let normal = apply(rotation_matrix(next).unwrap(), hit.normal_mm);
+                assert!(
+                    normal[0].abs() < 1e-8
+                        && normal[1].abs() < 1e-8
+                        && (normal[2] + 1.).abs() < 1e-8
+                );
+                settings.display_rotation_degrees = next.map(|v| v as f32);
+                viewport.display_bounds(&settings);
+                let rows =
+                    rotation_rows(settings.display_rotation_degrees).map(|r| r.map(f64::from));
+                for &index in &mesh.triangles[hit.triangle_index] {
+                    let z =
+                        apply(rows, mesh.positions[index as usize])[2] - viewport.shift[2] as f64;
+                    assert!(
+                        z.abs() < 1e-5,
+                        "selected convex face does not sit on floor: {z}"
+                    );
+                }
+                settings.layer_appearance = true;
+                viewport.render(&camera, &settings);
+                let _ = capture(&viewport);
+            }
+        }
         assert!(block_on(scope.pop()).is_none());
     }
 

@@ -111,7 +111,7 @@ Initial performance targets remain tuning goals: native1M triangles around60fps 
 
 ## 7. Implementation tasks
 
-Use meaningful tests before substantive implementation, watch their expected failure, implement, rerun the whole relevant suite. This new directory has no Git history; work in place and preserve proposal files. Do not create a worktree or initialize/commit Git merely to satisfy a workflow template. Track evidence durably in `docs/progress.md`.
+Use meaningful tests before substantive implementation, watch their expected failure, implement, rerun the whole relevant suite. Work in place and preserve proposal files. The user's subsequent instruction requires Conventional Commits at every completed phase, with additional feature commits welcome. Track evidence durably in `docs/progress.md`.
 
 ### Task 1: Rust geometry and import foundation
 

@@ -9,7 +9,9 @@ import time
 import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scene import build_scene, load_scene_spec, probe_devices, turntable_angles, buildup_schedule, set_visible_layer
+from scene import (build_scene, load_scene_spec, probe_devices, turntable_angles, buildup_schedule,
+                   set_visible_layer, validate_camera, layer_for_fraction, layer_for_count, prepare_buildup_section,
+                   set_camera_spec, apply_layer_filter)
 
 PREFIX = "TURNINATOR_EVENT "
 
@@ -90,6 +92,53 @@ def render_spec_for_mode(spec, mode):
     return result
 
 
+def validate_frame_states(states, count):
+    if not isinstance(states,list) or len(states)!=count or count>10000:
+        raise ValueError("timeline states must match the bounded frame count")
+    previous=-1.0
+    building=None
+    for state in states:
+        if not isinstance(state,dict): raise ValueError("invalid timeline frame")
+        validate_camera(state.get("camera"))
+        angle=state.get("angle_degrees")
+        if isinstance(angle,bool) or not isinstance(angle,(float,int)) or not math.isfinite(angle) or abs(angle)>1e9:
+            raise ValueError("invalid timeline angle")
+        fraction=state.get("buildup_fraction")
+        active=fraction is not None
+        if building is not None and building!=active:
+            raise ValueError("build-up must be consistently enabled across timeline")
+        building=active
+        if active:
+            if isinstance(fraction,bool) or not isinstance(fraction,(float,int)) or not math.isfinite(fraction) or not 0<=fraction<=1 or fraction<previous:
+                raise ValueError("build fractions must be finite, monotone and within 0..1")
+            previous=fraction
+    return states
+
+
+def load_frame_states(request, count):
+    states=request.get("frame_states")
+    if request.get("frame_states_path") is not None:
+        if states is not None: raise ValueError("supply inline states or one state file")
+        path=Path(request["frame_states_path"])
+        if not path.is_absolute(): raise ValueError("timeline state path must be absolute")
+        with path.open("rb") as stream:
+            data=stream.read(8*1024*1024+1)
+        if len(data)>8*1024*1024: raise ValueError("timeline state file exceeds 8 MiB")
+        states=json.loads(data)
+    return None if states is None else validate_frame_states(states,count)
+
+
+def completion_event(payload, details_path):
+    result=dict(payload)
+    if len(json.dumps(result,allow_nan=False).encode())>900000:
+        for field in ("paths","frame_seconds","frame_analysis","build_layers"):
+            result.pop(field,None)
+        result["details_path"]=str(details_path)
+        if len(json.dumps(result,allow_nan=False).encode())>900000:
+            result["warnings_in_details"]=len(result.pop("warnings",[]))
+    return result
+
+
 def render(request):
     import bpy
     started = time.perf_counter()
@@ -121,6 +170,16 @@ def render(request):
                               request.get("start_angle_degrees", 0.0))
     if mode == "buildup":
         angles = [angles[0]]*len(angles)
+    states=load_frame_states(request,len(angles))
+    if states is not None:
+        angles=[state["angle_degrees"] for state in states]
+    progressive=mode=="buildup" or states is not None and states[0]["buildup_fraction"] is not None
+    stage=request.get("build_stage")
+    if stage is not None and (not isinstance(stage,dict) or type(stage.get("visible_layers")) is not int or not 0<=stage["visible_layers"]<=50000):
+        raise ValueError("invalid fixed build stage")
+    if stage is not None and progressive:
+        raise ValueError("choose fixed build stage or progressive build-up")
+    building=progressive or stage is not None
     spec = load_scene_spec(request["scene_path"])
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = [output_dir / (f"frame_{i:04d}.png" if mode != "still" else "still.png") for i in range(len(angles))]
@@ -132,25 +191,45 @@ def render(request):
               "worker_hash": file_hash(__file__), "scene_script_hash": file_hash(Path(__file__).with_name("scene.py")),
               "blender_version": bpy.app.version_string, "blender_build_hash": str(bpy.app.build_hash),
               "engine": engine, "size": size, "width": width, "height": height, "samples": samples, "mode": mode,
-              "angles": angles, "transparent": transparent}
+              "angles": angles, "transparent": transparent,
+              "frame_states_hash":hashlib.sha256(json.dumps(states,sort_keys=True,allow_nan=False).encode()).hexdigest() if states is not None else None,
+              "build_stage":stage}
     prepare_manifest(output_dir, recipe, reuse)
-    obj, info = build_scene(render_spec_for_mode(spec, mode), engine, size, samples, transparent, width, height)
+    render_spec=render_spec_for_mode(spec, mode)
+    render_spec["build_up"]=building
+    if states is not None:
+        render_spec["fit_turntable"]=False
+        render_spec["camera"]=states[0]["camera"]
+    obj, info = build_scene(render_spec, engine, size, samples, transparent, width, height)
     if info["geometry_hash"] != recipe["geometry_hash"]:
         raise ValueError("geometry changed during scene preparation")
     prepare_seconds = time.perf_counter() - started
-    visible_layers = buildup_schedule(info["build_layers"],len(angles)) if mode == "buildup" else [None]*len(angles)
+    visible_layers = ([layer_for_count(info["build_layers"],stage["visible_layers"])]*len(angles) if stage is not None
+                      else [layer_for_fraction(info["build_layers"],state["buildup_fraction"]) for state in states] if states is not None and building
+                      else buildup_schedule(info["build_layers"],len(angles)) if building else [None]*len(angles))
+    source_mesh=obj.data.copy() if building and spec.get("section") is not None else None
+    frame_analysis=[]
     completed = []
     durations = []
     for index, (angle, output_path) in enumerate(zip(angles, paths)):
         frame_start = time.perf_counter()
         if visible_layers[index] is not None:
-            set_visible_layer(obj,visible_layers[index])
+            if source_mesh is not None:
+                info["section_analysis"]=prepare_buildup_section(obj,source_mesh,spec,info["bounds_m"],visible_layers[index])
+            else:
+                set_visible_layer(obj,visible_layers[index])
+        frame_analysis.append(info.get("section_analysis"))
+        if states is not None:
+            set_camera_spec(bpy.context.scene.camera,states[index]["camera"])
+            if spec.get("layer_appearance",False) and spec.get("layer_filtering",True):
+                for material in obj.data.materials:
+                    apply_layer_filter(material,bpy.context.scene.camera,width,height,min(spec["layer_height_mm"],spec.get("first_layer_height_mm",spec["layer_height_mm"])))
         if should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
             elapsed = time.perf_counter() - frame_start
             durations.append(elapsed)
             completed.append(str(output_path))
             emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                    "elapsed_seconds": elapsed, "size": size, "reused": True,"visible_layer":visible_layers[index]})
+                                    "elapsed_seconds": elapsed, "size": size, "reused": True,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis")})
             continue
         obj.rotation_euler.z = math.radians(angle)
         temporary = output_path.with_name(output_path.stem + ".partial.png")
@@ -167,10 +246,21 @@ def render(request):
         durations.append(elapsed)
         completed.append(str(output_path))
         emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                "elapsed_seconds": elapsed, "size": size, "reused": False,"visible_layer":visible_layers[index]})
-    emit(request, "complete", {"paths": completed, "engine": engine, "size": size, "samples": samples,
-                               "prepare_seconds": prepare_seconds, "frame_seconds": durations,
-                               "total_seconds": time.perf_counter() - started, **info})
+                                "elapsed_seconds": elapsed, "size": size, "reused": False,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis")})
+    analysis_path=output_dir/"frame-analysis.json"
+    analysis_temporary=analysis_path.with_suffix(".partial.json")
+    analysis_temporary.write_text(json.dumps(frame_analysis,allow_nan=False),encoding="utf-8")
+    os.replace(analysis_temporary,analysis_path)
+    payload={"paths": completed, "engine": engine, "size": size, "samples": samples,
+             "frame_count":len(angles),"build_layer_count":len(info.get("build_layers") or []),
+             "prepare_seconds": prepare_seconds, "frame_seconds": durations,
+             "total_seconds": time.perf_counter() - started,"frame_analysis":frame_analysis,
+             "frame_analysis_path":str(analysis_path),**info}
+    details_path=output_dir/"render-result.json"
+    details_temporary=details_path.with_suffix(".partial.json")
+    details_temporary.write_text(json.dumps(payload,allow_nan=False),encoding="utf-8")
+    os.replace(details_temporary,details_path)
+    emit(request, "complete", completion_event(payload,details_path))
 
 
 def main():
