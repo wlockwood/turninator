@@ -79,3 +79,29 @@ fn layer_settings_follow_the_physical_scene_contract() {
     settings.first_layer_height_mm = 3.;
     assert!(settings.validate().is_err());
 }
+
+#[test]
+fn inspection_settings_reject_nonfinite_planes_and_out_of_range_axes() {
+    use turninator::viewport::{SectionPlane, ViewportSettings};
+    let mut settings = ViewportSettings {
+        section: Some(SectionPlane {
+            axis: 3,
+            position_mm: 1.,
+            keep_positive: true,
+        }),
+        ..Default::default()
+    };
+    assert!(settings.validate().is_err());
+    settings.section = Some(SectionPlane {
+        axis: 2,
+        position_mm: f32::NAN,
+        keep_positive: false,
+    });
+    assert!(settings.validate().is_err());
+    settings.section = None;
+    settings.buildup_height_mm = Some(-1.);
+    assert!(settings.validate().is_err());
+    settings.buildup_height_mm = None;
+    settings.opacity = 1.1;
+    assert!(settings.validate().is_err());
+}

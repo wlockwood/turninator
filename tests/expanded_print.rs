@@ -419,6 +419,36 @@ fn write_expanded_geometry_proofs() {
         let top = source.bounds().unwrap().max[2];
         let schedule = LayerSchedule::uniform(0.2, 0.2, top).unwrap();
         let proof = slice_stepped_with_report(&source, &schedule.boundaries_mm).unwrap();
+        write(
+            &name.replace("stepped-", "original-"),
+            &source,
+            None,
+            vec![
+                "Original closed fixture; paired reference for experimental stepped geometry."
+                    .into(),
+            ],
+        );
+        let measure = |mesh: &Mesh| {
+            let volume: f64 = mesh
+                .triangles
+                .iter()
+                .map(|t| {
+                    let a = mesh.positions[t[0] as usize];
+                    let b = mesh.positions[t[1] as usize];
+                    let c = mesh.positions[t[2] as usize];
+                    (a[0] * (b[1] * c[2] - b[2] * c[1])
+                        + a[1] * (b[2] * c[0] - b[0] * c[2])
+                        + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                        / 6.
+                })
+                .sum();
+            let bounds = mesh.bounds().unwrap();
+            serde_json::json!({"vertices":mesh.positions.len(),"triangles":mesh.triangles.len(),"signed_volume_mm3":volume,"bounds_mm":{"min":bounds.min,"max":bounds.max}})
+        };
+        std::fs::write(
+            directory.join(format!("{name}-comparison.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({"pitch_mm":0.2,"original":measure(&source),"stepped":measure(&proof.mesh),"sample_heights_mm":proof.sample_heights_mm,"warnings":proof.warnings})).unwrap(),
+        ).unwrap();
         write(name, &proof.mesh, None, proof.warnings);
     }
 }

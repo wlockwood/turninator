@@ -52,7 +52,10 @@ fn late_async_completions_cannot_replace_the_selected_model() {
 
 #[test]
 fn scene_snapshot_keeps_independent_presentation_and_first_layer() {
-    let mut scene = SceneSettings { display_rotation_degrees: [90., 0., 0.], ..Default::default() };
+    let mut scene = SceneSettings {
+        display_rotation_degrees: [90., 0., 0.],
+        ..Default::default()
+    };
     scene.import.first_layer_height_mm = 0.3;
     let result = render_scene(
         &scene,

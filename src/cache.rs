@@ -51,11 +51,15 @@ impl CacheStore {
         }
         let resolved = fs::canonicalize(path)?;
         if resolved.parent() != Some(self.root.as_path())
-            || fs::read(resolved.join(".turninator-job"))? != b"Turninator job v1\n"
+            || crate::settings::read_bounded(&resolved.join(".turninator-job"), 64)?
+                != b"Turninator job v1\n"
         {
             return Err("directory is not an owned immediate cache job".into());
         }
         Ok(resolved)
+    }
+    pub fn owned_job(&self, path: &Path) -> Result<PathBuf> {
+        self.owned(path)
     }
     pub fn save_record(&self, path: &Path, record: &JobRecord) -> Result<()> {
         let path = self.owned(path)?;
@@ -71,7 +75,8 @@ impl CacheStore {
             if self.owned(&path).is_err() {
                 continue;
             }
-            if let Ok(bytes) = fs::read(path.join("job-record.json"))
+            if let Ok(bytes) =
+                crate::settings::read_bounded(&path.join("job-record.json"), 1024 * 1024)
                 && bytes.len() <= 1024 * 1024
                 && let Ok(record) = serde_json::from_slice::<JobRecord>(&bytes)
                 && record.schema_version == 1

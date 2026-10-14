@@ -26,3 +26,48 @@ Triangle edges are an explicit debug mesh overlay. They are not inferred design-
 6. `cargo clippy --offline --lib --test viewport -- -D warnings`: **passed**. `rustfmt --edition 2024 src/viewport/mod.rs src/viewport/camera.rs src/viewport/gpu.rs tests/viewport.rs` completed. Root owns the final whole-workspace checks and live native window smoke.
 
 No renderer/root/UI files or Cargo metadata were edited for this viewport slice. Hardware-rendered pixel assertions establish the offscreen renderer's behavior; they do not establish desktop input behavior, end-to-end worker integration, sustained GPU memory usage or throughput. Those remain root integration/runtime checks.
+
+## Task 6 native inspection follow-up
+
+The baseline was held unchanged until root captured and staged the desktop milestone. The following additions preserve all default rendering behavior:
+
+- `SectionPlane { axis:u8, position_mm:f32, keep_positive:bool }` and `ViewportSettings.section: Option<SectionPlane>` clip original build coordinates. The plane follows both display pose and turntable rotation automatically. The native view is an **uncapped cutaway** of existing faces; it does not construct a solid envelope, generate infill or close air gaps. Renderer-side exact Boolean caps are a separate capability.
+- `buildup_height_mm: Option<f32>` clips at build Z. `buildup_complete_layers` snaps to configured first/uniform subsequent boundaries. Adaptive schedules should supply their already-selected physical boundary with uniform snapping disabled; the viewport does not infer adaptive layers.
+- `InspectionMode::{Opaque,Ghost,Xray}` and `opacity` select explicit inspection transparency. Ghost uses a bounded depth-weighted sum; Xray uses a constant weight and half the selected opacity. Neither is a resin material/refraction/physical absorption prediction.
+- Transparent rendering uses additive RGBA16Float accumulation plus multiplicative R16Float revealage, then a fullscreen linear-light composite. Triangle sorting and CPU rasterization are unnecessary. OIT textures allocate lazily and resize with the native targets. Opaque depth behavior is unchanged. In transparent mode the optional triangle-wire overlay includes internal edges explicitly.
+- `set_triangle_colors(&[[f32;3]])` assigns linear RGB by original source face order; empty input restores the single scene color. Only vertices crossing color boundaries are duplicated, with at most six million colored vertices and adapter buffer-size guards. Invalid color count/components or expansion budgets preserve the previous GPU geometry. The root must call this on palette/mesh changes, not every frame.
+- `resource_bytes()` estimates explicitly allocated geometry buffers and viewport textures, excluding driver overhead. Geometry unload drops both source face metadata and GPU color/position/index/edge buffers.
+
+Inspection-setting tests were written first and failed for invalid axes/planes/opacity; validation then passed. The actual GPU inspection test was written before OIT and failed because Ghost pixels equaled opaque output. After OIT implementation, it passes: rear green/blue groups contribute through a red front surface; reversing all source triangle/color order changes no channel by more than two 8-bit values; sections remove the expected half of a model before and after display rotation; complete-layer build-up correctly differs from a partial layer; sub-first-layer output is empty; gaps between separate actual stadium beads remain background in Opaque/Ghost/Xray; the retained bead remains visible; resized OIT and its edge overlay validate with no GPU errors.
+
+Follow-up commands:
+
+- `cargo test --offline --test viewport`: **5/5 passed**.
+- `cargo test --offline --lib gpu_ -- --ignored --nocapture`: **2/2 actual-GPU correctness tests passed**, 0.80s observed total on RTX 4070 Ti/Vulkan/595.79.
+- Owned viewport files are rustfmt formatted. Last targeted Clippy attempt reported only root's concurrent app.rs debounce `collapsible_if`, with no viewport diagnostics; root owns final full-tree strict Clippy.
+
+### Measured dense-bead throughput
+
+`cargo test --offline --lib dense_bead_viewport_benchmark -- --ignored --nocapture` passed. The generated workload is 10,000 independent infill beads across 100 layers, **1,040,000 triangles**, rendered at **2560×1440** for 30 distinct angles per mode. It uses the real persistent-buffer renderer. Each timed frame includes CPU command encoding/submission and waiting for GPU completion. One warm frame precedes each mode. The Rust test uses the unoptimized test profile.
+
+| Mode | Median frame | P95 frame | Explicit GPU allocation |
+| --- | ---: | ---: | ---: |
+| Opaque | 4.787 ms | 5.204 ms | 76.19 MiB |
+| Ghost | 5.389 ms | 6.519 ms | 111.35 MiB |
+| Xray | 5.085 ms | 6.110 ms | 111.35 MiB |
+
+Initial validation/buffer upload took **390.28 ms**. These offscreen results support the native geometry throughput target on this adapter. They exclude egui painting/compositing, presentation, desktop input latency, source import, shader initialization, driver bookkeeping and long-duration memory behavior; they are not an observed desktop FPS claim. Weighted transparency is approximate for dense overlapping/internal bead surfaces, and RGBA16 accumulation introduces bounded order-dependent rounding.
+## Whole deposited-layer face visibility follow-up
+
+Added `Viewport::set_triangle_layer_tops(&[f32]) -> Result<()>`. Values follow the original mesh triangle order and specify the actual top of each face's deposited layer in build millimeters. Empty input restores the earlier continuous build-Z plane clip. Values must match the face count and be finite in `0..1e7`; failed assignments preserve existing GPU resources. Mesh replacement/unload clears both color and layer metadata.
+
+The persistent per-vertex attribute stream now packs linear RGB plus layer top (16 bytes). Vertex remapping keys include original vertex index, all three color channels, and layer top, so shared vertices split only at differing face attributes. The existing six-million expanded-vertex cap and adapter buffer limits remain enforced. Color changes retain layer metadata and layer changes retain colors. Build-up discards the entire future-layer triangle in opaque, edge, and OIT passes, preventing a future bead's bottom cap from surviving exactly at the previous layer boundary. Section clipping remains independent in build coordinates. Call the setter when imported geometry changes; the selected height remains a uniform-only frame update.
+
+TDD evidence:
+
+- RED: `cargo test --offline --lib gpu_layer_faces_preserve_caps_and_palette -- --ignored --nocapture` failed with missing `set_triangle_layer_tops` before implementation.
+- GREEN: the same command passed on the actual GPU. It compares rendered pixels against an independently reduced mesh containing only the deposited first-layer triangles, while retaining source positions for identical camera/display transforms. It covers adaptive bead heights `.2` then `.3`, a selected top of `.2`, the future bead's boundary bottom cap, Opaque/Ghost/X-ray, display rotation, triangle edges, palette and metadata reset/reapplication, invalid lengths/NaN, and unload.
+- `cargo test --offline --lib gpu_ -- --ignored --nocapture`: all three GPU regressions passed, zero validation errors; RTX 4070 Ti / Vulkan, NVIDIA 595.79; 0.99 seconds test runtime.
+- Owned `gpu.rs` formatting completed. Full strict Clippy reached only the concurrent root-owned `app.rs` large `Message` enum warning after `ImportedModel` was expanded; root notified. No viewport warning was reported.
+
+Earlier dense-scene timings above describe the preceding 12-byte color attribute stream. This follow-up adds four GPU bytes per expanded vertex plus retained CPU face metadata; those historical allocation/timing figures are not a new benchmark of this revision.

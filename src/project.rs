@@ -1,3 +1,4 @@
+use crate::export::{AnimationMode, ExportLayout, SectionSpec, VideoCodec};
 use crate::{Result, presentation::SceneSettings, settings::atomic_write, viewport::OrbitCamera};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,6 +16,36 @@ pub struct ProjectFile {
     pub camera: OrbitCamera,
     pub export_size: u32,
     pub engine: String,
+    #[serde(default)]
+    pub output_options: OutputPreferences,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputPreferences {
+    pub still_size: u32,
+    pub still_engine: String,
+    pub still_samples: u32,
+    pub samples: u32,
+    pub transparent: bool,
+    pub video_codec: VideoCodec,
+    pub animation: AnimationMode,
+    pub section: Option<SectionSpec>,
+    pub layout: ExportLayout,
+}
+impl Default for OutputPreferences {
+    fn default() -> Self {
+        Self {
+            still_size: 4096,
+            still_engine: "cycles".into(),
+            still_samples: 64,
+            samples: 32,
+            transparent: false,
+            video_codec: VideoCodec::H264,
+            animation: AnimationMode::Turntable,
+            section: None,
+            layout: ExportLayout::Single,
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceStatus {
@@ -39,13 +70,20 @@ pub fn save_project(path: &Path, project: &ProjectFile) -> Result<()> {
     {
         portable.source_path = relative_source(&source, &base).unwrap_or(source);
     }
-    atomic_write(path, &serde_json::to_vec_pretty(&portable)?)
+    let bytes = serde_json::to_vec_pretty(&portable)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(
+            "project exceeds 1 MiB reload budget; reduce explicit boundaries before saving".into(),
+        );
+    }
+    atomic_write(path, &bytes)
 }
 pub fn load_project(path: &Path) -> Result<(ProjectFile, SourceStatus)> {
     if fs::metadata(path)?.len() > 1024 * 1024 {
         return Err("project exceeds 1 MiB budget".into());
     }
-    let mut project: ProjectFile = serde_json::from_slice(&fs::read(path)?)?;
+    let mut project: ProjectFile =
+        serde_json::from_slice(&crate::settings::read_bounded(path, 1024 * 1024)?)?;
     validate_project(&project)?;
     if !project.source_path.is_absolute() {
         project.source_path = path
@@ -55,19 +93,43 @@ pub fn load_project(path: &Path) -> Result<(ProjectFile, SourceStatus)> {
     }
     let status = if !project.source_path.is_file() {
         SourceStatus::Missing
-    } else if format!("{:x}", Sha256::digest(fs::read(&project.source_path)?))
-        == project.source_hash
-    {
+    } else if file_hash(&project.source_path)? == project.source_hash {
         SourceStatus::Current
     } else {
         SourceStatus::Changed
     };
     Ok((project, status))
 }
+fn file_hash(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
 
 fn validate_project(project: &ProjectFile) -> Result<()> {
     project.scene.validate()?;
     project.camera.validate()?;
+    let output = &project.output_options;
+    if !(64..=8000).contains(&output.still_size)
+        || !(1..=4096).contains(&output.samples)
+        || !(1..=4096).contains(&output.still_samples)
+        || !["eevee", "cycles"].contains(&output.still_engine.as_str())
+        || output
+            .section
+            .as_ref()
+            .is_some_and(|s| s.axis > 2 || !s.position_mm.is_finite() || s.position_mm.abs() > 1e7)
+    {
+        return Err("invalid saved output preferences".into());
+    }
     if project.schema_version != 1 {
         return Err("unsupported project version".into());
     }

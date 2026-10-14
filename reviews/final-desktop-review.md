@@ -1,0 +1,51 @@
+# Final desktop integration review
+
+Read-only review of `src/app.rs`, `presentation.rs`, `project.rs`, `session.rs` and `cache.rs`, plus completion evidence, on 2026-10-14. Findings are traced from the current source; no additional GUI/GPU test was run during packaging. Root owns fixes and their verification.
+
+## Important findings
+
+1. **Saved section position is overwritten after project load.** `restore_project()` restores axis/position/side/cap, then the accepted `Imported` handler always assigns `section_position = (minZ + maxZ)/2`. A saved X/Y cut or nonmidpoint Z cut changes silently when reopened. Preserve the saved section state through project import; ordinary reimports should also avoid resetting a deliberately edited cut unnecessarily. Regression: save X=3.25 on a model whose midpoint Z differs, reopen and assert both native section settings and export snapshot retain X=3.25.
+
+2. **Dismissing missing/changed-source recovery leaves the app importing forever.** `OpenProject` sets `importing=true`; the unresolved `LoadedProject` branch keeps it true. The recovery window's Dismiss button only clears `unresolved_project`. The prior model remains visible but export controls and automatic preview remain disabled. Dismiss must finish this pending operation and restore an internally coherent accepted state. Regression: valid model -> missing-source project -> Dismiss -> export prior model succeeds.
+
+3. **Asynchronous cache recovery can replace the active job's bookkeeping.** `recover_job()` sets `cache_action_pending`, but `start_export()` and auto-preview ignore that flag. A new export B can begin while A's snapshot is loading. `RecoveredJob` then replaces `last_task` with A; `retry()` returns because B is busy. B's completion is recorded into A, and active-job deletion protection now identifies A rather than B. Gate new exports/automatic preview during the cache operation and validate a recovery operation token before accepting its result. Keep the active task record independent from a candidate recovered snapshot. Regression: delay A recovery, attempt B export, then deliver A and B completions; verify records and deletion protection refer to the actual running job.
+
+4. **A queued prior-model edit can supersede a newer Open Project intent.** `OpenProject` advances the generation but does not clear `debounced_import` or `pending_import`. A 350 ms old-model debounce then calls `import(old_path)`, advances the generation again and causes the requested project result to be discarded. Clear obsolete queued/debounced import state when a new project intent begins. Clear an earlier unresolved-project prompt when a newer source/project intent replaces it. Regression: schedule an edit debounce, request a project before it fires, deliver results in both orders, and retain the newer project.
+
+5. **Save Project is allowed while accepted source/settings disagree.** The toolbar enables save whenever a model exists, and `Message::SaveProject` combines that accepted model path/hash with the current editable scene without checking `importing` or `model.import_settings == scene.import`. A save dialog opened before an asynchronous replacement can similarly finish while another import is pending. Apply the accepted-snapshot invariant at save completion as well as the button. Regression: prior accepted model, start another source/settings import, finish Save dialog, and verify the save is deferred/rejected or explicitly uses the coherent accepted snapshot.
+
+## Secondary limits worth addressing or documenting
+
+- `model_scene()` measures compact JSON against 1 MiB, while `RenderService` writes pretty JSON and the Python reader limits that actual file to 1 MiB. A compact scene just under the limit can therefore be accepted and fail only after job publication. Use one bounded serialization contract for the desktop snapshot; the updated CLI already checks its actual emitted pretty bytes.
+- Cache admission reserves all requested frame bytes even on a verified-frame retry. A cache near its budget can reject a fully rendered job that needs only encoding. The policy is conservative and source-safe, but the UI's recovery promise should distinguish required incremental workspace from already-retained frames. Native export free-space preflight likewise currently reserves a full render set.
+- The render actor's cancellation flag is shared across tasks and `submit()` clears it before queue admission. Studio busy gating normally prevents overlap; this is not a self-contained concurrent-service guarantee. The recovery race above makes strict UI gating especially important.
+- Renderer/alpha changes do not advance the scene revision used by automatic preview. Manual renders use current options, but an existing preview can remain labeled current after changing renderer/background.
+- `start_export()` publishes a running record before snapshot validation; failures can leave never-started jobs shown as interrupted. Validate first or record a failed state for this path.
+
+## Confirmed integration improvements
+
+Accepted import settings are now retained with the model; failure restores them and `model_scene()` rejects mismatches. First-import changes track selected source and stale generations. Decoded images carry job ID and revision, with stale success/error rejection and an explicit preview-decode pending guard. Background UI messages request repaint; actor events are polled while busy. Bounds are cached, adaptive build-up uses actual layer tops, and native face metadata matches the renderer's complete-layer ordering. Joined grouping criteria match the bead producer. Models without print groups clear baked palette colors. Source hashing detects ordinary changes during import, and source/job paths are protected from output replacement. Cache removal rejects nested links/reparse points and checks immediate owned-directory markers.
+
+## Completion-evidence assessment
+
+The implemented output/section/AV1/build-up paths have actual tests and retained artifacts. Full-size sheet and 80-frame side-by-side section animation exist; image-footprint filtering has matched complete-loop measurements. The maintained Blender patch has exact archive/executable hashes and actual small EEVEE/OptiX qualification, separately labeled from the broad installed-runtime suite.
+
+The stepped-envelope acceptance still lacks the requested actual original-versus-stepped image matrix for cube, wedge, dome, hole and thin wall. `tests/expanded_print.rs::write_expanded_geometry_proofs` currently writes only stepped snapshots, so save the matching original meshes too, then render paired shared-camera/shared-scale stills after the packaging GPU slot. Keep the experiment explicitly bounded; no print photographs were supplied, so photographic agreement cannot be claimed.
+
+The planned Bayer-versus-Sierra comparison on complete animations is not recorded: both encoders currently select Bayer scale 3. Existing retained frames permit a CPU-only matched encoder comparison without new rendering. The docs' early milestone paragraphs are historical but still include obsolete current-tense statements (no filtering/native/sections); root should update the final status and clearly preserve earlier checkpoints as historical. Native million-triangle measurements are recorded in the viewport review; compilation or small Blender checks should not be substituted for that evidence.
+
+## Follow-up disposition after root fixes
+
+Re-read the changed state transitions and bounded readers on 2026-10-14 before final packaged smoke. The five important findings are addressed in source:
+
+| Finding | Accepted correction |
+|---|---|
+| Saved section overwritten | Accepted import preserves section position during restored-camera/project import; a fresh model midpoint uses the selected section axis. The expanded smoke checks X=0.75 survives reload. |
+| Dismiss leaves imports blocked | Missing/changed load ends importing; the shared dismiss handler clears unresolved/queued/debounced state, advances the generation and restores accepted import settings. Smoke checks the previous model becomes usable. |
+| Recovery replaces active bookkeeping | `start_export` rejects while a cache action is pending; recovered results reject an already-active export before touching `last_task`. Retry is gated as well. Smoke deliberately attempts export during recovery and checks retained job identity. |
+| Old debounce supersedes project | Open Project clears queued/debounced imports and an earlier unresolved prompt before advancing the generation. New model imports also dismiss obsolete recovery prompts. Smoke installs an expired stale debounce immediately before opening the saved project. |
+| Save combines inconsistent state | Save completion rejects both pending imports and accepted-settings mismatch, including dialogs that return late; the toolbar also disables save during import. |
+
+The actor now serializes compact scene bytes and checks the actual 1 MiB payload before writing. Bounded reads cover settings/projects, source snapshots, cache markers/records, recovery metadata, and backend scene/job manifests. A separate display job token prevents a late recovered/exported image from switching the right panel away from a newer preview intent. Existing ID/revision checks continue to discard stale same-kind decode events. I found no additional important blocker in this re-read. This is source acceptance; the final packaged GUI smoke is owned by root/packaging and must supply runtime confirmation separately.
+
+Both evidence gaps are now closed in `reviews/native-render-implementation.md`: the five original/stepped pairs plus separate joined-bead reference were rendered and inspected, and a matched full 80-frame dither comparison selected Sierra2_4a. New native/development encoding recipes record that selection separately from render identities. The experimental stepped designation and lack of photographic calibration remain explicit. Conservative full-frame retry storage reservations and preview renderer/alpha revision invalidation remain secondary UX limitations from the earlier review; they are not represented as fixed by the five state-flow changes.

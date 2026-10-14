@@ -8,11 +8,7 @@ use std::{
 };
 use turninator::{
     Result,
-    model::stl::load_stl_with_report,
-    print::{
-        beads::build_bead_mesh,
-        gcode::{ParseOptions, parse_gcode},
-    },
+    presentation::{ImportSettings, SceneSettings, load_model, model_scene},
 };
 
 const HELP: &str = "Turninator — print geometry foundation\n\n\
@@ -24,8 +20,15 @@ Prepare options:\n\
   --first-layer-height <mm>       Defaults to layer height\n\
   --filament-diameter <mm>        Default 1.75\n\
   --millimeters-per-unit <scale>  STL only, default 1 (assumed mm)\n\n\
-  --surface <clean|layers>        STL appearance, default clean\n\n\
-G-code support is a constrained planar, single-tool Marlin subset.\n\
+  --surface <clean|layers|stepped> STL mode, default clean; stepped is experimental\n\
+  --beads <independent|joined>    G-code geometry, default independent\n\
+  --allow-arcs <true|false>       Default false; planar XY arcs only\n\
+  --firmware <marlin|klipper>     Default marlin\n\
+  --allow-tool-changes <true|false> Default false\n\
+  --chord-error <mm>             Arc approximation, default 0.02\n\
+  --home <x,y,z>                 Explicit G28 home coordinates in mm\n\
+  --layer-boundaries <0,z1,z2,...> Explicit physical build schedule\n\n\
+G-code support is a bounded planar subset with explicitly enabled extensions.\n\
 See README.md for unsupported commands and the Blender proof command.";
 
 fn main() {
@@ -78,7 +81,10 @@ fn run() -> Result<()> {
     match args[0].as_str() {
         "gui" => {
             let values = options(&args[1..])?;
-            if values.keys().any(|key| !["--open", "--data-dir", "--smoke-output"].contains(&key.as_str())) {
+            if values
+                .keys()
+                .any(|key| !["--open", "--data-dir", "--smoke-output"].contains(&key.as_str()))
+            {
                 return Err("gui accepts --open, --data-dir, and --smoke-output".into());
             }
             turninator::app::run(turninator::app::LaunchOptions {
@@ -103,120 +109,184 @@ fn run() -> Result<()> {
         "prepare" => {
             let source = PathBuf::from(args.get(1).ok_or("prepare requires an input path")?);
             let values = options(&args[2..])?;
-            for key in values.keys() {
-                if ![
-                    "--out",
-                    "--layer-height",
-                    "--first-layer-height",
-                    "--filament-diameter",
-                    "--millimeters-per-unit",
-                    "--surface",
-                ]
-                .contains(&key.as_str())
-                {
-                    return Err(format!("unsupported option {key}").into());
-                }
-            }
-            let output = PathBuf::from(values.get("--out").ok_or("--out is required")?);
-            if output.exists() {
-                return Err(format!(
-                    "output already exists: {}; use a new directory",
-                    output.display()
-                )
-                .into());
-            }
-            let height = number(&values, "--layer-height", 0.20)?;
-            let first = number(&values, "--first-layer-height", height)?;
-            turninator::print::schedule::LayerSchedule::uniform(height, first, height)?;
-            let extension = source
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let surface = values
-                .get("--surface")
-                .map(String::as_str)
-                .unwrap_or("clean");
-            if !["clean", "layers"].contains(&surface)
-                || (extension != "stl" && values.contains_key("--surface"))
-            {
-                return Err("--surface clean|layers applies only to STL".into());
-            }
-            let (mesh, geometry_kind, warnings, segment_count) = match extension.as_str() {
-                "gcode" => {
-                    if values.contains_key("--millimeters-per-unit") {
-                        return Err(
-                            "G-code already has physical units; --millimeters-per-unit is STL-only"
-                                .into(),
-                        );
-                    }
-                    if fs::metadata(&source)?.len() > 128 * 1024 * 1024 {
-                        return Err("G-code exceeds the 128 MiB input budget".into());
-                    }
-                    let parsed = parse_gcode(
-                        &fs::read_to_string(&source)?,
-                        &ParseOptions {
-                            layer_height_mm: height,
-                            first_layer_height_mm: first,
-                            filament_diameter_mm: number(&values, "--filament-diameter", 1.75)?,
-                            ..Default::default()
-                        },
-                    )?;
-                    let count = parsed.segments.len();
-                    (
-                        build_bead_mesh(&parsed.segments)?,
-                        "beads",
-                        parsed.warnings,
-                        count,
-                    )
-                }
-                "stl" => {
-                    let scale = number(&values, "--millimeters-per-unit", 1.0)?;
-                    let imported = load_stl_with_report(&source, scale)?;
-                    let mut warnings = vec![format!(
-                        "STL units interpreted as {scale} millimeters per source unit. {}",
-                        if surface == "layers" {
-                            "Layer Appearance is a shading approximation; source silhouette is preserved."
-                        } else {
-                            "Clean source silhouette; printed surface appearance disabled."
-                        }
-                    )];
-                    if imported.omitted_degenerate_triangles > 0 {
-                        warnings.push(format!("Omitted {} exactly zero-area triangles; no tolerance-based repair or simplification was applied.", imported.omitted_degenerate_triangles));
-                    }
-                    (imported.mesh, "original", warnings, 0)
-                }
-                _ => return Err("supported inputs are .stl and plain .gcode".into()),
-            };
-            let bounds = mesh.bounds()?;
-            new_directory(&output)?;
-            let mesh_path = output.join("mesh.bin");
-            mesh.write_binary(&mesh_path)?;
-            let scene = serde_json::json!({
-                "schema_version": 1, "mesh_path": fs::canonicalize(&mesh_path)?,
-                "geometry_kind": geometry_kind, "layer_height_mm": height,
-                "first_layer_height_mm": first, "layer_appearance": surface == "layers",
-                "groove_depth_mm": 0.05 * height.min(first),
-                "bead_layout": if geometry_kind == "beads" { Some("independent_stadium_v1") } else { None },
-                "color": [0.035, 0.22, 0.52], "roughness": 0.42,
-                "display_rotation_degrees": [0.0, 0.0, 0.0], "warnings": warnings,
-            });
-            let temporary = output.join("scene.partial.json");
-            fs::write(&temporary, serde_json::to_vec_pretty(&scene)?)?;
-            fs::rename(temporary, output.join("scene.json"))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "scene": fs::canonicalize(output.join("scene.json"))?, "geometry_kind": geometry_kind,
-                    "segments": segment_count, "vertices": mesh.positions.len(), "triangles": mesh.triangles.len(),
-                    "warnings": scene["warnings"],
-                    "bounds_mm": {"min": bounds.min, "max": bounds.max},
-                }))?
-            );
-            Ok(())
+            prepare(&source, &values)
         }
         _ => Err(format!("unknown command {}; run --help", args[0]).into()),
     }
+}
+
+fn boolean(values: &BTreeMap<String, String>, key: &str, default: bool) -> Result<bool> {
+    match values.get(key).map(String::as_str) {
+        None => Ok(default),
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        _ => Err(format!("{key} must be true or false").into()),
+    }
+}
+fn numbers(value: &str, key: &str) -> Result<Vec<f64>> {
+    value
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f64>()
+                .map_err(|_| format!("{key} requires comma-separated numbers").into())
+        })
+        .collect()
+}
+
+fn prepare(source: &Path, values: &BTreeMap<String, String>) -> Result<()> {
+    for key in values.keys() {
+        if ![
+            "--out",
+            "--layer-height",
+            "--first-layer-height",
+            "--filament-diameter",
+            "--millimeters-per-unit",
+            "--surface",
+            "--beads",
+            "--allow-arcs",
+            "--firmware",
+            "--allow-tool-changes",
+            "--chord-error",
+            "--home",
+            "--layer-boundaries",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(format!("unsupported option {key}").into());
+        }
+    }
+    let output = std::path::absolute(Path::new(values.get("--out").ok_or("--out is required")?))?;
+    if output.exists() {
+        return Err(format!(
+            "output already exists: {}; use a new directory",
+            output.display()
+        )
+        .into());
+    }
+    let extension = source
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let surface = values
+        .get("--surface")
+        .map(String::as_str)
+        .unwrap_or("clean");
+    if !["clean", "layers", "stepped"].contains(&surface)
+        || (extension != "stl" && values.contains_key("--surface"))
+    {
+        return Err("--surface clean|layers|stepped applies only to STL".into());
+    }
+    let gcode_options = [
+        "--beads",
+        "--allow-arcs",
+        "--firmware",
+        "--allow-tool-changes",
+        "--chord-error",
+        "--home",
+    ];
+    if extension == "stl" && gcode_options.iter().any(|key| values.contains_key(*key)) {
+        return Err("bead, arc, firmware, tool and homing options apply only to G-code".into());
+    }
+    if extension != "stl" && values.contains_key("--millimeters-per-unit") {
+        return Err("G-code already has physical units; --millimeters-per-unit is STL-only".into());
+    }
+    if extension == "stl" && surface != "stepped" && values.contains_key("--layer-boundaries") {
+        return Err("STL --layer-boundaries requires --surface stepped; Layer Appearance uses a uniform pitch".into());
+    }
+    let beads = values
+        .get("--beads")
+        .map(String::as_str)
+        .unwrap_or("independent");
+    if !["independent", "joined"].contains(&beads) {
+        return Err("--beads must be independent or joined".into());
+    }
+    let height = number(values, "--layer-height", 0.2)?;
+    let first = number(values, "--first-layer-height", height)?;
+    let home = values
+        .get("--home")
+        .map(|value| {
+            numbers(value, "--home").and_then(|items| {
+                items
+                    .try_into()
+                    .map_err(|_| "--home requires exactly x,y,z".into())
+            })
+        })
+        .transpose()?;
+    let settings = SceneSettings {
+        import: ImportSettings {
+            millimeters_per_unit: number(values, "--millimeters-per-unit", 1.)?,
+            layer_height_mm: height,
+            first_layer_height_mm: first,
+            filament_diameter_mm: number(values, "--filament-diameter", 1.75)?,
+            joined_beads: beads == "joined",
+            firmware: values
+                .get("--firmware")
+                .cloned()
+                .unwrap_or_else(|| "marlin".into()),
+            allow_arcs: boolean(values, "--allow-arcs", false)?,
+            allow_tool_changes: boolean(values, "--allow-tool-changes", false)?,
+            chord_error_mm: number(values, "--chord-error", 0.02)?,
+            homing_position_mm: home,
+            layer_boundaries_mm: values
+                .get("--layer-boundaries")
+                .map(|value| numbers(value, "--layer-boundaries"))
+                .transpose()?
+                .unwrap_or_default(),
+            stepped_envelope: surface == "stepped",
+            ..Default::default()
+        },
+        layer_appearance: surface == "layers",
+        groove_depth_mm: 0.05 * height.min(first),
+        ..Default::default()
+    };
+    settings.validate()?;
+    let model = load_model(source, &settings.import)?;
+    let mesh_path = output.join("mesh.bin");
+    let scene = model_scene(&model, &settings, &mesh_path, None)?;
+    let scene_bytes = serde_json::to_vec_pretty(&scene)?;
+    if scene_bytes.len() > 1024 * 1024 {
+        return Err("render scene exceeds 1 MiB metadata budget".into());
+    }
+    let bounds = model.mesh.bounds()?;
+    // Validate/serialize into a private sibling first. The requested job path
+    // appears only after geometry precision and scene budgets have passed.
+    let parent = output
+        .parent()
+        .ok_or("output requires a parent directory")?;
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(
+        ".turninator-prepare-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    fs::create_dir(&staging)?;
+    struct Stage(PathBuf);
+    impl Drop for Stage {
+        fn drop(&mut self) {
+            for file in ["mesh.bin", "scene.json"] {
+                let _ = fs::remove_file(self.0.join(file));
+            }
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+    let staged = Stage(staging);
+    model.mesh.write_binary(&staged.0.join("mesh.bin"))?;
+    fs::write(staged.0.join("scene.json"), scene_bytes)?;
+    if output.exists() {
+        return Err("output appeared during preparation; existing directory preserved".into());
+    }
+    fs::rename(&staged.0, &output)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &serde_json::json!({"scene":fs::canonicalize(output.join("scene.json"))?,"geometry_kind":model.geometry_kind,"segments":model.segment_count,"vertices":model.mesh.positions.len(),"triangles":model.mesh.triangles.len(),"warnings":scene["warnings"],"bounds_mm":{"min":bounds.min,"max":bounds.max}})
+        )?
+    );
+    Ok(())
 }
 
 fn fixture_gcode() -> String {

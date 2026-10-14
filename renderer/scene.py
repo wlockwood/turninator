@@ -72,6 +72,8 @@ def load_scene_spec(path):
         raise ValueError("bead_layout requires bead geometry")
     _finite_number(spec.get("layer_height_mm"), "layer_height_mm", 0.02, 2.0)
     appearance = spec.get("layer_appearance", False)
+    if type(spec.get("layer_filtering",True)) is not bool:
+        raise ValueError("layer_filtering must be boolean")
     if type(appearance) is not bool or appearance and spec["geometry_kind"] != "original":
         raise ValueError("layer_appearance must be boolean and only enabled for original geometry")
     first = spec.get("first_layer_height_mm", spec["layer_height_mm"])
@@ -123,6 +125,133 @@ def validate_section(section):
     _finite_number(section.get("position_mm"), "section position")
     if type(section.get("keep_positive")) is not bool or type(section.get("cap")) is not bool:
         raise ValueError("section keep_positive/cap must be boolean")
+
+
+def _face_range(group, count, previous_end):
+    if not isinstance(group,dict):
+        raise ValueError("face group must be an object")
+    start,end = group.get("start_triangle"),group.get("end_triangle")
+    if type(start) is not int or type(end) is not int or not previous_end <= start < end <= count:
+        raise ValueError("face ranges must be ordered, disjoint and within the triangle count")
+    return start,end
+
+
+def validate_face_groups(groups, triangle_count):
+    if not isinstance(groups,list) or len(groups)>100000:
+        raise ValueError("face_groups must be a bounded list")
+    previous_end=0
+    materials=set()
+    for group in groups:
+        _,previous_end=_face_range(group,triangle_count,previous_end)
+        color=group.get("color")
+        if not isinstance(color,list) or len(color)!=3:
+            raise ValueError("face group color must be three linear RGB values")
+        for value in color:
+            _finite_number(value,"face group color",0,1)
+        tool=group.get("tool")
+        if type(tool) is not int or not 0<=tool<=255:
+            raise ValueError("face group tool must be an integer 0..255")
+        if not isinstance(group.get("label"),str) or len(group["label"])>256:
+            raise ValueError("face group label must be a short string")
+        materials.add((tool,tuple(color)))
+        if len(materials)>256:
+            raise ValueError("material mapping exceeds 256 unique tool/color combinations")
+    return groups
+
+
+def validate_layer_ranges(ranges, triangle_count):
+    if not isinstance(ranges,list) or not ranges or len(ranges)>100000:
+        raise ValueError("build-up requires bounded layer_face_ranges")
+    previous_end=0
+    previous_layer=-1
+    previous_z=-math.inf
+    layers=[]
+    for group in ranges:
+        start,end=_face_range(group,triangle_count,previous_end)
+        layer=group.get("layer_index")
+        z=_finite_number(group.get("z_top_mm"),"layer top")
+        if start != previous_end or type(layer) is not int or not 0<=layer<=1000000 or layer<previous_layer or z<previous_z:
+            raise ValueError("layer ranges must cover every face in increasing build order")
+        if layer==previous_layer and z!=previous_z:
+            raise ValueError("one layer index must have one build height")
+        if layer!=previous_layer:
+            layers.append(layer)
+        previous_end,previous_layer,previous_z=end,layer,z
+    if previous_end!=triangle_count:
+        raise ValueError("layer ranges must cover every face")
+    return layers
+
+
+def buildup_schedule(layers,frame_count):
+    turntable_angles(frame_count,0)  # Shared bounded frame-count validation.
+    if not layers:
+        raise ValueError("build-up requires at least one layer")
+    return [layers[max(0,math.ceil((index+1)*len(layers)/frame_count)-1)] for index in range(frame_count)]
+
+
+def apply_face_groups(obj,base_material,groups):
+    from array import array
+    validate_face_groups(groups,len(obj.data.polygons))
+    indices=array('i',[0])*len(obj.data.polygons)
+    materials={}
+    for group in groups:
+        key=(group["tool"],tuple(group["color"]))
+        if key not in materials:
+            material=base_material.copy()
+            material.name=f"Tool{group['tool']}_{group['label']}"
+            material.node_tree.nodes.get("Principled BSDF").inputs["Base Color"].default_value=(*group["color"],1)
+            for node in material.node_tree.nodes:
+                if node.type=="VOLUME_ABSORPTION":
+                    node.inputs["Color"].default_value=(*group["color"],1)
+            materials[key]=len(obj.data.materials)
+            obj.data.materials.append(material)
+        start,end=group["start_triangle"],group["end_triangle"]
+        indices[start:end]=array('i',[materials[key]])*(end-start)
+    obj.data.polygons.foreach_set("material_index",indices)
+
+
+def apply_buildup(obj,ranges):
+    import bpy
+    from array import array
+    layers=validate_layer_ranges(ranges,len(obj.data.polygons))
+    values=array('i',[0])*len(obj.data.polygons)
+    for group in ranges:
+        start,end=group["start_triangle"],group["end_triangle"]
+        values[start:end]=array('i',[group["layer_index"]])*(end-start)
+    attribute=obj.data.attributes.new("turninator_layer_index","INT","FACE")
+    attribute.data.foreach_set("value",values)
+    tree=bpy.data.node_groups.new("TurninatorBuildUp","GeometryNodeTree")
+    tree.interface.new_socket(name="Geometry",in_out="INPUT",socket_type="NodeSocketGeometry")
+    tree.interface.new_socket(name="Geometry",in_out="OUTPUT",socket_type="NodeSocketGeometry")
+    source=tree.nodes.new("NodeGroupInput")
+    output=tree.nodes.new("NodeGroupOutput")
+    attribute_node=tree.nodes.new("GeometryNodeInputNamedAttribute")
+    attribute_node.data_type="INT"
+    attribute_node.inputs["Name"].default_value="turninator_layer_index"
+    visible=tree.nodes.new("ShaderNodeValue")
+    visible.name="VisibleLayer"
+    visible.outputs[0].default_value=layers[-1]
+    compare=tree.nodes.new("ShaderNodeMath")
+    compare.operation="GREATER_THAN"
+    delete=tree.nodes.new("GeometryNodeDeleteGeometry")
+    delete.domain="FACE"
+    delete.mode="ALL"
+    tree.links.new(source.outputs["Geometry"],delete.inputs["Geometry"])
+    tree.links.new(attribute_node.outputs["Attribute"],compare.inputs[0])
+    tree.links.new(visible.outputs[0],compare.inputs[1])
+    tree.links.new(compare.outputs[0],delete.inputs["Selection"])
+    tree.links.new(delete.outputs["Geometry"],output.inputs["Geometry"])
+    modifier=obj.modifiers.new("BuildUp","NODES")
+    modifier.node_group=tree
+    return layers
+
+
+def set_visible_layer(obj,layer):
+    modifier=obj.modifiers.get("BuildUp")
+    if modifier is None:
+        raise ValueError("build-up modifier is missing")
+    modifier.node_group.nodes["VisibleLayer"].outputs[0].default_value=layer
+    obj.update_tag()
 
 
 def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_kind):
@@ -377,10 +506,56 @@ def apply_layer_appearance(material, mesh, source_positions_mm, spec):
     links.new(undo_display.outputs["Vector"], components.inputs[0])
     mask = math_node("SUBTRACT", 1.0, math_node("MULTIPLY", components.outputs["Z"], components.outputs["Z"]))
     bump = nodes.new("ShaderNodeBump")
+    bump.name = "PhysicalLayerBump"
     bump.inputs["Distance"].default_value = 1.0
     bump.inputs["Strength"].default_value = 1.0
     links.new(math_node("MULTIPLY", physical_height, mask), bump.inputs["Height"])
     links.new(bump.outputs["Normal"], nodes.get("Principled BSDF").inputs["Normal"])
+
+
+def layer_filter_gain(pitch_mm,pixel_footprint_m,view_cosine):
+    """Lower bound on projected layer spacing; fade only bump amplitude."""
+    pixels=pitch_mm*0.001*abs(view_cosine)/(math.sqrt(2)*max(pixel_footprint_m,1e-15))
+    value=max(0,min(1,(pixels-2)/2))
+    return value*value*(3-2*value)
+
+
+def apply_layer_filter(material,camera,resolution_x,resolution_y,pitch_mm):
+    from mathutils import Vector
+    nodes,links=material.node_tree.nodes,material.node_tree.links
+    bump=nodes.get("PhysicalLayerBump")
+    if bump is None:
+        return
+    def scalar(operation,a,b=None):
+        node=nodes.new("ShaderNodeMath");node.operation=operation
+        for index,value in enumerate((a,b)):
+            if value is None:continue
+            if isinstance(value,(int,float)):node.inputs[index].default_value=value
+            else:links.new(value,node.inputs[index])
+        return node.outputs[0]
+    geometry=nodes.new("ShaderNodeNewGeometry")
+    dot=nodes.new("ShaderNodeVectorMath");dot.operation="DOT_PRODUCT"
+    links.new(geometry.outputs["True Normal"],dot.inputs[0])
+    if camera.data.type=="ORTHO":
+        dot.inputs[1].default_value=camera.rotation_euler.to_matrix() @ Vector((0,0,1))
+        footprint=camera.data.ortho_scale/(resolution_y if camera.data.sensor_fit=="VERTICAL" else resolution_x)
+    else:
+        toward=nodes.new("ShaderNodeVectorMath");toward.operation="SUBTRACT"
+        toward.inputs[0].default_value=camera.location
+        links.new(geometry.outputs["Position"],toward.inputs[1])
+        normal=nodes.new("ShaderNodeVectorMath");normal.operation="NORMALIZE"
+        links.new(toward.outputs["Vector"],normal.inputs[0]);links.new(normal.outputs["Vector"],dot.inputs[1])
+        data=nodes.new("ShaderNodeCameraData")
+        sensor,pixels=(camera.data.sensor_height,resolution_y) if camera.data.sensor_fit=="VERTICAL" else (camera.data.sensor_width,resolution_x)
+        footprint=scalar("MULTIPLY",data.outputs["View Distance"],sensor/camera.data.lens/pixels)
+    # Dividing by |N.V| bounds the surface footprint near grazing incidence.
+    # sqrt(2) bounds diagonal pixel support. The physical height field and cap
+    # mask stay intact; Strength attenuation avoids differentiating the gain.
+    pitch_pixels=scalar("DIVIDE",scalar("MULTIPLY",scalar("ABSOLUTE",dot.outputs["Value"]),pitch_mm*0.001),
+                        scalar("MAXIMUM",scalar("MULTIPLY",footprint,math.sqrt(2)),1e-15))
+    fraction=scalar("MINIMUM",scalar("MAXIMUM",scalar("DIVIDE",scalar("SUBTRACT",pitch_pixels,2),2),0),1)
+    gain=scalar("MULTIPLY",scalar("MULTIPLY",fraction,fraction),scalar("SUBTRACT",3,scalar("MULTIPLY",fraction,2)))
+    links.new(gain,bump.inputs["Strength"])
 
 
 def probe_devices():
@@ -408,6 +583,12 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     import bpy
     from mathutils import Euler, Vector, Matrix
     vertices, triangles = read_mesh(spec["mesh_path"])
+    if "face_groups" in spec:
+        validate_face_groups(spec["face_groups"],len(triangles))
+    if "layer_face_ranges" in spec:
+        validate_layer_ranges(spec["layer_face_ranges"],len(triangles))
+    if spec.get("build_up",False) and (spec["geometry_kind"]!="beads" or spec.get("section") is not None):
+        raise ValueError("build-up requires bead geometry and cannot be combined with section cuts")
     smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout"), spec.get("bead_side_face_ranges")) if spec["geometry_kind"] == "beads" else None
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
@@ -421,6 +602,9 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         for block in list(collection):
             if not block.users:
                 collection.remove(block)
+    for group in list(bpy.data.node_groups):
+        if not group.users and group.name.startswith("Turninator"):
+            bpy.data.node_groups.remove(group)
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_EEVEE_NEXT" if engine == "eevee" else "CYCLES"
     device_info = probe_devices()
@@ -487,6 +671,9 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     obj.data.materials.append(material)
     if spec.get("layer_appearance", False):
         apply_layer_appearance(material, mesh, vertices, spec)
+    if spec.get("face_groups"):
+        apply_face_groups(obj,material,spec["face_groups"])
+    build_layers = apply_buildup(obj,spec.get("layer_face_ranges")) if spec.get("build_up",False) else None
     section_analysis = None
     if spec.get("section") is not None:
         section_analysis = apply_section(obj,spec["section"],rotation,(cx,cy),bottom,
@@ -535,6 +722,10 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
             camera_data.clip_start = max(0.000001, distance * 0.0001)
             camera_data.clip_end = distance * 100
     extent = max(radius * 2, height, 0.001)
+    if spec.get("layer_appearance",False) and spec.get("layer_filtering",True):
+        for layer_material in obj.data.materials:
+            apply_layer_filter(layer_material,camera,scene.render.resolution_x,scene.render.resolution_y,
+                               min(spec["layer_height_mm"],spec.get("first_layer_height_mm",spec["layer_height_mm"])))
     studio = spec.get("studio_preset", "light")
     if studio == "diagram" and spec["geometry_kind"] == "original":
         pixel_mm = spec.get("camera", {}).get("ortho_span_mm", extent * 1000) / scene.render.resolution_y
@@ -574,6 +765,9 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     with Path(spec["mesh_path"]).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+    warnings=list(spec["warnings"])
+    if preset=="resin" and spec["geometry_kind"]=="beads":
+        warnings.append("Resin on bead meshes retains internal/overlapping interfaces; transmission is an optical illustration, not a fused-resin simulation.")
     return obj, {"geometry_hash": digest.hexdigest(), "vertices": len(vertices),
                  "triangles": len(triangles), "bounds_m": envelope,
-                 "device": device_info, "warnings": spec["warnings"],"section_analysis":section_analysis}
+                 "device": device_info, "warnings": warnings,"section_analysis":section_analysis,"build_layers":build_layers}

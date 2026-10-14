@@ -31,7 +31,23 @@ fn project(path: PathBuf, hash: String) -> ProjectFile {
         camera: OrbitCamera::default(),
         export_size: 960,
         engine: "eevee".into(),
+        output_options: Default::default(),
     }
+}
+#[test]
+fn project_too_large_to_reload_cannot_replace_an_existing_save() {
+    let root = scratch();
+    let source = root.join("source.stl");
+    fs::write(&source, b"source").unwrap();
+    let mut p = project(source, format!("{:x}", Sha256::digest(b"source")));
+    p.scene.import.layer_boundaries_mm = (0..=50_000)
+        .map(|i| i as f64 * 0.02348849665713213)
+        .collect();
+    let path = root.join("keep.turninator");
+    fs::write(&path, b"sentinel").unwrap();
+    assert!(save_project(&path, &p).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"sentinel");
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

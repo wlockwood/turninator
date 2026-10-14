@@ -9,7 +9,7 @@ import time
 import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scene import build_scene, load_scene_spec, probe_devices, turntable_angles
+from scene import build_scene, load_scene_spec, probe_devices, turntable_angles, buildup_schedule, set_visible_layer
 
 PREFIX = "TURNINATOR_EVENT "
 
@@ -80,12 +80,22 @@ def decode_png_size(path):
         bpy.data.images.remove(check)
 
 
+def render_spec_for_mode(spec, mode):
+    """Derived camera/visibility flags must not change the source scene identity."""
+    result = dict(spec)
+    if mode != "still":
+        result["fit_turntable"] = True
+    if mode == "buildup":
+        result["build_up"] = True
+    return result
+
+
 def render(request):
     import bpy
     started = time.perf_counter()
     engine = request.get("engine", "eevee")
     mode = request.get("mode", "still")
-    if engine not in ("eevee", "cycles") or mode not in ("still", "turntable"):
+    if engine not in ("eevee", "cycles") or mode not in ("still", "turntable", "buildup"):
         raise ValueError("unsupported engine or mode")
     size = request.get("size", 960)
     width = request.get("width", size)
@@ -107,13 +117,13 @@ def render(request):
     if not isinstance(raw_directory, str) or not Path(raw_directory).is_absolute():
         raise ValueError("output_dir must be absolute")
     output_dir = Path(raw_directory)
-    angles = turntable_angles(request.get("frame_count", 80) if mode == "turntable" else 1,
+    angles = turntable_angles(request.get("frame_count", 80) if mode != "still" else 1,
                               request.get("start_angle_degrees", 0.0))
+    if mode == "buildup":
+        angles = [angles[0]]*len(angles)
     spec = load_scene_spec(request["scene_path"])
-    if mode == "turntable":
-        spec["fit_turntable"] = True
     output_dir.mkdir(parents=True, exist_ok=True)
-    paths = [output_dir / (f"frame_{i:04d}.png" if mode == "turntable" else "still.png") for i in range(len(angles))]
+    paths = [output_dir / (f"frame_{i:04d}.png" if mode != "still" else "still.png") for i in range(len(angles))]
     # Initial worker refuses overwrites; the controller owns unique job directories.
     if not reuse and any(path.exists() for path in paths):
         raise ValueError("output frame already exists; use a fresh output directory")
@@ -124,20 +134,23 @@ def render(request):
               "engine": engine, "size": size, "width": width, "height": height, "samples": samples, "mode": mode,
               "angles": angles, "transparent": transparent}
     prepare_manifest(output_dir, recipe, reuse)
-    obj, info = build_scene(spec, engine, size, samples, transparent, width, height)
+    obj, info = build_scene(render_spec_for_mode(spec, mode), engine, size, samples, transparent, width, height)
     if info["geometry_hash"] != recipe["geometry_hash"]:
         raise ValueError("geometry changed during scene preparation")
     prepare_seconds = time.perf_counter() - started
+    visible_layers = buildup_schedule(info["build_layers"],len(angles)) if mode == "buildup" else [None]*len(angles)
     completed = []
     durations = []
     for index, (angle, output_path) in enumerate(zip(angles, paths)):
         frame_start = time.perf_counter()
+        if visible_layers[index] is not None:
+            set_visible_layer(obj,visible_layers[index])
         if should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
             elapsed = time.perf_counter() - frame_start
             durations.append(elapsed)
             completed.append(str(output_path))
             emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                    "elapsed_seconds": elapsed, "size": size, "reused": True})
+                                    "elapsed_seconds": elapsed, "size": size, "reused": True,"visible_layer":visible_layers[index]})
             continue
         obj.rotation_euler.z = math.radians(angle)
         temporary = output_path.with_name(output_path.stem + ".partial.png")
@@ -154,7 +167,7 @@ def render(request):
         durations.append(elapsed)
         completed.append(str(output_path))
         emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                "elapsed_seconds": elapsed, "size": size, "reused": False})
+                                "elapsed_seconds": elapsed, "size": size, "reused": False,"visible_layer":visible_layers[index]})
     emit(request, "complete", {"paths": completed, "engine": engine, "size": size, "samples": samples,
                                "prepare_seconds": prepare_seconds, "frame_seconds": durations,
                                "total_seconds": time.perf_counter() - started, **info})

@@ -19,6 +19,7 @@ from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PREFIX = "TURNINATOR_EVENT "
+GIF_PALETTE = "full,opaque,sierra2_4a"
 
 
 def validate_frames(directory, frame_count, size):
@@ -80,7 +81,7 @@ def encode_gif(frames_dir, destination, ffmpeg, frame_count, size):
                               "-vf", f"trim=end_frame={frame_count},palettegen=stats_mode=full:reserve_transparent=0",
                               "-frames:v", "1", "-update", "1", str(palette)], cwd=frames_dir)
         run_encoder(common + ["-framerate", "20", "-start_number", "0", "-i", pattern,
-                              "-f", "image2", "-pattern_type", "none", "-i", str(palette), "-lavfi", "paletteuse=dither=bayer:bayer_scale=3",
+                              "-f", "image2", "-pattern_type", "none", "-i", str(palette), "-lavfi", "paletteuse=dither=sierra2_4a",
                               "-frames:v", str(frame_count), "-r", "20", "-loop", "0",
                               "-final_delay", "5", str(encoded)], cwd=frames_dir)
         info = inspect_gif(encoded)
@@ -90,6 +91,7 @@ def encode_gif(frames_dir, destination, ffmpeg, frame_count, size):
         os.replace(encoded, destination)
     info["encode_seconds"] = time.perf_counter() - started
     info["path"] = str(destination)
+    info["palette"] = GIF_PALETTE
     return info
 
 
@@ -304,7 +306,7 @@ def encode_only(output, ffmpeg):
             raise ValueError("Frame Blender build differs from probed renderer")
     info = encode_gif(output / "frames", output / "turntable.gif", ffmpeg, recipe["frames"], recipe["size"])
     manifest["encoding"] = {"tool": tool_identity(ffmpeg, "-version"), "controller_sha256": sha256(__file__),
-                            "palette": "full,opaque,bayer3", "fps": 20, "final_delay_cs": 5, "result": info}
+                            "palette": info["palette"], "fps": 20, "final_delay_cs": 5, "result": info}
     manifest["stage"] = "complete"
     write_json(manifest_path, manifest)
     return info

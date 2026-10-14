@@ -87,6 +87,10 @@ fn frames_are_decoded_and_dimensions_checked() {
 
 #[test]
 fn output_defaults_match_primary_loop_contract() {
+    let encoding = turninator::export::encode::gif_encoding_recipe();
+    assert_eq!(encoding["palette"], "full,opaque,sierra2_4a");
+    assert_eq!(encoding["fps"], 20);
+    assert_eq!(encoding["final_delay_cs"], 5);
     let spec = ExportRequest::default();
     assert_eq!(spec.size, 960);
     assert_eq!(spec.frame_count, 80);
@@ -94,6 +98,7 @@ fn output_defaults_match_primary_loop_contract() {
     assert_eq!(spec.video_codec, turninator::export::jobs::VideoCodec::H264);
     assert_eq!(spec.layout, turninator::export::jobs::ExportLayout::Single);
     assert!(spec.section.is_none());
+    assert_eq!(spec.animation, turninator::export::AnimationMode::Turntable);
 }
 
 #[test]

@@ -28,6 +28,12 @@ pub enum VideoCodec {
     Av1,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AnimationMode {
+    #[default]
+    Turntable,
+    BuildUp,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExportLayout {
     #[default]
     Single,
@@ -57,6 +63,8 @@ pub struct ExportRequest {
     pub layout: ExportLayout,
     #[serde(default)]
     pub section: Option<SectionSpec>,
+    #[serde(default)]
+    pub animation: AnimationMode,
 }
 impl Default for ExportRequest {
     fn default() -> Self {
@@ -73,6 +81,7 @@ impl Default for ExportRequest {
             video_codec: VideoCodec::H264,
             layout: ExportLayout::Single,
             section: None,
+            animation: AnimationMode::Turntable,
         }
     }
 }
@@ -140,6 +149,13 @@ pub fn run_export(
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
+    if request.animation == AnimationMode::BuildUp
+        && (request.section.is_some() || !matches!(request.kind, ExportKind::Gif | ExportKind::Mp4))
+    {
+        return Err(
+            "build-up supports GIF/MP4 bead animations and cannot be combined with sections".into(),
+        );
+    }
     if let Some(section) = &request.section {
         if section.axis > 2 || !section.position_mm.is_finite() {
             return Err("section requires a finite position and axis 0, 1 or 2".into());
@@ -160,7 +176,10 @@ pub fn run_export(
         return Err("side-by-side output exceeds 64 million pixels; reduce panel size".into());
     }
     fs::create_dir_all(&request.job_dir)?;
-    let scene: Value = serde_json::from_slice(&fs::read(&request.scene_path)?)?;
+    let scene: Value = serde_json::from_slice(&crate::settings::read_bounded(
+        &request.scene_path,
+        1024 * 1024,
+    )?)?;
     let mesh = PathBuf::from(
         scene["mesh_path"]
             .as_str()
@@ -205,20 +224,33 @@ pub fn run_export(
                 1
             },
     )?;
-    let recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
+    let recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
     let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&recipe)?));
+    // Encoding changes must be recorded without invalidating compatible PNGs.
+    let encoding_recipe = match request.kind {
+        ExportKind::Gif | ExportKind::SectionTurntable => json!({
+            "format":"gif","ffmpeg_hash":hash(&tools.ffmpeg)?,
+            "options":encode::gif_encoding_recipe()
+        }),
+        ExportKind::Mp4 => json!({
+            "format":"mp4","codec":request.video_codec,"fps":20,
+            "ffmpeg_hash":hash(&tools.ffmpeg)?,"ffprobe_hash":hash(&tools.ffprobe)?
+        }),
+        _ => json!({"format":"png"}),
+    };
     let render_dir = request.job_dir.join(&fingerprint[..20]);
     fs::create_dir_all(&render_dir)?;
     let manifest = render_dir.join("job.json");
     if manifest.exists() {
-        let previous: Value = serde_json::from_slice(&fs::read(&manifest)?)?;
+        let previous: Value =
+            serde_json::from_slice(&crate::settings::read_bounded(&manifest, 2 * 1024 * 1024)?)?;
         if previous["recipe"] != recipe {
             return Err("existing job recipe differs".into());
         }
     }
     write_json(
         &manifest,
-        &json!({"recipe":recipe,"stage":"rendering","destination":request.destination}),
+        &json!({"recipe":recipe,"encoding_recipe":encoding_recipe,"stage":"rendering","destination":request.destination}),
     )?;
     let operation = (|| -> Result<ExportResult> {
         if request.kind == ExportKind::Diagram {
@@ -245,10 +277,17 @@ pub fn run_export(
                 total: count,
                 stage: "Rendering".into(),
             });
-            worker.request(json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{"turntable"}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"start_angle_degrees":0,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
+            let complete=worker.request(json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"start_angle_degrees":0,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
             if event["kind"]=="frame"{let n=event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;callback(JobEvent::Progress{completed:n,total:count,stage:if event["payload"]["reused"]==true{"Reusing verified frames"}else{"Rendering"}.into()});if let Some(path)=event["payload"]["path"].as_str(){callback(JobEvent::Frame(path.into()));}}
             else if event["kind"]=="log" && let Some(line)=event["payload"]["message"].as_str(){callback(JobEvent::Log(line.to_owned()));}
         })?;
+            if let Some(warnings) = complete["payload"]["warnings"].as_array() {
+                for warning in warnings {
+                    if let Some(message) = warning.as_str() {
+                        callback(JobEvent::Log(format!("Renderer: {message}")));
+                    }
+                }
+            }
         }
         if hash(&mesh)? != recipe["mesh_hash"].as_str().unwrap_or("")
             || hash(&request.scene_path)? != recipe["scene_hash"].as_str().unwrap_or("")
@@ -257,7 +296,7 @@ pub fn run_export(
         }
         write_json(
             &manifest,
-            &json!({"recipe":recipe,"stage":"encoding","destination":request.destination}),
+            &json!({"recipe":recipe,"encoding_recipe":encoding_recipe,"stage":"encoding","destination":request.destination}),
         )?;
         callback(JobEvent::Progress {
             completed: count,
@@ -317,7 +356,7 @@ pub fn run_export(
         Ok(output) => {
             write_json(
                 &manifest,
-                &json!({"recipe":recipe,"stage":"complete","result":output}),
+                &json!({"recipe":recipe,"encoding_recipe":encoding_recipe,"stage":"complete","result":output}),
             )?;
             callback(JobEvent::Progress {
                 completed: 1,
@@ -328,7 +367,7 @@ pub fn run_export(
         Err(error) => {
             let _ = write_json(
                 &manifest,
-                &json!({"recipe":recipe,"stage":if cancel.load(Ordering::Acquire){"cancelled"}else{"failed"},"error":error.to_string()}),
+                &json!({"recipe":recipe,"encoding_recipe":encoding_recipe,"stage":if cancel.load(Ordering::Acquire){"cancelled"}else{"failed"},"error":error.to_string()}),
             );
         }
     }

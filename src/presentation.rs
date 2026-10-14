@@ -3,22 +3,32 @@ use crate::{
     mesh::Mesh,
     model::stl::load_stl_with_report,
     print::{
-        beads::build_bead_mesh,
-        gcode::{ParseOptions, parse_gcode},
+        beads::{BeadSegment, build_bead_mesh, build_joined_bead_mesh_with_report},
+        gcode::{GcodeDialect, ParseOptions, parse_gcode},
         schedule::LayerSchedule,
+        slice::slice_stepped_with_report,
     },
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path, sync::Arc};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ImportSettings {
     pub millimeters_per_unit: f64,
     pub layer_height_mm: f64,
     pub first_layer_height_mm: f64,
     pub filament_diameter_mm: f64,
     pub build_rotation_degrees: [f64; 3],
+    pub joined_beads: bool,
+    pub firmware: String,
+    pub allow_arcs: bool,
+    pub allow_tool_changes: bool,
+    pub chord_error_mm: f64,
+    pub homing_position_mm: Option<[f64; 3]>,
+    pub layer_boundaries_mm: Vec<f64>,
+    pub stepped_envelope: bool,
 }
 impl Default for ImportSettings {
     fn default() -> Self {
@@ -28,11 +38,20 @@ impl Default for ImportSettings {
             first_layer_height_mm: 0.2,
             filament_diameter_mm: 1.75,
             build_rotation_degrees: [0.; 3],
+            joined_beads: true,
+            firmware: "marlin".into(),
+            allow_arcs: false,
+            allow_tool_changes: false,
+            chord_error_mm: 0.02,
+            homing_position_mm: None,
+            layer_boundaries_mm: Vec::new(),
+            stepped_envelope: false,
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SceneSettings {
     pub import: ImportSettings,
     pub layer_appearance: bool,
@@ -45,6 +64,8 @@ pub struct SceneSettings {
     pub resin_clarity: f32,
     pub resin_cloudiness: f32,
     pub print_settings_edited: bool,
+    pub color_mode: String,
+    pub tool_colors: Vec<[f32; 3]>,
 }
 impl Default for SceneSettings {
     fn default() -> Self {
@@ -60,6 +81,13 @@ impl Default for SceneSettings {
             resin_clarity: 0.85,
             resin_cloudiness: 0.1,
             print_settings_edited: false,
+            color_mode: "uniform".into(),
+            tool_colors: vec![
+                [0.035, 0.22, 0.52],
+                [0.85, 0.16, 0.04],
+                [0.03, 0.55, 0.19],
+                [0.55, 0.10, 0.7],
+            ],
         }
     }
 }
@@ -78,6 +106,7 @@ impl SceneSettings {
         }
     }
     pub fn reset_print_settings(&mut self) {
+        self.import.layer_boundaries_mm.clear();
         let h = if self.material_preset == "resin" {
             0.05
         } else {
@@ -91,6 +120,17 @@ impl SceneSettings {
     }
     pub fn validate(&self) -> Result<()> {
         self.import.validate()?;
+        if !["uniform", "tool", "feature"].contains(&self.color_mode.as_str())
+            || self.tool_colors.is_empty()
+            || self.tool_colors.len() > 16
+            || self
+                .tool_colors
+                .iter()
+                .flatten()
+                .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        {
+            return Err("invalid print color mapping".into());
+        }
         if self
             .color
             .iter()
@@ -121,6 +161,18 @@ impl SceneSettings {
 }
 impl ImportSettings {
     pub fn validate(&self) -> Result<()> {
+        if !["marlin", "klipper"].contains(&self.firmware.as_str())
+            || !self.chord_error_mm.is_finite()
+            || !(0.001..=1.).contains(&self.chord_error_mm)
+            || self
+                .homing_position_mm
+                .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1e7))
+        {
+            return Err("invalid firmware, chord error, or homing coordinates".into());
+        }
+        if !self.layer_boundaries_mm.is_empty() {
+            LayerSchedule::explicit(self.layer_boundaries_mm.clone())?;
+        }
         LayerSchedule::uniform(
             self.layer_height_mm,
             self.first_layer_height_mm,
@@ -160,6 +212,21 @@ pub struct ImportedModel {
     pub source_hash: String,
     pub warnings: Vec<String>,
     pub segment_count: usize,
+    pub bead_layout: Option<String>,
+    pub bead_side_face_ranges: Vec<[usize; 2]>,
+    pub groups: Vec<GeometryGroup>,
+    pub import_settings: ImportSettings,
+    pub bounds_mm: crate::mesh::Bounds,
+    pub layer_tops_mm: Vec<f64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GeometryGroup {
+    pub start_triangle: usize,
+    pub end_triangle: usize,
+    pub tool: u32,
+    pub feature: String,
+    pub layer_index: u32,
+    pub z_top_mm: f64,
 }
 pub fn make_build_mesh(mesh: &Mesh, rotation: [f64; 3]) -> Result<Mesh> {
     mesh.bounds()?;
@@ -191,15 +258,22 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
     if fs::metadata(path)?.len() > 128 * 1024 * 1024 {
         return Err("input exceeds 128 MiB budget".into());
     }
-    let source = fs::read(path)?;
+    let source = crate::settings::read_bounded(path, 128 * 1024 * 1024)?;
     let source_hash = format!("{:x}", Sha256::digest(&source));
     let extension = path
         .extension()
         .and_then(|v| v.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    let mut bead_layout = None;
+    let mut bead_side_face_ranges = Vec::new();
+    let mut groups = Vec::new();
+    let mut layer_tops_mm = Vec::new();
     let (mesh, geometry_kind, mut warnings, segment_count) = match extension.as_str() {
         "stl" => {
+            if !options.stepped_envelope && !options.layer_boundaries_mm.is_empty() {
+                return Err("Explicit adaptive boundaries require G-code or experimental stepped STL; Layer Appearance uses first/later uniform heights.".into());
+            }
             let imported = load_stl_with_report(path, options.millimeters_per_unit)?;
             let mut warnings = vec![format!(
                 "STL units assumed: {} mm per source unit; source Z-up unless build orientation is changed.",
@@ -211,14 +285,34 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
                     imported.omitted_degenerate_triangles
                 ));
             }
-            (
-                make_build_mesh(&imported.mesh, options.build_rotation_degrees)?,
-                "original",
-                warnings,
-                0,
-            )
+            let mut mesh = make_build_mesh(&imported.mesh, options.build_rotation_degrees)?;
+            if options.stepped_envelope {
+                let schedule = if options.layer_boundaries_mm.is_empty() {
+                    LayerSchedule::uniform(
+                        options.layer_height_mm,
+                        options.first_layer_height_mm,
+                        mesh.bounds()?.max[2],
+                    )?
+                } else {
+                    LayerSchedule::explicit(options.layer_boundaries_mm.clone())?
+                };
+                layer_tops_mm = schedule
+                    .clipped(mesh.bounds()?.max[2])?
+                    .boundaries_mm
+                    .into_iter()
+                    .skip(1)
+                    .collect();
+                let envelope = slice_stepped_with_report(&mesh, &schedule.boundaries_mm)?;
+                mesh = envelope.mesh;
+                warnings.extend(envelope.warnings);
+                warnings.push("Experimental mid-layer stepped solid: this changes the silhouette and does not model nozzle paths, infill or physical print defects.".into());
+            }
+            (mesh, "original", warnings, 0)
         }
-        "gcode" => {
+        "gcode" | "gco" => {
+            if options.stepped_envelope || options.millimeters_per_unit != 1. {
+                return Err("G-code uses its own physical coordinates; STL unit scaling and stepped-envelope mode do not apply".into());
+            }
             if options
                 .build_rotation_degrees
                 .iter()
@@ -235,25 +329,82 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
                     layer_height_mm: options.layer_height_mm,
                     first_layer_height_mm: options.first_layer_height_mm,
                     filament_diameter_mm: options.filament_diameter_mm,
-                    ..Default::default()
+                    dialect: if options.firmware == "klipper" {
+                        GcodeDialect::Klipper
+                    } else {
+                        GcodeDialect::Marlin
+                    },
+                    allow_arcs: options.allow_arcs,
+                    allow_tool_changes: options.allow_tool_changes,
+                    chord_error_mm: options.chord_error_mm,
+                    homing_position_mm: options.homing_position_mm,
+                    layer_schedule: if options.layer_boundaries_mm.is_empty() {
+                        None
+                    } else {
+                        Some(LayerSchedule::explicit(
+                            options.layer_boundaries_mm.clone(),
+                        )?)
+                    },
                 },
             )?;
             let count = parsed.segments.len();
-            (
-                build_bead_mesh(&parsed.segments)?,
-                "beads",
-                parsed.warnings,
-                count,
-            )
+            for segment in &parsed.segments {
+                if layer_tops_mm.last() != Some(&segment.end[2]) {
+                    layer_tops_mm.push(segment.end[2]);
+                }
+            }
+            let mesh = if options.joined_beads {
+                let joined = build_joined_bead_mesh_with_report(&parsed.segments)?;
+                bead_layout = Some("joined_stadium_v1".into());
+                let mut begin = 0;
+                for (i, range) in joined.smooth_face_ranges.iter().enumerate() {
+                    let segment = &parsed.segments[begin];
+                    let mut end = begin + 1;
+                    while end < count
+                        && compatible_segments(&parsed.segments[end - 1], &parsed.segments[end])
+                    {
+                        end += 1;
+                    }
+                    groups.push(group(
+                        segment,
+                        range[0],
+                        joined
+                            .smooth_face_ranges
+                            .get(i + 1)
+                            .map_or(joined.mesh.triangles.len(), |r| r[0]),
+                    ));
+                    begin = end;
+                }
+                bead_side_face_ranges = joined.smooth_face_ranges;
+                joined.mesh
+            } else {
+                bead_layout = Some("independent_stadium_v1".into());
+                let mut start = 0;
+                for segment in &parsed.segments {
+                    let end = start
+                        + if segment.width_mm == segment.height_mm {
+                            96
+                        } else {
+                            104
+                        };
+                    groups.push(group(segment, start, end));
+                    start = end;
+                }
+                build_bead_mesh(&parsed.segments)?
+            };
+            (mesh, "beads", parsed.warnings, count)
         }
         _ => return Err("open an STL or plain G-code file".into()),
     };
-    if Sha256::digest(fs::read(path)?) != Sha256::digest(&source) {
+    if Sha256::digest(crate::settings::read_bounded(path, 128 * 1024 * 1024)?)
+        != Sha256::digest(&source)
+    {
         return Err("source changed during import; reload the file".into());
     }
-    if geometry_kind == "original" {
+    if geometry_kind == "original" && !options.stepped_envelope {
         warnings.push("Layer Appearance preserves the original silhouette and is not a slicer toolpath prediction.".into());
     }
+    let bounds_mm = mesh.bounds()?;
     Ok(ImportedModel {
         path: fs::canonicalize(path)?,
         mesh: Arc::new(mesh),
@@ -261,7 +412,103 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
         source_hash,
         warnings,
         segment_count,
+        bead_layout,
+        bead_side_face_ranges,
+        groups,
+        import_settings: options.clone(),
+        bounds_mm,
+        layer_tops_mm,
     })
+}
+pub fn visible_layer_height(model: &ImportedModel, requested_mm: f64) -> f64 {
+    if model.layer_tops_mm.is_empty() {
+        requested_mm
+    } else {
+        model
+            .layer_tops_mm
+            .iter()
+            .copied()
+            .take_while(|height| *height <= requested_mm)
+            .last()
+            .unwrap_or(0.)
+    }
+}
+fn compatible_segments(a: &BeadSegment, b: &BeadSegment) -> bool {
+    a.end == b.start && a.tool == b.tool && a.feature == b.feature && a.layer_index == b.layer_index
+}
+fn group(segment: &BeadSegment, start_triangle: usize, end_triangle: usize) -> GeometryGroup {
+    GeometryGroup {
+        start_triangle,
+        end_triangle,
+        tool: segment.tool,
+        feature: segment.feature.clone(),
+        layer_index: segment.layer_index,
+        z_top_mm: segment.end[2],
+    }
+}
+pub fn group_color(group: &GeometryGroup, settings: &SceneSettings) -> [f32; 3] {
+    let index = if settings.color_mode == "feature" {
+        group.feature.bytes().fold(0usize, |sum, b| {
+            sum.wrapping_mul(31).wrapping_add(b as usize)
+        })
+    } else {
+        group.tool as usize
+    };
+    if settings.color_mode == "uniform" {
+        settings.color
+    } else {
+        settings.tool_colors[index % settings.tool_colors.len()]
+    }
+}
+pub fn model_scene(
+    model: &ImportedModel,
+    settings: &SceneSettings,
+    path: &Path,
+    camera: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    if settings.import != model.import_settings {
+        return Err("Import settings differ from the accepted geometry; finish a successful reimport before exporting.".into());
+    }
+    let mut scene = render_scene(
+        settings,
+        path,
+        &model.geometry_kind,
+        &model.warnings,
+        camera,
+    )?;
+    scene["source_path"] = serde_json::json!(model.path);
+    if let Some(layout) = &model.bead_layout {
+        scene["bead_layout"] = serde_json::json!(layout);
+    }
+    if !model.bead_side_face_ranges.is_empty() {
+        scene["bead_side_face_ranges"] = serde_json::json!(model.bead_side_face_ranges);
+    }
+    if settings.import.stepped_envelope {
+        scene["layer_appearance"] = serde_json::json!(false);
+    }
+    if !model.groups.is_empty() {
+        if settings.color_mode != "uniform" {
+            scene["face_groups"] = serde_json::Value::Array(model.groups.iter().map(|g| serde_json::json!({"start_triangle":g.start_triangle,"end_triangle":g.end_triangle,"tool":g.tool,"label":g.feature,"color":group_color(g,settings)})).collect());
+        }
+        let mut layers: Vec<serde_json::Value> = Vec::new();
+        for group in &model.groups {
+            if let Some(last) = layers.last_mut().filter(|last| {
+                last["layer_index"] == group.layer_index && last["z_top_mm"] == group.z_top_mm
+            }) {
+                last["end_triangle"] = serde_json::json!(group.end_triangle);
+            } else {
+                layers.push(serde_json::json!({"start_triangle":group.start_triangle,"end_triangle":group.end_triangle,"layer_index":group.layer_index,"z_top_mm":group.z_top_mm}));
+            }
+        }
+        scene["layer_face_ranges"] = serde_json::Value::Array(layers);
+    }
+    if serde_json::to_vec(&scene)?.len() > 1024 * 1024 {
+        return Err(
+            "Render scene exceeds 1 MiB metadata budget; use uniform colors or a smaller toolpath"
+                .into(),
+        );
+    }
+    Ok(scene)
 }
 pub fn render_scene(
     settings: &SceneSettings,

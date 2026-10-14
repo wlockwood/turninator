@@ -139,6 +139,34 @@ class SceneTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_layer_filter_fades_unresolved_pitch_and_grazing_views(self):
+        self.assertEqual(scene.layer_filter_gain(0.2,0.0001,1.0),0.0)
+        self.assertEqual(scene.layer_filter_gain(0.2,0.00002,1.0),1.0)
+        self.assertEqual(scene.layer_filter_gain(0.2,0.00002,0.05),0.0)
+        midpoint=scene.layer_filter_gain(0.2,0.0002/(3*math.sqrt(2)),1.0)
+        self.assertAlmostEqual(midpoint,0.5)
+        self.assertEqual(scene.layer_filter_gain(0.2,0.00002,-1.0),1.0)
+
+    def test_material_ranges_reject_overlap_and_out_of_bounds(self):
+        groups=[dict(start_triangle=0,end_triangle=2,color=[1,0,0],tool=0,label="Red"),
+                dict(start_triangle=2,end_triangle=4,color=[0,0,1],tool=1,label="Blue")]
+        self.assertEqual(scene.validate_face_groups(groups,5),groups)
+        for change in (dict(start_triangle=1),dict(end_triangle=8),dict(color=[2,0,0]),dict(tool=-1)):
+            with self.assertRaises(ValueError):
+                scene.validate_face_groups([groups[0],dict(groups[1],**change)],5)
+
+    def test_buildup_reveals_ordered_whole_layers_and_finishes_complete(self):
+        ranges=[dict(layer_index=2,start_triangle=0,end_triangle=4,z_top_mm=0.2),
+                dict(layer_index=5,start_triangle=4,end_triangle=8,z_top_mm=0.4)]
+        self.assertEqual(scene.validate_layer_ranges(ranges,8),[2,5])
+        self.assertEqual(scene.buildup_schedule([2,5],4),[2,2,5,5])
+        self.assertEqual(scene.buildup_schedule([2,5],1),[5])
+        for invalid in (ranges[:1],[dict(ranges[0],start_triangle=1),ranges[1]],
+                        [ranges[0],dict(ranges[1],layer_index=1)],
+                        [ranges[0],dict(ranges[1],z_top_mm=0.1)]):
+            with self.assertRaises(ValueError):
+                scene.validate_layer_ranges(invalid,8)
+
     def test_default_camera_accounts_for_the_narrower_panel_dimension(self):
         square = scene.default_camera_half_angle(128,128)
         wide = scene.default_camera_half_angle(128,96)
@@ -161,6 +189,17 @@ class ProtocolTests(unittest.TestCase):
         broken[1] = (0,33,99)
         with self.assertRaises(ValueError):
             scene.bead_smooth_flags(broken,"joined_stadium_v1",[[0,64]])
+
+    def test_render_mode_flags_do_not_mutate_scene_snapshot(self):
+        source = {"schema_version": 1, "geometry_kind": "beads"}
+        self.assertEqual(worker.render_spec_for_mode(source, "still"), source)
+        turntable = worker.render_spec_for_mode(source, "turntable")
+        self.assertTrue(turntable["fit_turntable"])
+        self.assertNotIn("build_up", turntable)
+        buildup = worker.render_spec_for_mode(source, "buildup")
+        self.assertTrue(buildup["fit_turntable"])
+        self.assertTrue(buildup["build_up"])
+        self.assertEqual(source, {"schema_version": 1, "geometry_kind": "beads"})
 
     def test_reuse_requires_matching_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

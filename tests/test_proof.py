@@ -30,6 +30,7 @@ class ProofTests(unittest.TestCase):
             self.assertEqual(info["delays_ms"], [50, 50, 50, 50])
             self.assertEqual(info["loop"], 0)
             self.assertEqual(info["dimensions"], [24, 24])
+            self.assertEqual(info["palette"], "full,opaque,sierra2_4a")
 
     def test_missing_frame_fails_before_replacing_existing_destination(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -1,65 +1,54 @@
 # Turninator
 
-A local print-model studio under development. The first implementation milestone is runnable: STL import, a constrained G-code interpreter, physical extrusion-bead meshes, Blender rendering, and verified PNG/GIF output. The desktop interface and four-view sheets are still planned.
+A local Windows studio for STL and supported G-code, configurable print layers, and studio exports. The native wgpu viewport works independently of Blender. Design: [final-plan.md](final-plan.md). Evidence: [docs/progress.md](docs/progress.md) and reports under reviews/.
 
-The merged design is [final-plan.md](final-plan.md). Evidence and current scope are in [docs/progress.md](docs/progress.md), [docs/performance.md](docs/performance.md), and [docs/visual-validation.md](docs/visual-validation.md).
+## Run
 
-## Requirements
+    cargo run --offline --release -- gui --open "test-models/spiral egg - A.stl"
 
-- Windows x64 and Rust; this implementation was built with Rust 1.95.0.
-- Blender, tested here at `C:\Program Files\Blender Foundation\Blender 4.5\blender.exe` (4.5.2 LTS).
-- FFmpeg, tested at `C:\Program Files\ffmpeg\bin\ffmpeg.exe`.
-- Python 3.10+ and Pillow for development proof tools. Blender uses its own Python for the worker.
+Running turninator.exe without arguments opens the studio. Drag a model into the window or use Open model. Drag to orbit, right-drag to pan, and scroll to zoom. The default layer pitch is **0.20 mm**; first-layer height is independent. Build rotation changes the print frame; presentation rotation keeps layers attached to the part.
 
-Cycles proof rendering currently requires an available OptiX GPU. EEVEE is also supported. The proof scripts accept `--blender` and `--ffmpeg` paths; they do not install or update tools.
+STL Layer Appearance preserves the original silhouette. G-code creates actual rounded bead surfaces, optionally joined at contiguous path corners. Source assumptions, units and tool/feature labels are visible in the sidebar. Ghost/Xray modes use approximate transparency; native sections are uncapped. G-code build-up reveals complete deposited layers, including adaptive heights.
 
-## Try the geometric layer demo
+## Tools and outputs
 
-Run from this directory, choosing fresh output directories:
+Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leave native inspection available. No tools are installed or updated automatically. Exact tested binaries and maintained Blender LTS qualification are in [docs/runtime-support.md](docs/runtime-support.md).
 
-```powershell
-cargo run --offline --release -- fixture --out artifacts/my-fixtures
-cargo run --offline --release -- prepare artifacts/my-fixtures/layer-demo.gcode --out artifacts/my-bead-job
-python tools/prove-render.py --job artifacts/my-bead-job --engine eevee --size 960 --frames 80 --still-size 4096 --samples 32
-```
+- GIF defaults: 960 square, 80 frames, 20 fps, four seconds, infinite looping. The studio plays the actual encoded GIF.
+- PNG defaults: 4096 square, Cycles/OptiX, optional transparent background independent of material transmission.
+- Four-view sheets: shared-scale orthographic Front, Right, Top and Iso, design edges and labels.
+- MP4: explicit H.264 or AV1, capability checks and verified timing. Unavailable AV1 does not silently become H.264. Matching requests reuse verified frames.
+- Section exports: full model beside a cutaway through the whole turntable; reliable caps/statistics require closed input. G-code cuts retain deposited gaps.
+- Build-up exports: real deposited layers and tool/feature colors with fixed full-model framing. Build-up and sections are separate export choices.
 
-The proof prints paths to the GIF, still, logs, and metrics. It sends two rendering requests to the same Blender process and decodes the output. An 80-frame animation uses 50 ms per frame and loops indefinitely.
+Animation and PNG/sheet quality have separate controls. Native lighting approximates Blender; Render preview provides the selected material/studio result. Resin on overlapping beads retains internal interfaces and is an illustration rather than fused-resin physics. Section volume is a mesh estimate, not calibrated deposited material or strength.
 
-## Try an STL with layer appearance
+## Projects and recovery
 
-```powershell
-cargo run --offline --release -- prepare "test-models/spiral egg - A.stl" --out artifacts/my-egg-job --surface layers --layer-height 0.20 --first-layer-height 0.20
-python tools/prove-render.py --job artifacts/my-egg-job --engine cycles --size 960 --frames 80 --still-size 4096 --samples 64
-```
+Save .turninator projects to retain physical settings, material/palette, pose, camera and output settings. Sources are relative when possible; missing/changed files require relocation or explicit reimport. Edited pitch survives material changes.
 
-STL Layer Appearance changes shading and preserves the source silhouette. G-code bead geometry creates actual rounded extrusion surfaces. Both are approximations of material appearance; neither predicts printer defects. STL defaults to assumed millimeters and source Z-up. `--millimeters-per-unit 25.4` interprets an inches STL; G-code uses its own declared physical units.
+Exports use immutable snapshots. Cancellation terminates only the owned worker/encoder tree. Failed frames remain available through **Retry retained job** or **Tools / storage → Recover / encode**. Recipes and frames are revalidated; failed encoding preserves existing output. Only marked job storage is removable, and its budget is configurable. Sources remain read-only. Defaults live under %LOCALAPPDATA%/Turninator; gui --data-dir selects another location.
 
-`--surface clean` disables the STL layer shader. First-layer height may differ from later layers. Source files remain read-only. Exact zero-area STL faces are omitted with a visible count, while nonzero tiny faces are retained; no tolerance-based repair is performed.
+## Supported printing geometry
 
-## Current G-code scope
+The planar G-code subset interprets XYZ/E modes, G92, retraction debt, travel and metadata. Explicit options add XY G2/G3 arcs, Marlin/Klipper modal behavior, a known G28 home, adaptive boundaries and normalized tool changes. Tool changes assume shared XYZ and a global E counter. Implicit offsets, parking/purge macros, volumetric/flow-changing commands, binary/compressed files and nonplanar/vase paths are rejected. Universal slicer coverage is not claimed.
 
-Plain text, planar, monotonically increasing deposition layers, one tool (T0), Marlin-style modal behavior. Supported geometry commands: G0/G1, G20/G21, G90/G91, G92, M82/M83. A small documented temperature/fan/query/dwell whitelist is harmless to geometry. HEIGHT/WIDTH/TYPE comments are recognized. Width without metadata is estimated from E, configured filament diameter (default 1.75 mm), and configured layer height. Retraction debt is repaid before a move creates a bead.
+Joined stadium beads are a bounded sweep rather than a polygon union or pressure model; sharp/short paths can overlap. Experimental stepped STL samples closed solids at layer midpoints and changes the silhouette. Cube, wedge, dome, hole and thin-wall proofs pass; ambiguous contours and numerical slivers fail explicitly. Features between sample planes may be missed. Adaptive boundaries apply to G-code or stepped STL; original STL shading uses uniform first/later heights.
 
-Homing, arcs, firmware retraction, volumetric extrusion, flow-changing commands, other tools, macros, checksums, binary/compressed containers, and nonplanar/vase deposition fail explicitly. Common full slicer files can therefore be unsupported today. The generated fixture exercises the supported subset; broad slicer compatibility is a later milestone.
+Limits: 128 MiB input, 30,000 bead segments, two million source vertices, four million triangles and 1 MiB scene/project metadata. GPU attribute expansion has additional checked limits. Only exactly zero-area STL faces are omitted, with a visible report; no tolerance repair or automatic gap closure is performed.
 
-The initial bead builder caps individual segments; corners overlap and are not a fused continuous extrusion. Limits: 30,000 bead segments, 2 million vertices, 4 million triangles, and 128 MiB STL/G-code input. Larger production prints need a more efficient joined/chunked representation. Original STL rendering is currently faceted; crease-aware shading remains planned.
+## CLI and verification
 
-## Recovery and checks
+    cargo run --offline --release -- fixture --out artifacts/my-fixtures
+    cargo run --offline --release -- prepare artifacts/my-fixtures/layer-demo.gcode --out artifacts/my-job --beads joined
+    python tools/prove-render.py --job artifacts/my-job --engine eevee --size 960 --frames 80 --still-size 4096 --samples 32
 
-Frames and immutable recipes remain in the proof directory after an error. Rerunning an incomplete matching recipe reuses validated frames and repairs damaged ones. Completed proof timing evidence is preserved. Re-encode without launching Blender:
+Run turninator --help for options. CLI defaults preserve independent beads and clean STL. Use --surface layers with --layer-height/--first-layer-height, or explicitly select --surface stepped. Preparation requires a new directory. Development proof tools need Python/Pillow; the packaged studio uses Blender's Python and native encoders.
 
-```powershell
-python tools/prove-render.py --job artifacts/my-bead-job/proof-eevee-<fingerprint> --encode-only
-```
+    cargo test --offline --all-targets
+    cargo fmt --all -- --check
+    cargo clippy --offline --all-targets -- -D warnings
+    python -m unittest discover -s tests -p "test_*.py"
+    powershell -File tools/package.ps1
 
-Encoding verifies the frame manifest and source hashes before publication. A failed encode preserves existing GIF output and rendered frames. Use a new preparation directory to change geometry/settings; preparation refuses existing jobs.
-
-```powershell
-cargo test --offline --all-targets
-cargo fmt --all -- --check
-cargo clippy --offline --all-targets -- -D warnings
-python -m unittest discover -s tests -p "test_*.py" -v
-python tools/check-runtime.py --job artifacts/my-bead-job
-```
-
-The runtime check starts owned Blender workers to exercise cancellation, restart, an unrelated idle-worker sentinel, corrupt-frame repair, and verified reuse. It saves its result and logs under the job. Full GUI behavior, native rendering, four-view output, robust STL stepped-envelope reconstruction, general G-code coverage, and calibrated physical realism are not implemented yet.
+GPU/runtime tests are marked and have been run separately. [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) includes exact Windows dependencies and bundled font notices. Portable packages include the app and renderer resources; external binaries remain separately configured.

@@ -3,22 +3,29 @@ struct Uniforms {
     projection: vec4<f32>, clipping: vec4<f32>,
     row0: vec4<f32>, row1: vec4<f32>, row2: vec4<f32>, shift_spin: vec4<f32>,
     color_roughness: vec4<f32>, layers: vec4<f32>,
+    section: vec4<f32>, inspection: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) build_z: f32,
+    @location(2) @interpolate(flat) color: vec3<f32>,
+    @location(3) build_position: vec3<f32>,
+    @location(4) @interpolate(flat) layer_top: f32,
 }
 fn spin(p: vec3<f32>) -> vec3<f32> {
     let s = sin(u.shift_spin.w); let c = cos(u.shift_spin.w);
     return vec3<f32>(c*p.x-s*p.y, s*p.x+c*p.y, p.z);
 }
-@vertex fn vs_main(@location(0) position: vec3<f32>) -> VertexOutput {
+@vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) attributes: vec4<f32>) -> VertexOutput {
     var out: VertexOutput;
     let rotated = vec3<f32>(dot(u.row0.xyz, position), dot(u.row1.xyz, position), dot(u.row2.xyz, position));
     out.world = spin(rotated-u.shift_spin.xyz);
     out.build_z = position.z-u.clipping.z;
+    out.build_position = position;
+    out.color = attributes.xyz;
+    out.layer_top = attributes.w;
     let relative = out.world-u.camera_target.xyz;
     let view = vec3<f32>(dot(relative,u.right.xyz), dot(relative,u.up.xyz), u.camera_target.w-dot(relative,u.back.xyz));
     let n = u.clipping.x; let f = u.clipping.y;
@@ -30,7 +37,7 @@ fn spin(p: vec3<f32>) -> vec3<f32> {
     }
     return out;
 }
-@fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn shade(input: VertexOutput) -> vec3<f32> {
     let camera = u.camera_target.xyz+u.back.xyz*u.camera_target.w;
     let view_dir = select(normalize(camera-input.world),u.back.xyz,u.projection.w>0.5);
     var normal = normalize(cross(dpdx(input.world), dpdy(input.world)));
@@ -51,7 +58,36 @@ fn spin(p: vec3<f32>) -> vec3<f32> {
     let diffuse = 0.2+0.65*max(dot(normal,key),0.)+0.25*max(dot(normal,fill),0.);
     let half_vector = normalize(key+view_dir);
     let gloss = pow(max(dot(normal,half_vector),0.),mix(96.,8.,u.color_roughness.w))*mix(0.22,0.035,u.color_roughness.w);
-    let linear = u.color_roughness.xyz*diffuse+vec3<f32>(gloss);
-    return vec4<f32>(pow(clamp(linear,vec3<f32>(0.),vec3<f32>(1.)),vec3<f32>(1./2.2)),1.);
+    let material = select(u.color_roughness.xyz,input.color,u.inspection.w>0.5);
+    return clamp(material*diffuse+vec3<f32>(gloss),vec3<f32>(0.),vec3<f32>(1.));
 }
-@fragment fn fs_edge() -> @location(0) vec4<f32> { return vec4<f32>(0.025,0.035,0.055,1.); }
+fn visible(input: VertexOutput) -> bool {
+    if u.section.x >= 0. {
+        let coordinate = input.build_position[u32(u.section.x)];
+        if (coordinate-u.section.y)*u.section.z < 0. { return false; }
+    }
+    if u.inspection.x>0.5 {
+        let height = select(input.build_position.z, input.layer_top, input.layer_top >= 0.);
+        if height>u.section.w { return false; }
+    }
+    return true;
+}
+@fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let linear = shade(input);
+    if !visible(input) { discard; }
+    return vec4<f32>(pow(linear,vec3<f32>(1./2.2)),1.);
+}
+@fragment fn fs_edge(input: VertexOutput) -> @location(0) vec4<f32> {
+    if !visible(input) { discard; }
+    return vec4<f32>(0.025,0.035,0.055,1.);
+}
+struct OitOutput { @location(0) accumulation:vec4<f32>, @location(1) revealage:f32 }
+@fragment fn fs_oit(input:VertexOutput)->OitOutput {
+    let linear=shade(input);
+    if !visible(input) {discard;}
+    let depth=u.camera_target.w-dot(input.world-u.camera_target.xyz,u.back.xyz);
+    let alpha=select(u.inspection.y,u.inspection.y*0.5,u.inspection.z>1.5);
+    // Bounded weight avoids half-float overflow for the common mesh face budget.
+    let weight=select(clamp(0.01/(1.+0.02*max(depth,0.)),0.001,0.01),0.005,u.inspection.z>1.5);
+    var out:OitOutput;out.accumulation=vec4<f32>(linear*alpha*weight,alpha*weight);out.revealage=alpha;return out;
+}

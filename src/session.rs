@@ -24,6 +24,7 @@ pub struct RenderTask {
     pub request: ExportRequest,
     pub preview: bool,
     pub tools: ToolPaths,
+    pub cache_budget_bytes: u64,
 }
 pub enum RenderEvent {
     Progress {
@@ -63,12 +64,43 @@ impl RenderService {
             let mut last_tools: Option<ToolPaths> = None;
             while let Ok(task) = receiver.recv() {
                 let result = (|| -> Result<ExportResult> {
+                    if actor_cancel.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    let cache = crate::cache::CacheStore::new(
+                        task.request
+                            .job_dir
+                            .parent()
+                            .ok_or("job parent missing")?
+                            .to_path_buf(),
+                    )?;
+                    cache.owned_job(&task.request.job_dir)?;
+                    let frames = if matches!(
+                        task.request.kind,
+                        ExportKind::Gif | ExportKind::Mp4 | ExportKind::SectionTurntable
+                    ) {
+                        task.request.frame_count
+                    } else {
+                        4
+                    };
+                    let panels = if task.request.layout == crate::export::ExportLayout::SideBySide {
+                        4
+                    } else {
+                        1
+                    };
+                    let reserve =
+                        u64::from(task.request.size).pow(2) * 8 * u64::from(frames) * panels;
+                    cache.check_budget(task.cache_budget_bytes, reserve)?;
                     fs::create_dir_all(&task.request.job_dir)?;
                     let mesh_path = task.request.job_dir.join("mesh.bin");
                     task.mesh.write_binary(&mesh_path)?;
                     let mut scene = task.scene.clone();
                     scene["mesh_path"] = serde_json::json!(fs::canonicalize(mesh_path)?);
-                    fs::write(&task.request.scene_path, serde_json::to_vec_pretty(&scene)?)?;
+                    let scene_bytes = serde_json::to_vec(&scene)?;
+                    if scene_bytes.len() > 1024 * 1024 {
+                        return Err("render scene exceeds 1 MiB byte budget".into());
+                    }
+                    fs::write(&task.request.scene_path, scene_bytes)?;
                     let changed = last_tools.as_ref().is_none_or(|p| {
                         p.blender != task.tools.blender
                             || p.ffmpeg != task.tools.ffmpeg

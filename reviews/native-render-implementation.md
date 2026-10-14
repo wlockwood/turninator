@@ -64,4 +64,68 @@ Additional executed evidence:
 
 ## Remaining integration work
 
-Full application-level visible UI behavior is root's validation task. MP4 defaults remain H.264. Multi-tool material face groups and build-up animation follow this checkpoint. Shader filtering at subpixel layer pitch remains an appearance limitation; no claim of calibrated bead joins or optical resin accuracy is made.
+Full application-level visible UI behavior is root's validation task. MP4 defaults remain H.264. Layer filtering is now covered by the measured checkpoint below; no claim of calibrated bead joins or optical resin accuracy is made.
+
+## Multi-material and build-up checkpoint
+
+`ExportRequest.animation` is the defaulted `AnimationMode::{Turntable,BuildUp}`. BuildUp supports GIF or MP4 and explicitly rejects section combinations and nonanimated export kinds. The render fingerprint includes animation mode, while output codec remains outside it. The worker protocol uses `mode: "buildup"` and reports `visible_layer` with each frame and `build_layers` at completion.
+
+Scene `face_groups` entries contain `start_triangle`, `end_triangle` (half-open), linear `color`, integer `tool` and `label`. Ranges must be ordered/disjoint/in-bounds; gaps retain the base material. At most 256 unique tool/color material combinations are accepted. Copies preserve the selected finish and resin absorption settings while assigning each tool's color. Validation happens before Blender scene allocation.
+
+Scene `layer_face_ranges` entries contain `layer_index`, `start_triangle`, `end_triangle` and `z_top_mm`. These must cover all faces in increasing build order; repeated layer indices must agree on height. Build-up requires real bead geometry. A face-domain integer attribute and Geometry Nodes deletion reveal complete deposited layers cumulatively. No envelope or infill is fabricated. Camera, lights and object pose remain fixed at the full source's framing. When the frame budget is lower than the layer count, each frame adds a group of complete layers; the final frame always contains the full mesh.
+
+Executed evidence:
+
+- Pure range/schedule tests first failed for missing contracts, then passed. The full Python suite is now 30 passing tests; native defaults/encoder/protocol checks remain seven passing tests.
+- `cargo test --offline --test worker native_buildup -- --ignored --nocapture` passed against actual Blender/FFmpeg in 20.56 s. It rendered eight joined stadium layers: first-frame pixels contain the red first tool and no future blue layer; final pixels contain both tools. All eight frames were then reused for AV1 encoding, with unchanged file modification times. Unsupported build-up plus section was rejected before rendering.
+- The same runtime test rendered a Cycles/OptiX resin specimen with both tool mappings and verified independent PNG alpha plus an explicit internal-interface limitation warning. First/final build-up PNGs and the resin PNG were visually inspected: fixed framing, increasing deposited geometry and both colors are present.
+- A subsequent actual overlapping-shell resin extension passed in 4.40 s with prior frames reused. The fixture offsets a second complete bead stack by 0.45 mm, retains all 2048 input triangles and produces a distinct image. Its warning explicitly states that this is not a fused-resin simulation. Both resin images were inspected; this verifies retained-interface rendering and disclosure, not physical optical accuracy.
+- Artifacts are `artifacts/native-buildup-probe/buildup.gif`, `buildup-av1.mp4`, retained job frames, and `resin/still.png` / `resin-overlap/still.png`. The build-up integration proof uses 256-pixel frames and eight frames, not a full-resolution performance benchmark.
+
+## Larger outputs and layer-footprint filtering
+
+Actual acceptance test `native_large_sheet_and_complete_section_animation` passed in 157.76 s against the supplied model-0 STL snapshot. The 4096×4096 shared-scale sheet took 23.876 s. An 80-frame section animation with 960-pixel panels produced a decoded 1920×960 GIF, 4.000 s / 20 fps, in 133.782 s. The latter includes 160 Blender panel renders plus debug-build CPU composition, PNG encoding and full GIF validation; it is not a render-only GPU benchmark. Artifacts and exact results are under `artifacts/final-large-outputs/`. The full sheet and quarter-turn frames 0/20/40/60 were inspected: consistent panel scale/framing, cut surfaces distinct from source, preserved holes, captions outside the image, no coplanar triangle wireframe. Source pitch is 0.2 mm and presentation rotation is [20,15,0] degrees. No supplied photograph was available for comparison.
+
+Layer Appearance now applies a conservative image-footprint filter to bump **Strength**, preserving the millimeter height field, phase, first-layer schedule and cap-normal mask. Perspective footprint uses per-shading-point camera distance and sensor/lens/pixel scale; orthographic footprint uses view span/pixel count. The surface bound divides by absolute geometric-normal/view cosine and includes diagonal pixel support. Detail fades smoothly when the lower bound on projected physical pitch is between two and four pixels; unresolved/grazing detail fades out. This is an analytical conservative bound, not a claim that Blender exposes shader derivatives. `layer_filtering:false` exists for controlled comparisons.
+
+Pure filter checks first failed for the missing contract, then passed; the complete Python suite is 31 tests. Actual `native_layer_filter_reduces_subpixel_temporal_residuals` passed in 43.36 s: unfiltered, filtered and matched smooth-reference **complete 80-frame loops** at 256 pixels, 0.02 mm pitch, and [23,17,0] display rotation. Mean absolute cyclic temporal RGB residual relative to the smooth reference fell from **0.0875633 to 0.0** on a 0–255 channel scale. The fully unresolved filtered fixture equals the reference; this intentionally measures removal of unresolvable shading variation, not all kinds of renderer noise or universal temporal stability. A separate resolved 2 mm pitch image retains five visible grooves and a smooth cap; it was inspected. `artifacts/layer-filter-proof/measurements.json`, three GIFs and `resolved-pitch.png` retain the evidence. Per-clip timings include different shader-cache states and are not an optimization speed comparison.
+
+`docs/runtime-support.md` records installed executable hashes and official maintained-version candidates separately. Current artifact proof uses the tested pinned runtimes; a newer downloaded build must pass qualification before that identity is promoted.
+
+## Shared CLI preparation and maintained-runtime qualification
+
+`prepare` now calls the same `presentation::load_model` / `model_scene` pipeline as the desktop. Legacy defaults remain independent beads and clean STL. Explicit options select joined beads, bounded XY arcs, Marlin/Klipper command profile, tool changes, arc chord error, G28 home coordinates, explicit physical layer boundaries and clean/layer-appearance/experimental-stepped STL. The emitted scene includes the original source path and supported face/layer metadata. Invalid option combinations fail before geometry output. Valid geometry and a scene no larger than 1 MiB are prepared in an owned sibling staging directory; only a completed mesh/scene pair is renamed into the requested new job directory. Float32 precision failures and oversized scenes remove staging and leave no published job. Existing jobs and source files remain untouched.
+
+Three new-contract CLI tests first failed on unsupported flags/missing source metadata. After implementation, all eight CLI tests pass, including joined arcs/tool changes/home/schedule, stepped STL, malformed options, 14,000-layer scene budget rejection and float32 triangle collapse. The fresh combined run of `cargo test --offline --test cli --test export --test worker` passed 15 ordinary tests; seven GPU acceptance tests remain opt-in and their earlier actual runs are documented above.
+
+Portable Blender 4.5.14 LTS was downloaded from Blender's official versioned mirror and its ZIP SHA-256 matched the official manifest. Build `62c1db4208e8` and executable hash are recorded in `docs/runtime-support.md`. Actual EEVEE and Cycles/OptiX each rendered a 512 px still plus four 256 px turntable frames and encoded a fully decoded 200 ms GIF with four 50 ms delays and infinite loop. Evidence is `artifacts/verified-models/model-0/proof-eevee-478715a51367` (15.446 s) and `proof-cycles-0c67c3ea2a1c` (3.191 s). The Cycles still was inspected. This qualifies those limited checks on the maintained patch; the larger acceptance suite remains evidence for installed Blender 4.5.2. Installed defaults and external binaries were not replaced.
+
+The initial candidate render exposed a strict proof-manifest mismatch: derived `fit_turntable` flags had been added to the recorded source scene. A regression first failed for the missing immutable-mode helper, then passed after mode-derived flags were applied only to a copied render specification. The manifest retains the original scene plus separately fingerprinted render mode. Fresh full Python discovery passes 37 tests. The failed earlier proof directory is retained rather than relabeled as equivalent evidence.
+
+## Complete-animation palette comparison
+
+`artifacts/dither-comparison/compare.py` encoded the same retained 80×960 bead frames with one shared full-loop 256-color palette, comparing Bayer scale 3 and Sierra2_4a on the pinned FFmpeg. Source PNGs were read-only. Both GIFs were fully decoded: 80 frames, 960×960, exactly 50 ms per frame including the last, 4000 ms total, loop=0. Bayer reproduced the original 33,064,535-byte GIF. Sierra produced 29,777,875 bytes (9.94% smaller).
+
+Average absolute decoded RGB error against the source fell from 2.024397 to 0.498533 on a 0–255 channel scale (75.37% lower). Mean absolute cyclic change in quantization residual, including last-to-first, was 0.492634 for Bayer and 0.499013 for Sierra (1.29% higher). These are measured display-RGB errors, not perceptual scores or universal temporal-quality guarantees. The matched still and enlarged bead crop were inspected in `visual-comparison.png`: Sierra better retains the source gradients/highlights without the Bayer grid bias. Recommendation: choose Sierra2_4a as the default based on substantially lower error and size for this representative full loop, accepting the small measured temporal-residual increase. This does not claim every scene benefits equally. Old artifact identities remain Bayer; changing the default must not relabel them.
+
+`metrics.json` retains complete delays, dimensions, timings, hashes, palette/tool identities and both error metrics; the two complete GIFs and reproducible script remain beside it.
+
+Sierra2_4a is now the selected default in both native and development-proof encoders. New encoding manifests record `full,opaque,sierra2_4a`; native job manifests keep a separate encoding recipe including encoder hashes, leaving the render fingerprint independent so verified PNGs remain reusable. Tests first failed for missing encoding identity and then passed after the change. The actual native GIF/AV1 and preservation tests pass; full Python discovery passes 37 tests. Existing Bayer files and their earlier identities were retained unchanged.
+
+## Original versus experimental stepped comparison
+
+The ignored `write_expanded_geometry_proofs` fixture writer now saves the original mesh as well as stepped output, measured bounds, signed volume and actual slice sample heights for cube, wedge, dome, square aperture and thin wall. Production slicing code is unchanged. The explicitly run writer passed closed outward topology and float32 serialization for all originals and outputs.
+
+`artifacts/stepped-visual-comparison/render.py` used one persistent Blender 4.5.14 worker to render eleven actual 768 px EEVEE stills in 15.138 s: five matched original/stepped pairs plus a separate joined-bead reference. Each pair uses the same orthographic camera, pixels/mm, neutral material and lights; Layer Appearance is off, so every shown tread is geometry. Retained source/mesh/script/runtime hashes and alpha-silhouette comparisons are in `metrics.json`. `comparison-sheet.png` was visually inspected. The cube, aperture and thin-wall pairs preserve the broad shape and opening; the wedge acquires explicit treads, and the triangulated dome acquires visible terraces. The 0.04 mm tube wall remains present, including the empty aperture. Some inner-corner shading artifacts occur in both original and stepped thin-wall renders; this image is not evidence of calibrated surface normals.
+
+The joined-bead reference clearly differs: rounded deposited cross-sections with a hollow path-built interior, rather than full solid bands. It is a separate commanded-path specimen, not a slicer output matched to the five solids. No physical-print photos were supplied. Decision: keep the mid-layer stepped mode experimental, bounded to the supported closed-contour cases, with explicit sampling/sliver-rejection warnings. These images support that scope and do not justify general STL toolpath prediction, gap repair or photographic-accuracy claims.
+
+| Fixture | Original volume mm³ | Stepped volume mm³ | Matched rendered alpha silhouette IoU |
+|---|---:|---:|---:|
+| Cube | 256.0 | 256.0 | 0.999992 |
+| Wedge | 384.0 | 384.0 | 0.992874 |
+| Dome | 126.221176 | 126.119729 | 0.978796 |
+| Square aperture | 192.0 | 192.0 | 0.999992 |
+| 0.04 mm wall | 5.0944 | 5.0944 | 0.999991 |
+
+Volume agreement on linear/vertical specimens is consistent with midpoint integration; it does not imply identical silhouettes. IoU uses alpha >127 at the single shared 768 px camera and is not a multiview Hausdorff-distance bound. Strict all-target Clippy passed after the proof-writer and encoding updates.

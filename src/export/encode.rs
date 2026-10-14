@@ -160,6 +160,12 @@ pub fn inspect_gif_dimensions(path: &Path, width: u32, height: u32, count: u32) 
     Ok(())
 }
 
+const GIF_DITHER: &str = "sierra2_4a";
+
+pub fn gif_encoding_recipe() -> serde_json::Value {
+    serde_json::json!({"palette":format!("full,opaque,{GIF_DITHER}"),"fps":20,"final_delay_cs":5,"loop":0})
+}
+
 pub fn encode_gif(
     frames: &Path,
     destination: &Path,
@@ -231,11 +237,9 @@ pub fn encode_gif_dimensions(
         "-i",
     ]));
     args.push(palette.to_string_lossy().into_owned());
-    args.extend(arguments(&[
-        "-lavfi",
-        "paletteuse=dither=bayer:bayer_scale=3",
-        "-frames:v",
-    ]));
+    args.extend(arguments(&["-lavfi"]));
+    args.push(format!("paletteuse=dither={GIF_DITHER}"));
+    args.extend(arguments(&["-frames:v"]));
     args.push(count.to_string());
     args.extend(arguments(&["-r", "20", "-loop", "0", "-final_delay", "5"]));
     args.push(encoded.to_string_lossy().into_owned());

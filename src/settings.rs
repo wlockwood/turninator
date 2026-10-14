@@ -37,14 +37,22 @@ impl AppSettings {
         if fs::metadata(path)?.len() > 1024 * 1024 {
             return Err("settings file exceeds budget".into());
         }
-        let settings: Self = serde_json::from_slice(&fs::read(path)?)?;
+        let mut settings: Self = serde_json::from_slice(&read_bounded(path, 1024 * 1024)?)?;
         if settings.schema_version != 1 {
             return Err("unsupported settings version".into());
+        }
+        let recents = std::mem::take(&mut settings.recent_files);
+        for path in recents.into_iter().rev() {
+            settings.remember(path);
         }
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
-        atomic_write(path, &serde_json::to_vec_pretty(self)?)
+        let bytes = serde_json::to_vec_pretty(self)?;
+        if bytes.len() > 1024 * 1024 {
+            return Err("settings exceed 1 MiB reload budget".into());
+        }
+        atomic_write(path, &bytes)
     }
     pub fn remember(&mut self, path: PathBuf) {
         self.recent_files.retain(|p| p != &path);
@@ -58,6 +66,26 @@ pub fn default_data_directory() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".turninator"))
         .join("Turninator")
+}
+pub fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    if length > maximum_bytes {
+        return Err(format!(
+            "{} exceeds its {} byte input budget",
+            path.display(),
+            maximum_bytes
+        )
+        .into());
+    }
+    let mut bytes = Vec::with_capacity(length.min(maximum_bytes) as usize);
+    file.take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum_bytes {
+        return Err("input grew beyond its byte budget during read".into());
+    }
+    Ok(bytes)
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
