@@ -1,0 +1,69 @@
+material {
+    name : TurninatorResinV1,
+    shadingModel : lit,
+    blending : transparent,
+    refractionMode : screenspace,
+    refractionType : solid,
+    doubleSided : true,
+    requires : [ tangents, custom0 ],
+    variables : [ buildPosition ],
+    parameters : [
+        { type : float4, name : baseColor },
+        { type : float, name : roughness },
+        { type : float, name : metallic },
+        { type : float, name : anisotropy },
+        { type : float, name : coat },
+        { type : float, name : coatRoughness },
+        { type : float, name : ior },
+        { type : float, name : transmission },
+        { type : float3, name : absorption },
+        { type : float, name : thickness },
+        { type : float4, name : layer },
+        { type : float, name : buildMinZ },
+        { type : float4, name : filtering },
+        { type : float3, name : worldBuildGradient },
+        { type : float3, name : cameraPosition },
+        { type : float3, name : orthoViewDirection }
+    ]
+}
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+        material.buildPosition = getCustom0();
+    }
+}
+fragment {
+    void material(inout MaterialInputs material) {
+        float z = variable_buildPosition.z - materialParams.buildMinZ;
+        float first = materialParams.layer.x;
+        float later = materialParams.layer.y;
+        float pitch = z < first ? first : later;
+        float phase = z < first ? z / first : (z - first) / later;
+        float mask = 1.0 - variable_buildPosition.w * variable_buildPosition.w;
+        vec3 worldNormal = getWorldTangentFrame()[2];
+        vec3 viewDirection = materialParams.filtering.w > 0.0
+            ? normalize(materialParams.cameraPosition - getWorldPosition())
+            : materialParams.orthoViewDirection;
+        float footprint = materialParams.filtering.x;
+        if (materialParams.filtering.w > 0.0) {
+            footprint *= length(materialParams.cameraPosition - getWorldPosition());
+        }
+        float pitchPixels = min(first, later) * abs(dot(worldNormal, viewDirection))
+            / max(materialParams.filtering.z * footprint, 1e-12);
+        float gain = materialParams.filtering.y > 0.0 ? smoothstep(2.0, 4.0, pitchPixels) : 1.0;
+        float slope = 3.141592653589793 * materialParams.layer.z / pitch
+            * sin(6.283185307179586 * phase) * mask * gain * materialParams.layer.w;
+        vec3 gradient = transpose(getWorldTangentFrame()) * materialParams.worldBuildGradient;
+        material.normal = normalize(vec3(0.0, 0.0, 1.0) - slope * gradient);
+        prepareMaterial(material);
+        material.baseColor = materialParams.baseColor;
+        material.roughness = materialParams.roughness;
+        material.metallic = materialParams.metallic;
+        material.anisotropy = materialParams.anisotropy;
+        material.clearCoat = materialParams.coat;
+        material.clearCoatRoughness = materialParams.coatRoughness;
+        material.ior = materialParams.ior;
+        material.transmission = materialParams.transmission;
+        material.absorption = materialParams.absorption;
+        material.thickness = materialParams.thickness;
+    }
+}

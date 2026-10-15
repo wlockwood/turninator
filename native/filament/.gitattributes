@@ -1,0 +1,3 @@
+* text eol=lf
+vendor/** -text whitespace=-blank-at-eol
+sdk-headers-manifest.json -text
