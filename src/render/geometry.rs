@@ -88,6 +88,16 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
         }
     }
     let components = components(scene, &selected)?;
+    // Measurements are read-only and precede section clipping. In particular,
+    // measuring a deposited stage must not enable the cut path's winding repair.
+    let deposited_build = if scene.metadata.kind != GeometryKind::Original {
+        frame
+            .visible_layers
+            .map(|count| deposited_build_analysis(scene, count, &components, selected.len()))
+            .transpose()?
+    } else {
+        None
+    };
     let mut staged = Vec::new();
     let mut section_caps = Vec::new();
     let mut all_closed = !components.is_empty();
@@ -177,7 +187,7 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
             BuildAnalysis::from_legacy(value)
         }).transpose()?
     } else {
-        None
+        deposited_build
     };
     let mut analysis = None;
     let mut output = staged;
@@ -324,6 +334,65 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
         analysis,
         build_analysis,
     })
+}
+
+/// Whole deposited layers are selected, never clipped or capped for build-up.
+/// Sum the existing component volumes only when each component is closed and
+/// consistently wound. Bead overlaps are not a union and remain explicitly unknown.
+fn deposited_build_analysis(
+    scene: &RenderSceneSnapshot,
+    count: u32,
+    components: &[Component],
+    triangles: usize,
+) -> Result<BuildAnalysis> {
+    if count == 0 {
+        return BuildAnalysis::from_legacy(json!({
+            "visible_layer":-1,"z_top_mm":0.,"output_triangles":0,
+            "capped":false,"closed_input":false,"remaining_volume_mm3":0.,"warnings":[]
+        }));
+    }
+    let mut layers: Vec<_> = scene
+        .metadata
+        .layer_ranges
+        .iter()
+        .map(|r| (r.layer_index, r.z_top_mm))
+        .collect();
+    layers.dedup();
+    let &(index, top) = layers
+        .get(count as usize - 1)
+        .ok_or("visible layer count outside deposited schedule")?;
+    let mut closed = !components.is_empty();
+    let mut volume = 0.;
+    for component in components {
+        closed &= BuildUpSolid::new(&component.mesh).is_ok();
+        let origin = component.mesh.positions[0];
+        let signed: f64 = component
+            .mesh
+            .triangles
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|i| sub(component.mesh.positions[i as usize], origin));
+                dot(a, cross(b, c)) / 6.
+            })
+            .sum();
+        volume += signed.abs();
+    }
+    let mut warnings = Vec::new();
+    if scene.metadata.kind == GeometryKind::Beads {
+        warnings.push("Bead source volume is an algebraic mesh-volume estimate; overlaps between paths are not assessed.");
+    }
+    if !closed && triangles != 0 {
+        warnings.push("Open or inconsistently wound deposited geometry: volume unavailable.");
+    }
+    BuildAnalysis::from_legacy(json!({
+        "visible_layer":index,"z_top_mm":top,"output_triangles":triangles,
+        "capped":false,"closed_input":closed,
+        "remaining_volume_mm3":if triangles==0 {Some(0.)} else {closed.then_some(volume)},"warnings":warnings,
+        "volume_basis":if scene.metadata.kind==GeometryKind::Stepped {
+            "Additive volumes of independently closed, nonoverlapping stepped layers."
+        } else {"Algebraic mesh-volume magnitudes of closed bead components; overlaps between paths are not assessed."},
+        "meaning":"Whole deposited layer selection before sectioning; not strength, mass, or measured print behavior."
+    }))
 }
 
 fn visible_faces(scene: &RenderSceneSnapshot, count: Option<u32>) -> Result<Vec<usize>> {

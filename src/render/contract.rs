@@ -551,11 +551,13 @@ pub struct RealizedScene {
     pub design_edges_mm: Vec<[[f32; 3]; 2]>,
     pub reference_bounds_mm: Bounds,
     pub analysis: Option<SectionAnalysis>,
-    /// Original-solid reveal measurements before the final section is applied.
+    /// Solid or deposited whole-layer build measurements before final sectioning.
     pub build_analysis: Option<BuildAnalysis>,
 }
-/// Existing STL layer-reveal measurements. Empty/full stages have no cutting
-/// plane or cross-section measurements; preserve that distinction and JSON.
+/// Pre-section build measurements. Deposited layers retain their actual sparse
+/// layer IDs; the original-solid schedule remains limited to 50,000 entries.
+/// Deposited tops are absolute BUILD-Z and may be negative.
+/// Whole/empty stages have no invented clipping plane or cross-section area.
 #[derive(Clone, Debug)]
 pub struct BuildAnalysis {
     pub legacy: Value,
@@ -568,10 +570,8 @@ impl BuildAnalysis {
             || legacy["output_triangles"].as_u64().is_none()
             || legacy["visible_layer"]
                 .as_i64()
-                .is_none_or(|layer| !(-1..50_000).contains(&layer))
-            || legacy["z_top_mm"]
-                .as_f64()
-                .is_none_or(|z| !z.is_finite() || z < 0.)
+                .is_none_or(|layer| !(-1..=1_000_000).contains(&layer))
+            || legacy["z_top_mm"].as_f64().is_none_or(|z| !z.is_finite())
         {
             return Err("invalid legacy build analysis".into());
         }
