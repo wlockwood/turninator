@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 /.commit-check/
 /.turninator/
+/.worktrees/
+/.superpowers/
