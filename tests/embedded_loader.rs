@@ -97,6 +97,37 @@ fn upload(context: &mut turninator::render::embedded::EmbeddedContext, revision:
         .unwrap();
 }
 
+fn wait_for_state(
+    context: &mut turninator::render::embedded::EmbeddedContext,
+    expected: EmbeddedState,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if context.poll().unwrap().state == expected {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "waiting for {expected:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+fn wait_for_failure(context: &mut turninator::render::embedded::EmbeddedContext) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Err(error) = context.poll() {
+            return error.to_string();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "waiting for worker failure"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn rejects_untrusted_missing_bad_abi_and_fixture_as_production() {
     let ambient = std::env::current_exe()
@@ -135,7 +166,8 @@ fn rejects_untrusted_missing_bad_abi_and_fixture_as_production() {
     let delayed = EmbeddedLibrary::load_fixture(&fixture("tn_fixture_delayed.dll")).unwrap();
     let mut context = delayed.create(&config()).unwrap();
     upload(&mut context, 1);
-    let message = context.begin_frame(&frame(1)).unwrap_err().to_string();
+    context.begin_frame(&frame(1)).unwrap();
+    let message = wait_for_failure(&mut context);
     assert!(
         message.contains("delayed dependency safely unavailable"),
         "{message}"
@@ -168,8 +200,7 @@ fn upload_frame_read_retry_and_geometry_revision_reuse() {
             })
             .is_err()
     );
-    assert_eq!(context.poll().unwrap().state, EmbeddedState::Rendering);
-    assert_eq!(context.poll().unwrap().state, EmbeddedState::Ready);
+    wait_for_state(&mut context, EmbeddedState::Ready);
     let mut small = [99; 15];
     assert!(context.read_pixels(&mut small).is_err());
     assert_eq!(small, [99; 15]);
@@ -183,7 +214,10 @@ fn upload_frame_read_retry_and_geometry_revision_reuse() {
     assert_eq!(&pixels[16..], &[99; 4]);
     assert_eq!(context.poll().unwrap().state, EmbeddedState::Idle);
     context.begin_frame(&frame(7)).unwrap();
-    assert_eq!(context.poll().unwrap().state, EmbeddedState::Rendering);
+    assert!(matches!(
+        context.poll().unwrap().state,
+        EmbeddedState::Rendering | EmbeddedState::Ready
+    ));
 }
 
 #[test]
@@ -194,15 +228,13 @@ fn cancel_acknowledges_only_after_pending_readback_drain() {
         upload(&mut context, 3);
         context.begin_frame(&frame(3)).unwrap();
         if cancel_ready {
-            context.poll().unwrap();
-            context.poll().unwrap();
+            wait_for_state(&mut context, EmbeddedState::Ready);
         }
         context.cancel().unwrap();
         context.cancel().unwrap();
-        assert_eq!(context.poll().unwrap().state, EmbeddedState::Cancelling);
         assert!(context.begin_frame(&frame(3)).is_err());
         assert!(context.read_pixels(&mut [0; 16]).is_err());
-        assert_eq!(context.poll().unwrap().state, EmbeddedState::Cancelled);
+        wait_for_state(&mut context, EmbeddedState::Cancelled);
         assert_eq!(context.poll().unwrap().state, EmbeddedState::Idle);
         context.begin_frame(&frame(3)).unwrap();
     }
@@ -248,7 +280,8 @@ fn validates_geometry_dimensions_limits_and_translates_exceptions() {
     let throwing = EmbeddedLibrary::load_fixture(&fixture("tn_fixture_throw.dll")).unwrap();
     let mut context = throwing.create(&config()).unwrap();
     upload(&mut context, 1);
-    let error = context.begin_frame(&frame(1)).unwrap_err().to_string();
+    context.begin_frame(&frame(1)).unwrap();
+    let error = wait_for_failure(&mut context);
     assert!(error.contains("fixture exception"), "{error}");
     assert!(context.poll().is_err());
     assert!(context.cancel().is_err());
@@ -331,8 +364,7 @@ fn frame_transparency_seed_and_asymmetric_row_major_matrix_cross_the_abi() {
         0., -1., 0., 7., 1., 0., 0., 19., 0., 0., 1., 37., 0., 0., 0., 1.,
     ];
     context.begin_frame(&f).unwrap();
-    context.poll().unwrap();
-    context.poll().unwrap();
+    wait_for_state(&mut context, EmbeddedState::Ready);
     let mut bytes = [0; 16];
     context.read_pixels(&mut bytes).unwrap();
     assert_eq!(
@@ -390,8 +422,7 @@ fn realized_geometry_expansion_does_not_reapply_configurable_source_limits() {
             })
             .unwrap();
         context.begin_frame(&frame(41)).unwrap();
-        context.poll().unwrap();
-        context.poll().unwrap();
+        wait_for_state(&mut context, EmbeddedState::Ready);
         let mut pixels = [0; 16];
         context.read_pixels(&mut pixels).unwrap();
         assert_eq!(pixels[0..4], [255, 0, 0, 255]);

@@ -268,3 +268,106 @@ exact NVIDIA NVRTC/builtins payload/license terms need a packaging audit.
 `nvrtc64_120_0.alt.dll` is pinned but its packaging role remains unresolved.
 CUDA/OpenCL/OptiX driver libraries are system prerequisites. No lock entry grants
 redistribution rights or asserts that the official sample ZIP is a complete SDK.
+
+## Task5c common native lifecycle integration
+
+Workers7/8 must build against `native/common/backend.hpp` and the shared
+`tn_native_core` target. In each backend CMake directory call
+`tn_add_bridge(tn_renderer_filament "${CMAKE_CURRENT_SOURCE_DIR}/backend.cpp")`
+(or `tn_renderer_luxcore`), then add that target's qualified SDK includes, links
+and compile definitions. The helper links `tn_native_core` and compiles the same
+`common/exports.cpp` nine-export facade. Do not implement a second ABI, parser,
+state machine or owner-thread wrapper. Production builds return the matching
+`TN_BACKEND_FILAMENT`/`TN_BACKEND_LUXCORE` and flags `0`; fixture builds alone
+return `TN_BACKEND_FIXTURE` and `TN_FLAG_TEST_FIXTURE`. No production bridge is
+implemented or registered by Task5c.
+
+Implement these internal C++ functions in namespace `tn`:
+
+```cpp
+uint32_t backend_id() noexcept;
+uint32_t backend_flags() noexcept;
+std::unique_ptr<Backend> make_backend(const Config&);
+```
+
+`backend_id`/`backend_flags` are constant descriptors queried without creating an
+SDK. The factory, `Backend::describe`, `upload`, `render` and `~Backend` all run
+on one dedicated thread per context. `create` waits for factory and validated
+actual description; SDK initialization may block there. The Rust-facing opaque
+handle still accepts calls only on the creating Rust thread. The backend object
+never crosses threads, including on factory/description/upload/render failures.
+`describe` returns actual schema1 runtime JSON once; subsequent ABI describe
+calls copy cached immutable bytes, including after a later Failed transition.
+
+`Config` owns the complete validated config JSON (`document`), backend string,
+and checked duplicated C host/GPU/output/metadata bounds. `Scene` owns aligned
+`positions_mm`, `normals`, `build_positions_mm`, flat `triangles` and
+`triangle_materials` vectors, `revision` and validated `metadata` JSON. Vertex
+and triangle counts are vector sizes divided by three. `Frame::parameters` is
+an owned scalar `tn_frame`; its `quality_json` is null, and `Frame::quality`
+owns `{schema_version, quality}`. Consume those exact shared field names with
+typed JSON access; do not substitute defaults or reapply display rotation.
+These internal C++ values and SDK objects never cross ABI boundaries.
+
+`upload` in Idle validates and copies a complete immutable snapshot; repeated
+Idle uploads retain only the latest snapshot. Actual SDK upload is lazy on the
+first frame using it. An internal upload generation invalidates SDK geometry
+even if a caller reuses the numeric revision. Transform-only subsequent frames
+reuse uploaded SDK geometry. `begin` validates/copies frame input and enqueues
+one task; it never waits for SDK upload, compilation, rendering or readback.
+Rendering/Ready/Cancelling reject new upload/begin calls, so there is no task
+queue growth. Invalid input preserves the current revision and state.
+
+`Work` contains references to cancellation and completed/total atomics. Backend
+work may update numeric progress and check `work.cancelled()` between bounded
+operations. Do not retain `Work`, input references or SDK callbacks beyond the
+operation; copy CPU spans into SDK-owned buffers when the SDK retains them.
+An upload interrupted by cancellation is not marked reusable. Every successful
+`render` returns a tightly packed top-first display-sRGB straight-alpha RGBA8
+vector of exactly `width*height*4` bytes. The core checks that count and zeros
+RGB for zero-alpha pixels; tone mapping, row/channel conversion, unpremultiplying
+and sRGB encoding remain backend responsibilities. No partial image crosses ABI1.
+SDK-specific allocations/expansion must independently respect the config budget;
+the common guards validate supplied span bytes/metadata and output image bytes,
+not undocumented SDK memory estimates.
+
+The backend must drain SDK operations, readbacks and callbacks before `render`
+returns, including cancellation/error exits. Its noexcept destructor must also
+drain any remaining SDK work and catch SDK teardown exceptions. The core keeps
+active owned frame/scene input alive through backend destruction on exceptions.
+An SDK exception destroys the backend on its worker before publishing Failed;
+the original bounded diagnostic remains readable through poll. Failed rejects
+upload/begin/read/cancel; cached describe and destroy remain available.
+
+Poll/cancel call no SDK functions, wait on no locks and join no threads; they
+only inspect/update lock-free atomics and bounded context data. A pending cancel
+first enters Cancelling. Only worker completion after drain publishes the
+internal Cancelled acknowledgement. Cancel of an already Ready image can be
+acknowledged immediately because readback has already drained. The first poll
+emits Cancelled while restoring Idle; it is never inferred from elapsed time or
+number of polls. Ready/Cancelled publication uses acquire/release state ordering.
+Too-small image/description retries set required size, write no caller bytes,
+and retain the current state. Destruction requests cancellation and joins the
+worker before returning, allowing the Rust RAII owner to unload the DLL safely.
+A blocked driver/compiler can still delay create/destroy indefinitely.
+
+The single schema1 parser is official MIT `nlohmann/json` v3.12.0, vendored under
+`native/vendor/nlohmann`. Its annotated tag resolves to immutable commit
+`55f93686c01528224f448c19128836e7df245f72`. Exact official source/notice URLs and
+SHA-256 hashes are pinned in `sdk-lock.json.common_parser`; CMake checks both
+files before any fixture or production compilation. Preserve the complete
+`LICENSE.MIT` in distribution notices. Builds and runtime never download it.
+The common guards reject malformed/invalid UTF-8, duplicate keys, nesting beyond
+64 levels, unknown/missing schema1 fields, mistyped numeric/boolean/string data,
+unsupported recipes, invalid cameras/affine matrices, physical material/range
+errors, indices, nonfinite spans and byte/count overruns. Source-count overrides
+remain upstream only; derived caps stay 2,000,000 vertices/4,000,000 triangles.
+
+The deterministic fixture uses this exact core, retains the fault/dependency
+variants, and fingerprints all16 model-matrix double bit patterns with explicit
+alpha/seed. Its controllably pending C++ test covers one worker thread, copied
+input, latest snapshot, upload reuse, bounded task count, atomic progress,
+nonblocking poll/cancel, drain-before-cancel acknowledgement, failure cleanup,
+buffer retry and join-before-return. These CPU tests qualify the common lifecycle
+and transport only. Production SDK blocking, cancellation, memory, quality,
+color/alpha, device selection and module teardown remain workers7/8 gates.

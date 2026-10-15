@@ -4,6 +4,18 @@
   "target": "x86_64-pc-windows-msvc",
   "qualification": "sdk-feasibility-only; production bridges and redistribution unfinished",
   "evidence": "2026-10-15-sdk-probes",
+  "common_parser": {
+    "name": "nlohmann/json",
+    "version": "3.12.0",
+    "commit": "55f93686c01528224f448c19128836e7df245f72",
+    "header_path": "vendor/nlohmann/json.hpp",
+    "header_source": "https://raw.githubusercontent.com/nlohmann/json/55f93686c01528224f448c19128836e7df245f72/single_include/nlohmann/json.hpp",
+    "header_sha256": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63",
+    "license": "MIT",
+    "license_path": "vendor/nlohmann/LICENSE.MIT",
+    "license_source": "https://raw.githubusercontent.com/nlohmann/json/55f93686c01528224f448c19128836e7df245f72/LICENSE.MIT",
+    "license_sha256": "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603"
+  },
   "toolchain": {
     "cmake": "4.2.3",
     "generator": "Visual Studio 17 2022",
