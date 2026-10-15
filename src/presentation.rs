@@ -306,6 +306,17 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
                     .skip(1)
                     .collect();
                 let envelope = slice_stepped_with_report(&mesh, &schedule.boundaries_mm)?;
+                for (index, &[start, end]) in envelope.layer_face_ranges.iter().enumerate() {
+                    layer_tops_mm[index] = layer_tops_mm[index] as f32 as f64;
+                    groups.push(GeometryGroup {
+                        start_triangle: start,
+                        end_triangle: end,
+                        tool: 0,
+                        feature: "Sampled layer solid".into(),
+                        layer_index: index as u32,
+                        z_top_mm: layer_tops_mm[index],
+                    });
+                }
                 mesh = envelope.mesh;
                 warnings.extend(envelope.warnings);
                 warnings.push("Experimental mid-layer stepped solid: this changes the silhouette and does not model nozzle paths, infill or physical print defects.".into());
@@ -330,7 +341,16 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
                     )),
                 }
             }
-            (mesh, "original", warnings, 0)
+            (
+                mesh,
+                if options.stepped_envelope {
+                    "stepped"
+                } else {
+                    "original"
+                },
+                warnings,
+                0,
+            )
         }
         "gcode" | "gco" => {
             if options.stepped_envelope || options.millimeters_per_unit != 1. {
@@ -545,7 +565,7 @@ pub fn model_scene(
         scene["layer_appearance"] = serde_json::json!(false);
     }
     if !model.groups.is_empty() {
-        if settings.color_mode != "uniform" {
+        if model.geometry_kind == "beads" && settings.color_mode != "uniform" {
             scene["face_groups"] = serde_json::Value::Array(model.groups.iter().map(|g| serde_json::json!({"start_triangle":g.start_triangle,"end_triangle":g.end_triangle,"tool":g.tool,"label":g.feature,"color":group_color(g,settings)})).collect());
         }
         let mut layers: Vec<serde_json::Value> = Vec::new();
@@ -579,7 +599,7 @@ pub fn render_scene(
     if !path.is_absolute() {
         return Err("render mesh path must be absolute".into());
     }
-    if !["original", "beads"].contains(&geometry_kind) {
+    if !["original", "beads", "stepped"].contains(&geometry_kind) {
         return Err("unsupported geometry kind".into());
     }
     let mut result = serde_json::json!({"schema_version":1,"mesh_path":path,"geometry_kind":geometry_kind,

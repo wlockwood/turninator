@@ -2085,6 +2085,85 @@ mod buildup_gpu_tests {
     }
 
     #[test]
+    #[ignore = "requires an actual GPU adapter; checks closed stepped layer stages"]
+    fn gpu_stepped_stages_match_closed_layer_mesh_and_picking() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        let proof =
+            crate::print::slice::slice_stepped_with_report(&cube(), &[0., 0.5, 1., 1.5, 2.])
+                .unwrap();
+        let mut tops = vec![0.; proof.mesh.triangles.len()];
+        for (i, &[start, end]) in proof.layer_face_ranges.iter().enumerate() {
+            tops[start..end].fill((i + 1) as f32 * 0.5);
+        }
+        let mut picker = super::super::PickingMesh::new(&proof.mesh).unwrap();
+        picker.set_triangle_layer_tops(&tops).unwrap();
+        let mut viewport = Viewport::new(&state);
+        viewport.set_mesh(&proof.mesh, "stepped", 1).unwrap();
+        viewport.set_triangle_layer_tops(&tops).unwrap();
+        viewport.resize([256, 256]);
+        let mut camera = OrbitCamera::default();
+        let mut settings = ViewportSettings {
+            buildup_height_mm: Some(1.),
+            ..Default::default()
+        };
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        camera.orthographic = true;
+        let mut reference_mesh = proof.mesh.clone();
+        reference_mesh
+            .triangles
+            .truncate(proof.layer_face_ranges[1][1]);
+        let mut reference = Viewport::new(&state);
+        reference.set_mesh(&reference_mesh, "stepped", 1).unwrap();
+        reference.resize([256, 256]);
+        for mode in [
+            InspectionMode::Opaque,
+            InspectionMode::Ghost,
+            InspectionMode::Xray,
+        ] {
+            settings.inspection_mode = mode;
+            viewport.display_bounds(&settings);
+            reference.display_bounds(&settings);
+            viewport.render(&camera, &settings);
+            reference.render(
+                &camera,
+                &ViewportSettings {
+                    buildup_height_mm: None,
+                    ..settings.clone()
+                },
+            );
+            assert_eq!(
+                capture(&viewport),
+                capture(&reference),
+                "stepped stage differs in {mode:?}"
+            );
+            assert!(viewport.buildup_cap_warning().is_none());
+        }
+        camera.canonical(super::super::CanonicalView::Top);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256., 256.));
+        let hit = viewport
+            .pick_at(&picker, &camera, &settings, rect, rect.center())
+            .unwrap();
+        assert_eq!(hit.point_mm[2], 1.);
+        assert_eq!(hit.normal_mm, [0., 0., 1.]);
+        settings.buildup_height_mm = Some(0.);
+        assert!(
+            viewport
+                .pick_at(&picker, &camera, &settings, rect, rect.center())
+                .is_none()
+        );
+        viewport.render(&camera, &settings);
+        let empty = capture(&viewport);
+        assert!(empty.chunks_exact(4).all(|p| p == &empty[..4]));
+    }
+
+    #[test]
     #[ignore = "requires an actual GPU adapter; checks picking rendered build-up caps"]
     fn gpu_solid_buildup_picks_visible_cap_and_zero_layers_pick_nothing() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());

@@ -2,6 +2,16 @@
 #[test]
 #[ignore = "requires installed Blender/GPU and FFmpeg; verifies solid stages in final PNG/GIF/MP4/sheet"]
 fn solid_stages_reach_final_encoded_outputs() {
+    prove_stages(false);
+}
+
+#[test]
+#[ignore = "requires installed Blender/GPU and FFmpeg; verifies stepped STL in final PNG/GIF/MP4/sheet"]
+fn stepped_stages_reach_final_encoded_outputs() {
+    prove_stages(true);
+}
+
+fn prove_stages(stepped: bool) {
     use std::{
         fs,
         path::Path,
@@ -58,6 +68,7 @@ fn solid_stages_reach_final_encoded_outputs() {
     stl.push_str("endsolid proof\n");
     fs::write(&source, &stl).unwrap();
     let import = ImportSettings {
+        stepped_envelope: stepped,
         layer_height_mm: 1.,
         first_layer_height_mm: 1.,
         ..Default::default()
@@ -138,15 +149,7 @@ fn solid_stages_reach_final_encoded_outputs() {
     let gif = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
     assert_eq!(gif.frame_count, 4);
     assert_eq!(gif.duration_ms, 200);
-    let mut decoder = gif::DecodeOptions::new();
-    decoder.set_color_output(gif::ColorOutput::RGBA);
-    let mut reader = decoder
-        .read_info(fs::File::open(&gif.path).unwrap())
-        .unwrap();
-    let mut images = Vec::new();
-    while let Some(frame) = reader.read_next_frame().unwrap() {
-        images.push(frame.buffer.to_vec());
-    }
+    let images = decoded_gif_frames(&gif.path);
     assert_eq!(images.len(), 4);
     assert!(
         images.windows(2).all(|pair| pair[0] != pair[1]),
@@ -157,6 +160,36 @@ fn solid_stages_reach_final_encoded_outputs() {
     let mp4 = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
     assert_eq!(mp4.frame_count, 4);
     assert_eq!(mp4.duration_ms, 200);
+    if stepped {
+        let fixed_images = decoded_gif_frames(&fixed.path);
+        assert_eq!(fixed_images.len(), 4);
+        request.kind = ExportKind::Still;
+        request.animation = AnimationMode::Turntable;
+        for i in 0..4 {
+            for (label, count, angle, encoded) in [
+                ("growth", i + 1, 0., &images[i]),
+                ("fixed", 2, i as f64 * 90., &fixed_images[i]),
+            ] {
+                request.build_stage = Some(BuildStage {
+                    visible_layers: count as u32,
+                });
+                request.start_angle_degrees = angle;
+                request.destination = dir.join(format!("{label}-reference-{i}.png"));
+                let reference = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
+                let expected = image::open(reference.path).unwrap().to_rgba8().into_raw();
+                let error = expected
+                    .iter()
+                    .zip(encoded)
+                    .map(|(a, b)| a.abs_diff(*b) as f64)
+                    .sum::<f64>()
+                    / expected.len() as f64;
+                assert!(
+                    error < 3.,
+                    "{label} frame {i} differs from independent fixed-stage PNG by {error}"
+                );
+            }
+        }
+    }
     let mut checked_progression = false;
     let mut checked_partial = false;
     let mut checked_fixed_animation = false;
@@ -166,6 +199,10 @@ fn solid_stages_reach_final_encoded_outputs() {
             continue;
         }
         let data: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        if stepped {
+            assert_eq!(data["build_layer_count"], 4);
+            continue;
+        }
         if data["frame_count"] == 4 {
             let stages = data["frame_build_analysis"].as_array().unwrap();
             if stages.iter().all(|stage| stage["z_top_mm"] == 2.) {
@@ -188,8 +225,25 @@ fn solid_stages_reach_final_encoded_outputs() {
             checked_partial = true;
         }
     }
-    assert!(checked_progression && checked_partial && checked_fixed_animation);
+    if !stepped {
+        assert!(checked_progression && checked_partial && checked_fixed_animation);
+    }
     assert_eq!(fs::read(source).unwrap(), before);
-    fs::write(dir.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"png":png,"gif":gif,"mp4":mp4,"fixed_turntable":fixed,"solid_cap_in_final_outputs":true,"source_unchanged":true})).unwrap()).unwrap();
+    fs::write(dir.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"stepped":stepped,"png":png,"gif":gif,"mp4":mp4,"fixed_turntable":fixed,"solid_cap_in_final_outputs":true,"source_unchanged":true})).unwrap()).unwrap();
     println!("Solid encoded export proof: {}", dir.display());
+}
+
+fn decoded_gif_frames(path: &std::path::Path) -> Vec<Vec<u8>> {
+    use image::AnimationDecoder;
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(
+        std::fs::File::open(path).unwrap(),
+    ))
+    .unwrap();
+    decoder
+        .into_frames()
+        .collect_frames()
+        .unwrap()
+        .into_iter()
+        .map(|frame| frame.into_buffer().into_raw())
+        .collect()
 }

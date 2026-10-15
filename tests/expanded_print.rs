@@ -8,6 +8,32 @@ use turninator::{
     },
 };
 
+#[test]
+fn stepped_dense_source_uses_only_triangles_crossing_each_plane() {
+    let mut mesh = Mesh::default();
+    let rings = 7000u32;
+    for i in 0..=rings {
+        let z = 4. * i as f64 / rings as f64;
+        mesh.positions
+            .extend([[0., 0., z], [2., 0., z], [2., 2., z], [0., 2., z]]);
+    }
+    mesh.triangles.extend([[0, 2, 1], [0, 3, 2]]);
+    for ring in 0..rings {
+        for edge in 0..4 {
+            let a = ring * 4 + edge;
+            let b = ring * 4 + (edge + 1) % 4;
+            mesh.triangles.extend([[a, b, b + 4], [a, b + 4, a + 4]]);
+        }
+    }
+    let top = rings * 4;
+    mesh.triangles
+        .extend([[top, top + 1, top + 2], [top, top + 2, top + 3]]);
+    let schedule = LayerSchedule::uniform(0.02, 0.02, 4.).unwrap();
+    let output = turninator::print::slice::slice_stepped(&mesh, &schedule.boundaries_mm).unwrap();
+    closed_outward(&output);
+    assert_eq!(output.bounds().unwrap().max[2], 4.);
+}
+
 fn bead(start: [f64; 3], end: [f64; 3]) -> BeadSegment {
     BeadSegment {
         start,
@@ -251,7 +277,7 @@ fn square_tube(inner: f64) -> Mesh {
 }
 #[test]
 fn stepped_cube_wedge_holes_and_thin_walls_are_closed_without_repairs() {
-    use turninator::print::slice::slice_stepped;
+    use turninator::print::slice::{slice_stepped, slice_stepped_with_report};
     for mesh in [
         box_mesh([1.; 4]),
         box_mesh([1., 2., 2., 1.]),
@@ -262,7 +288,9 @@ fn stepped_cube_wedge_holes_and_thin_walls_are_closed_without_repairs() {
         let source = mesh.positions.clone();
         let top = mesh.bounds().unwrap().max[2];
         let schedule = LayerSchedule::uniform(0.3, 0.3, top).unwrap();
-        let stepped = slice_stepped(&mesh, &schedule.boundaries_mm).unwrap();
+        let report = slice_stepped_with_report(&mesh, &schedule.boundaries_mm).unwrap();
+        let tolerance = report.coordinate_tolerance_mm;
+        let stepped = report.mesh;
         closed_outward(&stepped);
         let b = stepped.bounds().unwrap();
         assert_eq!(b.min[2], 0.);
@@ -273,7 +301,7 @@ fn stepped_cube_wedge_holes_and_thin_walls_are_closed_without_repairs() {
                 stepped
                     .positions
                     .iter()
-                    .any(|p| (p[0].abs() - mesh.positions[4][0].abs()).abs() < 1e-12)
+                    .any(|p| (p[0].abs() - mesh.positions[4][0].abs()).abs() <= tolerance)
             );
         }
         if mesh.positions.len() == 16 {
@@ -351,13 +379,86 @@ fn stepped_dome_is_closed_and_sampling_stays_inside_each_interval() {
     assert_eq!(result.mesh.bounds().unwrap().max[2], 1.);
     assert!(!result.warnings.is_empty());
 }
+
 #[test]
-fn bounded_experiment_rejects_unresolved_slivers_without_simplification() {
+fn stepped_vertex_plane_contacts_do_not_create_artificial_micro_edges() {
+    use turninator::print::slice::slice_stepped_with_report;
+    let mesh = box_mesh([1.5, 2., 2., 1.5]);
+    let schedule = LayerSchedule::uniform(0.2, 0.2, 2.).unwrap();
+    let result = slice_stepped_with_report(&mesh, &schedule.boundaries_mm).unwrap();
+    assert!(result.sample_heights_mm.contains(&1.5));
+    closed_outward(&result.mesh);
+    assert_eq!(result.mesh.bounds().unwrap().max[2], 2.);
+}
+
+#[test]
+fn stepped_decimal_schedule_roundoff_does_not_split_a_vertex_contact() {
+    use turninator::print::slice::slice_stepped_with_report;
+    let mesh = box_mesh([42.5, 43., 43., 42.5]);
+    let schedule = LayerSchedule::uniform(0.2, 0.2, 43.).unwrap();
+    let result = slice_stepped_with_report(&mesh, &schedule.boundaries_mm).unwrap();
+    closed_outward(&result.mesh);
+    assert_eq!(result.mesh.bounds().unwrap().max[2], 43.);
+}
+#[test]
+fn aligned_dome_layers_do_not_manufacture_boolean_slivers() {
     let mesh = dome_mesh(false);
     let before = mesh.positions.clone();
     let schedule = LayerSchedule::uniform(0.3, 0.3, 1.).unwrap();
-    assert!(turninator::print::slice::slice_stepped(&mesh, &schedule.boundaries_mm).is_err());
+    let output = turninator::print::slice::slice_stepped(&mesh, &schedule.boundaries_mm).unwrap();
+    closed_outward(&output);
     assert_eq!(mesh.positions, before);
+}
+
+#[test]
+fn stepped_rejects_touching_contours_and_gaps_lost_at_renderer_precision() {
+    for shift in [2., 2. + 1e-8] {
+        let mut mesh = box_mesh([1.; 4]);
+        let other = box_mesh([1.; 4]);
+        let offset = mesh.positions.len() as u32;
+        mesh.positions
+            .extend(other.positions.iter().map(|p| [p[0] + shift, p[1], p[2]]));
+        mesh.triangles
+            .extend(other.triangles.iter().map(|t| t.map(|i| i + offset)));
+        let error = turninator::print::slice::slice_stepped(&mesh, &[0., 0.5, 1.])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("intersect, touch"), "{error}");
+    }
+}
+
+#[test]
+fn stepped_layer_ranges_preserve_empty_space_and_closed_print_stages() {
+    let mut mesh = box_mesh([0.5; 4]);
+    let other = box_mesh([0.5; 4]);
+    let offset = mesh.positions.len() as u32;
+    mesh.positions
+        .extend(other.positions.iter().map(|p| [p[0], p[1], p[2] + 1.5]));
+    mesh.triangles
+        .extend(other.triangles.iter().map(|t| t.map(|i| i + offset)));
+    let proof = turninator::print::slice::slice_stepped_with_report(&mesh, &[0., 0.5, 1., 1.5, 2.])
+        .unwrap();
+    assert_eq!(proof.layer_face_ranges.len(), 4);
+    assert_eq!(proof.layer_face_ranges[1][0], proof.layer_face_ranges[1][1]);
+    assert_eq!(proof.layer_face_ranges[2][0], proof.layer_face_ranges[2][1]);
+    for range in proof.layer_face_ranges {
+        if range[0] == range[1] {
+            continue;
+        }
+        let slab = Mesh {
+            positions: proof.mesh.positions.clone(),
+            triangles: proof.mesh.triangles[range[0]..range[1]].to_vec(),
+        };
+        closed_outward(&slab);
+    }
+    assert!(
+        proof
+            .mesh
+            .positions
+            .iter()
+            .flatten()
+            .all(|&v| v == v as f32 as f64)
+    );
 }
 #[test]
 fn expanded_parser_rejects_ambiguous_arcs_and_preserves_repayment_along_curve() {

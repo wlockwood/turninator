@@ -1387,7 +1387,7 @@ impl Studio {
                 b.max[1] - b.min[1],
                 b.max[2] - b.min[2]
             ));
-            if !model.groups.is_empty() {
+            if beads {
                 ui.small(format!(
                     "{} paths • {} deposited layers",
                     model.segment_count,
@@ -1402,7 +1402,7 @@ impl Studio {
                 }
                 let mut features = std::collections::BTreeSet::new();
                 let mut tools = std::collections::BTreeSet::new();
-                for group in &model.groups {
+                for group in model.groups.iter().filter(|_| beads) {
                     features.insert(&group.feature);
                     tools.insert(group.tool);
                 }
@@ -1436,7 +1436,7 @@ impl Studio {
             if !beads || self.scene.color_mode == "uniform" {
                 ui.color_edit_button_rgb(&mut self.scene.color).help("Choose the base surface color. This applies when color mapping is Uniform; mapped G-code paths use the print palette.");
             }
-            if self.model.as_ref().is_some_and(|m| !m.groups.is_empty()) {
+            if beads {
                 egui::ComboBox::from_label("Color mapping")
                     .selected_text(&self.scene.color_mode)
                     .show_ui(ui, |ui| {
@@ -1520,8 +1520,8 @@ impl Studio {
             if !beads {
             ui.label("Build rotation (changes print layers)");
             rotation_editor(ui, &mut self.scene.import.build_rotation_degrees, "Change the physical STL build orientation and rebuild its printed layers. The lowest point is placed on the build bed.");
-            ui.checkbox(&mut self.scene.import.stepped_envelope,"Experimental STL stepped solid").help("Replace an STL with a mid-layer stepped approximation using the chosen layer heights. This changes the silhouette, requires a closed solid, and may miss features between samples. The source file is unchanged.");
-            if self.scene.import.stepped_envelope { ui.small("Mid-layer approximation changes the silhouette; closed solids only. Features between samples may be missed."); }
+            ui.checkbox(&mut self.scene.import.stepped_envelope,"Experimental STL stepped solid").help("Sample a closed STL at each layer midpoint and stack closed layer solids at the chosen heights. This changes the silhouette and may miss features between samples. Internal layer interfaces can show through transparent materials. Source files are unchanged.");
+            if self.scene.import.stepped_envelope { ui.small("Sampled layer solids change the silhouette. Transparent materials may reveal internal layer interfaces."); }
             }
             if beads {
             ui.collapsing("G-code interpretation",|ui| {
@@ -2465,6 +2465,7 @@ impl eframe::App for Studio {
             if let Some(model) = &self.model {
                 let colors = if self.output_format == OutputFormat::FourView
                     || self.scene.color_mode == "uniform"
+                    || model.geometry_kind != "beads"
                     || model.groups.is_empty()
                 {
                     Vec::new()

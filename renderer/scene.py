@@ -65,7 +65,7 @@ def load_scene_spec(path):
         raise ValueError("unsupported scene schema")
     if not isinstance(spec.get("mesh_path"), str) or not Path(spec["mesh_path"]).is_absolute():
         raise ValueError("mesh_path must be absolute")
-    if spec.get("geometry_kind") not in ("beads", "original"):
+    if spec.get("geometry_kind") not in ("beads", "original", "stepped"):
         raise ValueError("unsupported geometry_kind")
     if "solid_layer_tops_mm" in spec:
         if spec["geometry_kind"] != "original":
@@ -136,11 +136,12 @@ def validate_section(section):
         raise ValueError("section keep_positive/cap must be boolean")
 
 
-def _face_range(group, count, previous_end):
+def _face_range(group, count, previous_end, allow_empty=False):
     if not isinstance(group,dict):
         raise ValueError("face group must be an object")
     start,end = group.get("start_triangle"),group.get("end_triangle")
-    if type(start) is not int or type(end) is not int or not previous_end <= start < end <= count:
+    if (type(start) is not int or type(end) is not int
+            or not previous_end <= start <= end <= count or start == end and not allow_empty):
         raise ValueError("face ranges must be ordered, disjoint and within the triangle count")
     return start,end
 
@@ -168,7 +169,7 @@ def validate_face_groups(groups, triangle_count):
     return groups
 
 
-def validate_layer_ranges(ranges, triangle_count):
+def validate_layer_ranges(ranges, triangle_count, geometry_kind="beads"):
     if not isinstance(ranges,list) or not ranges or len(ranges)>100000:
         raise ValueError("build-up requires bounded layer_face_ranges")
     previous_end=0
@@ -176,7 +177,9 @@ def validate_layer_ranges(ranges, triangle_count):
     previous_z=-math.inf
     layers=[]
     for group in ranges:
-        start,end=_face_range(group,triangle_count,previous_end)
+        # Empty sampled intervals are still physical steps in the STL schedule.
+        # Bead ranges continue to require deposited faces in every group.
+        start,end=_face_range(group,triangle_count,previous_end,allow_empty=geometry_kind=="stepped")
         layer=group.get("layer_index")
         z=_finite_number(group.get("z_top_mm"),"layer top")
         if start != previous_end or type(layer) is not int or not 0<=layer<=1000000 or layer<previous_layer or z<previous_z:
@@ -234,16 +237,23 @@ def apply_face_groups(obj,base_material,groups):
     obj.data.polygons.foreach_set("material_index",indices)
 
 
-def apply_buildup(obj,ranges):
-    import bpy
+def assign_layer_indices(obj,ranges,geometry_kind="beads"):
     from array import array
-    layers=validate_layer_ranges(ranges,len(obj.data.polygons))
+    layers=validate_layer_ranges(ranges,len(obj.data.polygons),geometry_kind)
     values=array('i',[0])*len(obj.data.polygons)
     for group in ranges:
         start,end=group["start_triangle"],group["end_triangle"]
         values[start:end]=array('i',[group["layer_index"]])*(end-start)
-    attribute=obj.data.attributes.new("turninator_layer_index","INT","FACE")
+    attribute=obj.data.attributes.get("turninator_layer_index")
+    if attribute is None:
+        attribute=obj.data.attributes.new("turninator_layer_index","INT","FACE")
     attribute.data.foreach_set("value",values)
+    return layers
+
+
+def apply_buildup(obj,ranges,geometry_kind="beads"):
+    import bpy
+    layers=assign_layer_indices(obj,ranges,geometry_kind)
     tree=bpy.data.node_groups.new("TurninatorBuildUp","GeometryNodeTree")
     tree.interface.new_socket(name="Geometry",in_out="INPUT",socket_type="NodeSocketGeometry")
     tree.interface.new_socket(name="Geometry",in_out="OUTPUT",socket_type="NodeSocketGeometry")
@@ -397,12 +407,146 @@ def set_camera_spec(camera, chosen):
     camera.data.clip_end=max(distance*100,100.)
 
 
+def indexed_face_components(faces, vertex_count, max_components=2000):
+    """Partition by shared indices, never by coordinates of touching shells."""
+    from array import array
+    parent=array('I',range(len(faces)))
+    owner=array('i',[-1])*vertex_count
+    def root(index):
+        while parent[index]!=index:
+            parent[index]=parent[parent[index]]
+            index=parent[index]
+        return index
+    for index,face in enumerate(faces):
+        for vertex in face:
+            if owner[vertex]<0:
+                owner[vertex]=index
+            else:
+                parent[root(index)]=root(owner[vertex])
+    groups={}
+    for index in range(len(faces)):
+        groups.setdefault(root(index),[]).append(index)
+    if len(groups)>max_components:
+        raise ValueError("stepped section component work budget exceeded")
+    return list(groups.values())
+
+
+def section_cap_material(obj):
+    import bpy
+    material=bpy.data.materials.new("SectionCutSurface")
+    material.use_nodes=True
+    bsdf=material.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value=(0.5,0.18,0.065,1)
+    bsdf.inputs["Roughness"].default_value=0.65
+    obj.data.materials.append(material)
+    return len(obj.data.materials)-1
+
+
+def total_section_measurement(analyses,name):
+    total=0.0
+    for analysis in analyses:
+        value=analysis[name]
+        # A closed layer removed by the section contributes no remaining solid.
+        # Unknown measurements from open inputs or nonempty outputs stay unknown.
+        if (value is None and name=="remaining_volume_mm3" and analysis["closed_input"]
+                and analysis["output_triangles"]==0):
+            value=0.0
+        if value is None:
+            return None
+        total+=value
+    return total
+
+
+def apply_stepped_section(obj,section,rotation,center_xy,bottom,extent,cap_material_index):
+    """Section closed slabs separately so coincident interfaces stay independent."""
+    import bpy
+    faces=[tuple(p.vertices) for p in obj.data.polygons]
+    attribute=obj.data.attributes.get("turninator_layer_index")
+    if attribute is not None:
+        groups={}
+        for index,item in enumerate(attribute.data):
+            groups.setdefault(item.value,[]).append(index)
+        groups=list(groups.values())
+        if len(groups)>2000:
+            raise ValueError("stepped section layer work budget exceeded")
+    else:
+        groups=indexed_face_components(faces,len(obj.data.vertices))
+    cap_index=section_cap_material(obj) if cap_material_index is None else cap_material_index
+    materials=list(obj.data.materials)
+    vertices=[]
+    result_faces=[]
+    face_materials=[]
+    smooth=[]
+    analyses=[]
+    for group in groups:
+        source_indices=sorted({i for face_index in group for i in faces[face_index]})
+        remap={original:local for local,original in enumerate(source_indices)}
+        mesh=bpy.data.meshes.new("DisposableSteppedSectionGeometry")
+        part=None
+        try:
+            mesh.from_pydata([tuple(obj.data.vertices[i].co) for i in source_indices],[],
+                             [tuple(remap[i] for i in faces[index]) for index in group])
+            for material in materials:
+                mesh.materials.append(material)
+            for polygon,index in zip(mesh.polygons,group):
+                polygon.material_index=obj.data.polygons[index].material_index
+                polygon.use_smooth=obj.data.polygons[index].use_smooth
+            mesh.update()
+            part=bpy.data.objects.new("DisposableSteppedSection",mesh)
+            bpy.context.scene.collection.objects.link(part)
+            analyses.append(apply_section(part,section,rotation,center_xy,bottom,extent,
+                                          "stepped_layer",cap_index))
+            # Boolean evaluation may replace the part's mesh datablock.
+            cut=part.data
+            used=sorted({i for polygon in cut.polygons for i in polygon.vertices})
+            result_remap={original:len(vertices)+local for local,original in enumerate(used)}
+            vertices.extend(tuple(cut.vertices[i].co) for i in used)
+            for polygon in cut.polygons:
+                result_faces.append(tuple(result_remap[i] for i in polygon.vertices))
+                face_materials.append(polygon.material_index)
+                smooth.append(polygon.use_smooth)
+        finally:
+            cut=part.data if part is not None else mesh
+            original_mesh=cut==mesh
+            if part is not None:
+                bpy.data.objects.remove(part,do_unlink=True)
+            if not cut.users:
+                bpy.data.meshes.remove(cut)
+            if not original_mesh and not mesh.users:
+                bpy.data.meshes.remove(mesh)
+    output=bpy.data.meshes.new("TurninatorSectionedLayers")
+    output.from_pydata(vertices,[],result_faces)
+    for material in materials:
+        output.materials.append(material)
+    for polygon,material_index,is_smooth in zip(output.polygons,face_materials,smooth):
+        polygon.material_index=material_index
+        polygon.use_smooth=is_smooth
+    output.update()
+    previous=obj.data
+    obj.data=output
+    if not previous.users:
+        bpy.data.meshes.remove(previous)
+    obj.data.calc_loop_triangles()
+    return dict(axis=section["axis"],position_mm=section["position_mm"],keep_positive=section["keep_positive"],
+                capped=bool(analyses) and all(a["capped"] for a in analyses),
+                closed_input=bool(analyses) and all(a["closed_input"] for a in analyses),
+                cross_section_area_mm2=total_section_measurement(analyses,"cross_section_area_mm2"),
+                original_volume_mm3=total_section_measurement(analyses,"original_volume_mm3"),
+                remaining_volume_mm3=total_section_measurement(analyses,"remaining_volume_mm3"),
+                output_triangles=len(obj.data.loop_triangles),
+                warnings=list(dict.fromkeys(w for a in analyses for w in a["warnings"])),
+                volume_basis="Additive volumes of independently closed, nonoverlapping stepped layers.",
+                meaning="Geometric intersection of the modeled stepped layers; not strength, mass, or measured print behavior.")
+
+
 def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_kind, cap_material_index=None):
     """Cut a disposable render mesh; a plane never fills an infill envelope."""
     import bpy
     import bmesh
     from mathutils import Vector
     validate_section(section)
+    if geometry_kind=="stepped":
+        return apply_stepped_section(obj,section,rotation,center_xy,bottom,extent,cap_material_index)
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     if geometry_kind == "original":
@@ -456,13 +600,7 @@ def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_ki
     obj.data.update()
     area = 0.0
     if cap_material_index is None:
-        cap_material = bpy.data.materials.new("SectionCutSurface")
-        cap_material.use_nodes = True
-        cap_bsdf = cap_material.node_tree.nodes.get("Principled BSDF")
-        cap_bsdf.inputs["Base Color"].default_value = (0.5,0.18,0.065,1)
-        cap_bsdf.inputs["Roughness"].default_value = 0.65
-        obj.data.materials.append(cap_material)
-        cap_index = len(obj.data.materials)-1
+        cap_index = section_cap_material(obj)
     else:
         cap_index = cap_material_index
     for polygon in obj.data.polygons:
@@ -777,7 +915,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     if "face_groups" in spec:
         validate_face_groups(spec["face_groups"],len(triangles))
     if "layer_face_ranges" in spec:
-        validate_layer_ranges(spec["layer_face_ranges"],len(triangles))
+        validate_layer_ranges(spec["layer_face_ranges"],len(triangles),spec["geometry_kind"])
     if spec["geometry_kind"] == "original" and (spec.get("build_up",False) or "solid_layer_tops_mm" in spec):
         validate_solid_layer_tops(spec.get("solid_layer_tops_mm"),max(v[2] for v in vertices))
     smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout"), spec.get("bead_side_face_ranges"), spec.get("bead_ring_vertices",32)) if spec["geometry_kind"] == "beads" else None
@@ -834,6 +972,8 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     mesh.update()
     obj = bpy.data.objects.new("PrintedPart", mesh)
     scene.collection.objects.link(obj)
+    if spec["geometry_kind"]=="stepped":
+        assign_layer_indices(obj,spec.get("layer_face_ranges"),"stepped")
     if smooth_flags is not None:
         for polygon, smooth in zip(mesh.polygons, smooth_flags):
             polygon.use_smooth = smooth
@@ -869,7 +1009,9 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         if spec["geometry_kind"] == "original":
             build_layers = validate_solid_layer_tops(spec.get("solid_layer_tops_mm"))
         else:
-            build_layers = validate_layer_ranges(spec.get("layer_face_ranges"),len(triangles)) if spec.get("section") is not None else apply_buildup(obj,spec.get("layer_face_ranges"))
+            build_layers = (validate_layer_ranges(spec.get("layer_face_ranges"),len(triangles),spec["geometry_kind"])
+                            if spec.get("section") is not None
+                            else apply_buildup(obj,spec.get("layer_face_ranges"),spec["geometry_kind"]))
     section_analysis = None
     if spec.get("section") is not None and not spec.get("build_up",False):
         section_analysis = apply_section(obj,spec["section"],rotation,(cx,cy),bottom,
@@ -967,6 +1109,8 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     warnings=list(spec["warnings"])
     if preset=="resin" and spec["geometry_kind"]=="beads":
         warnings.append("Resin on bead meshes retains internal/overlapping interfaces; transmission is an optical illustration, not a fused-resin simulation.")
+    if preset=="resin" and spec["geometry_kind"]=="stepped":
+        warnings.append("Stepped solids retain closed layer interfaces; resin transmission is an optical illustration and may show internal layer surfaces.")
     return obj, {"geometry_hash": digest.hexdigest(), "vertices": len(vertices),
                  "triangles": len(triangles), "bounds_m": envelope,
                  "device": device_info, "warnings": warnings,"section_analysis":section_analysis,"build_layers":build_layers}

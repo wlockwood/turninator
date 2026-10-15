@@ -232,6 +232,66 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 scene.validate_layer_ranges(invalid,8)
 
+    def test_stepped_layers_retain_empty_intervals_in_build_schedule(self):
+        ranges = [dict(layer_index=0,start_triangle=0,end_triangle=0,z_top_mm=0.2),
+                  dict(layer_index=1,start_triangle=0,end_triangle=4,z_top_mm=0.4),
+                  dict(layer_index=2,start_triangle=4,end_triangle=4,z_top_mm=0.6),
+                  dict(layer_index=3,start_triangle=4,end_triangle=8,z_top_mm=0.8)]
+        layers = scene.validate_layer_ranges(ranges,8,geometry_kind='stepped')
+        self.assertEqual(layers,[0,1,2,3])
+        self.assertEqual(scene.buildup_schedule(layers,4),[0,1,2,3])
+        self.assertEqual([scene.layer_for_count(layers,n) for n in range(5)],[-1,0,1,2,3])
+        for kind in ('beads','original'):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                scene.validate_layer_ranges(ranges,8,geometry_kind=kind)
+        for invalid in ([dict(ranges[0],end_triangle=-1),*ranges[1:]],
+                        [ranges[0],dict(ranges[1],start_triangle=1),*ranges[2:]],
+                        [*ranges[:-1],dict(ranges[-1],end_triangle=7)]):
+            with self.assertRaises(ValueError):
+                scene.validate_layer_ranges(invalid,8,geometry_kind='stepped')
+
+    def test_stepped_scene_accepts_physical_layers_and_rejects_surface_layer_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'scene.json'
+            spec = dict(schema_version=1,mesh_path=str(Path(directory)/'mesh.bin'),
+                        geometry_kind='stepped',layer_height_mm=0.2,color=[0.1]*3,
+                        roughness=0.4,display_rotation_degrees=[0]*3,warnings=[],
+                        layer_appearance=False,bead_layout=None,
+                        layer_face_ranges=[dict(layer_index=0,start_triangle=0,end_triangle=0,z_top_mm=0.2),
+                                           dict(layer_index=1,start_triangle=0,end_triangle=4,z_top_mm=0.4)])
+            path.write_text(json.dumps(spec))
+            self.assertEqual(scene.load_scene_spec(path)['geometry_kind'],'stepped')
+            for invalid in (dict(layer_appearance=True),dict(bead_layout='independent_stadium_v1'),
+                            dict(solid_layer_tops_mm=[0.2,0.4])):
+                path.write_text(json.dumps(dict(spec,**invalid)))
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    scene.load_scene_spec(path)
+
+    def test_stepped_section_components_follow_indices_and_keep_shell_faces_together(self):
+        # Each tetrahedron is a closed indexed shell. The renderer may place
+        # their coordinates against each other without sharing vertex IDs.
+        faces = [(0,2,1),(4,6,5),(0,1,3),(4,5,7),
+                 (1,2,3),(5,6,7),(2,0,3),(6,4,7)]
+        self.assertEqual(scene.indexed_face_components(faces,8),[[0,2,4,6],[1,3,5,7]])
+        self.assertEqual(scene.indexed_face_components([],0),[])
+        with self.assertRaisesRegex(ValueError,'budget'):
+            scene.indexed_face_components(faces,8,max_components=1)
+
+    def test_stepped_section_volume_counts_fully_removed_closed_layers_as_zero(self):
+        kept = dict(closed_input=True,output_triangles=12,remaining_volume_mm3=750.0,
+                    original_volume_mm3=1500.0,cross_section_area_mm2=150.0)
+        removed = dict(closed_input=True,output_triangles=0,remaining_volume_mm3=None,
+                       original_volume_mm3=1500.0,cross_section_area_mm2=0.0)
+        self.assertEqual(scene.total_section_measurement([kept,removed],'remaining_volume_mm3'),750.0)
+        self.assertEqual(scene.total_section_measurement([removed],'remaining_volume_mm3'),0.0)
+        self.assertEqual(scene.total_section_measurement([kept,removed],'original_volume_mm3'),3000.0)
+        self.assertEqual(scene.total_section_measurement([kept,removed],'cross_section_area_mm2'),150.0)
+        for invalid in (dict(removed,closed_input=False),dict(removed,output_triangles=1)):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(scene.total_section_measurement([kept,invalid],'remaining_volume_mm3'))
+        for name in ('remaining_volume_mm3','original_volume_mm3','cross_section_area_mm2'):
+            self.assertEqual(scene.total_section_measurement([],name),0)
+
     def test_solid_build_schedule_requires_ordered_physical_tops_and_complete_model(self):
         self.assertEqual(scene.validate_solid_layer_tops([0.2, 0.4, 0.45], 0.45), [0, 1, 2])
         for tops in (None, [], [0], [-0.1], [True], [float('nan')], [float('inf')],

@@ -1,14 +1,17 @@
 use std::{
     fs,
     path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use turninator::presentation::{ImportSettings, SceneSettings, load_model, model_scene};
 
 fn tetra_stl(height: f64) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
-        "turninator-solid-build-{}-{}.stl",
+        "turninator-solid-build-{}-{}-{}.stl",
         std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -73,5 +76,45 @@ fn a_thin_final_solid_layer_is_retained_without_changing_the_stl() {
     let model = load_model(&path, &ImportSettings::default()).unwrap();
     assert_eq!(model.layer_tops_mm, vec![0.2, 0.21]);
     assert_eq!(fs::read(&path).unwrap(), before);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn stepped_stl_exports_closed_layer_ranges_instead_of_boolean_reveal() {
+    let path = tetra_stl(1.01);
+    let before = fs::read(&path).unwrap();
+    let settings = ImportSettings {
+        stepped_envelope: true,
+        first_layer_height_mm: 0.2,
+        layer_height_mm: 0.3,
+        ..Default::default()
+    };
+    let model = load_model(&path, &settings).unwrap();
+    assert_eq!(model.geometry_kind, "stepped");
+    assert_eq!(model.groups.len(), 4);
+    let mut end = 0;
+    for (group, &height) in model.groups.iter().zip(&model.layer_tops_mm) {
+        assert_eq!(group.start_triangle, end);
+        assert_eq!(group.z_top_mm, height);
+        end = group.end_triangle;
+    }
+    assert_eq!(end, model.mesh.triangles.len());
+    let scene = model_scene(
+        &model,
+        &SceneSettings {
+            import: settings,
+            color_mode: "feature".into(),
+            ..Default::default()
+        },
+        &path.with_extension("mesh.bin"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(scene["geometry_kind"], "stepped");
+    assert_eq!(scene["layer_appearance"], false);
+    assert!(scene.get("solid_layer_tops_mm").is_none());
+    assert!(scene.get("face_groups").is_none());
+    assert_eq!(scene["layer_face_ranges"].as_array().unwrap().len(), 4);
+    assert_eq!(before, fs::read(&path).unwrap());
     fs::remove_file(path).unwrap();
 }

@@ -18,6 +18,8 @@ const WORK_BUDGET: usize = 100_000_000;
 
 pub struct SteppedEnvelope {
     pub mesh: Mesh,
+    /// Every scheduled interval, including empty space between source shells.
+    pub layer_face_ranges: Vec<[usize; 2]>,
     pub sample_heights_mm: Vec<f64>,
     pub coordinate_tolerance_mm: f64,
     pub warnings: Vec<String>,
@@ -49,15 +51,13 @@ impl BuildUpSolid {
         }
         let z = self.bounds.min[2] + height_mm;
         let contours = section(&self.mesh, z)?;
-        let count: usize = contours.iter().map(Vec::len).sum();
-        if count.saturating_mul(count) > WORK_BUDGET {
-            return Err("build-up cap contour intersection work budget exceeded".into());
-        }
+        let mut work = 0;
         let tolerance = (self.bounds.max[0] - self.bounds.min[0])
             .max(self.bounds.max[1] - self.bounds.min[1])
             * 2f64.powi(-45);
-        validate_contours(&contours, tolerance)?;
-        let mut shapes = group_contours(contours)?;
+        validate_contours(&contours, tolerance, &mut work)
+            .map_err(|error| format!("build-up plane {z}: {error}"))?;
+        let mut shapes = group_contours(contours, &mut work)?;
         // Existing planar faces at this stage already close their own region.
         // Overdrawing them would change opacity in Ghost/Xray inspection.
         let coplanar: Shapes = self
@@ -95,10 +95,11 @@ pub fn slice_stepped(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<Mesh> {
 
 /// Mid-interval cross sections are extruded to the scheduled boundaries; the last
 /// interval is clipped to the actual source top. Closed oriented inputs only.
-/// Integer overlay uses one shared 48-bit grid; unresolved features fail explicitly.
+/// Independently indexed, closed layer slabs share the renderer's f32 precision.
+/// Internal layer interfaces are retained; the exterior is the sampled envelope.
 pub fn slice_stepped_with_report(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<SteppedEnvelope> {
     let bounds = mesh.bounds()?;
-    validate_closed(mesh)?;
+    validate_closed(mesh).map_err(|e| format!("source solid: {e}"))?;
     if bounds.min[2] != 0.
         || bounds.max[2] <= 0.
         || bounds
@@ -113,60 +114,65 @@ pub fn slice_stepped_with_report(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<S
     }
     let schedule = LayerSchedule::explicit(boundaries_mm.to_vec())?.clipped(bounds.max[2])?;
     let intervals = schedule.boundaries_mm.len() - 1;
-    if intervals > 2000 || intervals.saturating_mul(mesh.triangles.len()) > 10_000_000 {
+    if intervals > 2000 {
         return Err(
             "experimental slice work budget exceeded (2000 intervals / 10M triangle-plane tests)"
                 .into(),
         );
     }
-    let rect = FloatRect {
-        min_x: bounds.min[0],
-        max_x: bounds.max[0],
-        min_y: bounds.min[1],
-        max_y: bounds.max[1],
-    };
-    let adapter = FloatPointAdapter::<Point, i64>::with_coordinate_bits(rect, 48);
-    let tolerance =
+    let arithmetic_tolerance =
         (bounds.max[0] - bounds.min[0]).max(bounds.max[1] - bounds.min[1]) * 2f64.powi(-45);
     let mut sections = Vec::new();
-    let mut sample_heights_mm = Vec::new();
+    let sample_heights_mm: Vec<_> = schedule
+        .boundaries_mm
+        .windows(2)
+        .map(|p| (p[0] + p[1]) * 0.5)
+        .collect();
+    let active = active_triangles(mesh, &sample_heights_mm)?;
     let mut work = 0usize;
-    for pair in schedule.boundaries_mm.windows(2) {
-        let mut z = (pair[0] + pair[1]) * 0.5;
-        // Deterministic one-ULP side selection avoids ambiguous coplanar triangles.
-        while mesh.positions.iter().any(|p| p[2] == z) {
-            z = z.next_up();
-            if z >= pair[1] {
-                return Err("slice interval cannot resolve a noncoplanar sample".into());
-            }
-        }
-        sample_heights_mm.push(z);
-        let mut contours = section(mesh, z)?;
-        let count: usize = contours.iter().map(Vec::len).sum();
-        work = work.saturating_add(count.saturating_mul(count));
-        if work > WORK_BUDGET {
-            return Err("contour intersection work budget exceeded".into());
-        }
-        validate_contours(&contours, tolerance)?;
+    for (&z, triangles) in sample_heights_mm.iter().zip(&active) {
+        // section() shares one node for exact vertex contacts and takes the
+        // limiting section from below. Moving the plane by one ULP instead
+        // manufactures artificial microscopic edges.
+        let mut contours = section_triangles(
+            mesh,
+            z,
+            triangles.iter().map(|&i| &mesh.triangles[i as usize]),
+        )?;
+        validate_contours(&contours, arithmetic_tolerance, &mut work)
+            .map_err(|error| format!("slice plane {z}: {error}"))?;
+        let original_depths = contour_depths(&contours, &mut work)?;
         for contour in &mut contours {
-            let mut seen = BTreeSet::new();
-            for point in contour {
-                let integer = adapter.float_to_int(point);
-                if !seen.insert((integer.x, integer.y)) {
-                    return Err(
-                        "slice feature collapses on the bounded overlay grid; no repair performed"
-                            .into(),
-                    );
-                }
-                *point = adapter.int_to_float(&integer);
+            for point in contour.iter_mut() {
+                *point = point.map(|v| v as f32 as f64);
+            }
+            simplify_collinear(contour);
+            if contour.len() < 3 || signed_area(contour) == 0. {
+                return Err(format!("slice plane {z}: a contour collapses at renderer precision; use Layer Appearance or a larger model").into());
             }
         }
-        sections.push(group_contours(contours)?);
+        validate_contours(&contours, 0., &mut work).map_err(|e| {
+            format!("slice plane {z}: renderer precision changes contour topology: {e}")
+        })?;
+        if contour_depths(&contours, &mut work)? != original_depths {
+            return Err(format!("slice plane {z}: renderer precision changes holes or nesting; no topology repair performed").into());
+        }
+        sections.push(group_contours(contours, &mut work)?);
     }
-    let mut builder = Builder::default();
+    let mut output = Mesh::default();
+    let mut layer_face_ranges = Vec::with_capacity(intervals);
     for (index, shapes) in sections.iter().enumerate() {
-        let bottom = schedule.boundaries_mm[index];
-        let top = schedule.boundaries_mm[index + 1];
+        let start = output.triangles.len();
+        if shapes.is_empty() {
+            layer_face_ranges.push([start, start]);
+            continue;
+        }
+        let mut builder = Builder::default();
+        let bottom = schedule.boundaries_mm[index] as f32 as f64;
+        let top = schedule.boundaries_mm[index + 1] as f32 as f64;
+        if top <= bottom {
+            return Err(format!("layer {index} collapses at renderer height precision").into());
+        }
         for contour in shapes.iter().flatten() {
             for i in 0..contour.len() {
                 let a = contour[i];
@@ -179,35 +185,76 @@ pub fn slice_stepped_with_report(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<S
                 builder.triangle([[a[0], a[1], bottom], [b[0], b[1], top], [a[0], a[1], top]])?;
             }
         }
-        if index == 0 {
-            cap(&mut builder, shapes, bottom, false)?;
-        }
-        if index + 1 == sections.len() {
-            cap(&mut builder, shapes, top, true)?;
-        } else {
-            let above = &sections[index + 1];
-            cap(
-                &mut builder,
-                &difference(shapes, above, &adapter),
-                top,
-                true,
+        cap(&mut builder, shapes, bottom, false)?;
+        cap(&mut builder, shapes, top, true)?;
+        // Hole bridging in earcut may omit a collinear boundary vertex. Refine
+        // those unmatched cap edges only; this does not move the sampled region.
+        if validate_closed(&builder.mesh).is_err() {
+            builder.mesh = super::conform::split_boundary_edges(
+                builder.mesh,
+                arithmetic_tolerance,
+                &mut work,
             )?;
-            cap(
-                &mut builder,
-                &difference(above, shapes, &adapter),
-                top,
-                false,
-            )?;
+            for p in &mut builder.mesh.positions {
+                *p = p.map(|v| v as f32 as f64);
+            }
         }
+        validate_closed(&builder.mesh).map_err(|e| format!("layer {index}: {e}"))?;
+        if output.positions.len() + builder.mesh.positions.len() > crate::mesh::MAX_VERTICES
+            || output.triangles.len() + builder.mesh.triangles.len() > crate::mesh::MAX_TRIANGLES
+        {
+            return Err("stepped mesh output budget exceeded".into());
+        }
+        let offset = output.positions.len() as u32;
+        output.positions.extend(builder.mesh.positions);
+        output.triangles.extend(
+            builder
+                .mesh
+                .triangles
+                .into_iter()
+                .map(|t| t.map(|i| i + offset)),
+        );
+        layer_face_ranges.push([start, output.triangles.len()]);
     }
-    let mut output = split_boundary_edges(builder.mesh, tolerance)
-        .map_err(|e| format!("edge conformance: {e}"))?;
     // Remove unused vertices only; no geometry, edges or gaps are repaired.
     compact(&mut output);
     output.bounds()?;
-    validate_closed(&output)?;
-    Ok(SteppedEnvelope {mesh:output,sample_heights_mm,coordinate_tolerance_mm:tolerance,
-        warnings:vec!["Experimental mid-layer stepped envelope; this is a sliced-solid approximation, not deposited nozzle paths. Small features between sample planes may be absent by the selected sampling rule.".into(),format!("Boolean overlay uses a shared 48-bit coordinate grid; boundary stitching tolerance {tolerance:e} mm. Open, branching, touching/self-intersecting or unresolved contours are rejected without gap closure or topology repair.")]})
+    validate_closed(&output).map_err(|e| format!("stepped output: {e}"))?;
+    Ok(SteppedEnvelope {mesh:output,layer_face_ranges,sample_heights_mm,coordinate_tolerance_mm:bounds.min.into_iter().chain(bounds.max).fold(0f64,|a,b|a.max(b.abs())) * f32::EPSILON as f64,
+        warnings:vec!["Experimental mid-layer stepped envelope; this is a sliced-solid approximation, not deposited nozzle paths. Small features between sample planes may be absent by the selected sampling rule.".into(),"Closed layer slabs retain internal layer interfaces, which may be visible with transparent materials. Coordinates use renderer f32 precision; collapsed holes/gaps are rejected without source repair.".into()]})
+}
+
+/// Discard only repeated points and exactly straight intermediate vertices.
+/// Both the caps and walls consume the same simplified contour.
+fn simplify_collinear(contour: &mut Contour) {
+    fn between(a: Point, b: Point, c: Point) -> bool {
+        cross(a, b, c) == 0.
+            && (0..2).all(|axis| b[axis] >= a[axis].min(c[axis]) && b[axis] <= a[axis].max(c[axis]))
+    }
+    contour.dedup();
+    if contour.first() == contour.last() {
+        contour.pop();
+    }
+    let mut result = Vec::with_capacity(contour.len());
+    for p in contour.drain(..) {
+        while result.len() >= 2 && between(result[result.len() - 2], result[result.len() - 1], p) {
+            result.pop();
+        }
+        result.push(p);
+    }
+    while result.len() >= 3
+        && between(
+            result[result.len() - 2],
+            result[result.len() - 1],
+            result[0],
+        )
+    {
+        result.pop();
+    }
+    while result.len() >= 3 && between(result[result.len() - 1], result[0], result[1]) {
+        result.remove(0);
+    }
+    *contour = result;
 }
 
 fn validate_closed(mesh: &Mesh) -> Result<()> {
@@ -227,20 +274,60 @@ fn validate_closed(mesh: &Mesh) -> Result<()> {
             value.1 += if a < b { 1 } else { -1 };
         }
     }
-    if edges
-        .values()
-        .any(|&(count, balance)| count != 2 || balance != 0)
+    if let Some((&(a, b), &(count, balance))) = edges
+        .iter()
+        .find(|(_, (count, balance))| *count != 2 || *balance != 0)
     {
-        return Err("solid sections require a closed consistently oriented manifold; open/nonmanifold edges are not repaired".into());
+        let invalid = edges
+            .values()
+            .filter(|&&(count, balance)| count != 2 || balance != 0)
+            .count();
+        return Err(format!("solid sections require a closed consistently oriented manifold; open/nonmanifold edges are not repaired ({invalid} invalid edges; first {:?}->{:?}, incidence {count}, balance {balance})",mesh.positions[a as usize],mesh.positions[b as usize]).into());
     }
     Ok(())
 }
 
+fn plane_roundoff(height: f64, z: f64) -> f64 {
+    8. * f64::EPSILON * z.abs().max(height.abs()).max(f64::MIN_POSITIVE)
+}
+
+/// Index only triangles whose Z range reaches a sample. Bound the actual
+/// triangle-plane tests and index storage, rather than rejecting dense meshes
+/// for the Cartesian product of all faces and all layers.
+fn active_triangles(mesh: &Mesh, samples: &[f64]) -> Result<Vec<Vec<u32>>> {
+    let mut active = vec![Vec::new(); samples.len()];
+    let mut work = 0usize;
+    for (index, triangle) in mesh.triangles.iter().enumerate() {
+        let heights = triangle.map(|i| mesh.positions[i as usize][2]);
+        let min = heights.into_iter().fold(f64::INFINITY, f64::min);
+        let max = heights.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        let start = samples.partition_point(|&z| z < min - plane_roundoff(min, z));
+        let end = samples.partition_point(|&z| z <= max + plane_roundoff(max, z));
+        work = work.saturating_add(end - start);
+        if work > 10_000_000 {
+            return Err(
+                "experimental slice work budget exceeded (10M active triangle-plane tests)".into(),
+            );
+        }
+        for layer in &mut active[start..end] {
+            layer.push(index as u32);
+        }
+    }
+    Ok(active)
+}
+
 fn section(mesh: &Mesh, z: f64) -> Result<Vec<Contour>> {
+    section_triangles(mesh, z, mesh.triangles.iter())
+}
+fn section_triangles<'a>(
+    mesh: &Mesh,
+    z: f64,
+    triangles: impl Iterator<Item = &'a [u32; 3]>,
+) -> Result<Vec<Contour>> {
     let mut points = BTreeMap::<(u32, u32), Point>::new();
     let mut neighbors = BTreeMap::<(u32, u32), Vec<(u32, u32)>>::new();
     let mut segments = BTreeMap::new();
-    for triangle in &mesh.triangles {
+    for triangle in triangles {
         let mut hits = Vec::new();
         for (a, b) in [
             (triangle[0], triangle[1]),
@@ -250,21 +337,31 @@ fn section(mesh: &Mesh, z: f64) -> Result<Vec<Contour>> {
             let key = (a.min(b), a.max(b));
             let p = mesh.positions[key.0 as usize];
             let q = mesh.positions[key.1 as usize];
-            if (p[2] < z) == (q[2] < z) {
+            // Decimal schedule arithmetic can put a nominal vertex contact a
+            // few ULPs to either side. Classify only arithmetic roundoff as an
+            // exact contact; never offset the plane or close a geometric gap.
+            let on_plane = |height: f64| (height - z).abs() <= plane_roundoff(height, z);
+            let p_on = on_plane(p[2]);
+            let q_on = on_plane(q[2]);
+            if (p[2] < z && !p_on) == (q[2] < z && !q_on) {
                 continue;
             }
             let t = (z - p[2]) / (q[2] - p[2]);
             // All incident edges meeting the plane at a vertex share one node.
-            let key = if p[2] == z {
+            let key = if p_on {
                 (key.0, key.0)
-            } else if q[2] == z {
+            } else if q_on {
                 (key.1, key.1)
             } else {
                 key
             };
-            points
-                .entry(key)
-                .or_insert([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]);
+            points.entry(key).or_insert(if p_on {
+                [p[0], p[1]]
+            } else if q_on {
+                [q[0], q[1]]
+            } else {
+                [p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]
+            });
             hits.push(key);
         }
         hits.sort_unstable();
@@ -360,16 +457,24 @@ fn point_distance(p: Point, a: Point, b: Point) -> f64 {
     let t = (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / length).clamp(0., 1.);
     (p[0] - a[0] - t * d[0]).hypot(p[1] - a[1] - t * d[1])
 }
-fn validate_contours(contours: &[Contour], tolerance: f64) -> Result<()> {
-    let edges: Vec<_> = contours
+fn validate_contours(contours: &[Contour], tolerance: f64, work: &mut usize) -> Result<()> {
+    let mut edges: Vec<_> = contours
         .iter()
         .enumerate()
         .flat_map(|(c, contour)| {
             (0..contour.len()).map(move |i| (c, i, contour[i], contour[(i + 1) % contour.len()]))
         })
         .collect();
+    edges.sort_unstable_by(|a, b| a.2[0].min(a.3[0]).total_cmp(&b.2[0].min(b.3[0])));
     for (i, &(ca, ia, a, b)) in edges.iter().enumerate() {
         for &(cb, ib, c, d) in &edges[i + 1..] {
+            if c[0].min(d[0]) > a[0].max(b[0]) + tolerance {
+                break;
+            }
+            *work = work.saturating_add(1);
+            if *work > WORK_BUDGET {
+                return Err("contour intersection work budget exceeded".into());
+            }
             if ca == cb
                 && ((ia + 1) % contours[ca].len() == ib || (ib + 1) % contours[ca].len() == ia)
             {
@@ -388,24 +493,54 @@ fn validate_contours(contours: &[Contour], tolerance: f64) -> Result<()> {
                 .min(point_distance(c, a, b))
                 .min(point_distance(d, a, b));
             if intersects || distance <= tolerance {
-                return Err("slice contours intersect, touch or contain features below coordinate resolution; no repair performed".into());
+                return Err(format!("slice contours intersect, touch or contain features below coordinate resolution; no repair performed (edges {ca}/{ia} {a:?}->{b:?} and {cb}/{ib} {c:?}->{d:?}, distance {distance:e}, tolerance {tolerance:e}, crossing {intersects})").into());
             }
         }
     }
     Ok(())
 }
-fn group_contours(mut contours: Vec<Contour>) -> Result<Shapes> {
-    let depths: Vec<_> = contours
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            contours
-                .iter()
-                .enumerate()
-                .filter(|(j, other)| *j != i && inside(c[0], other))
-                .count()
-        })
-        .collect();
+fn contour_work(work: &mut usize, count: usize) -> Result<()> {
+    *work = work.saturating_add(count);
+    if *work > WORK_BUDGET {
+        return Err("contour work budget exceeded".into());
+    }
+    Ok(())
+}
+fn contour_depths(contours: &[Contour], work: &mut usize) -> Result<Vec<usize>> {
+    let mut rects = Vec::with_capacity(contours.len());
+    for contour in contours {
+        contour_work(work, contour.len())?;
+        let mut min = [f64::INFINITY; 2];
+        let mut max = [f64::NEG_INFINITY; 2];
+        for p in contour {
+            for axis in 0..2 {
+                min[axis] = min[axis].min(p[axis]);
+                max[axis] = max[axis].max(p[axis]);
+            }
+        }
+        rects.push((min, max));
+    }
+    let mut depths = vec![0; contours.len()];
+    for (i, contour) in contours.iter().enumerate() {
+        for (j, other) in contours.iter().enumerate() {
+            contour_work(work, 1)?;
+            if i == j
+                || (0..2).any(|axis| {
+                    contour[0][axis] < rects[j].0[axis] || contour[0][axis] > rects[j].1[axis]
+                })
+            {
+                continue;
+            }
+            contour_work(work, other.len())?;
+            if inside(contour[0], other) {
+                depths[i] += 1;
+            }
+        }
+    }
+    Ok(depths)
+}
+fn group_contours(mut contours: Vec<Contour>, work: &mut usize) -> Result<Shapes> {
+    let depths = contour_depths(&contours, work)?;
     for (i, contour) in contours.iter_mut().enumerate() {
         if (signed_area(contour) > 0.) != (depths[i] % 2 == 0) {
             contour.reverse();
@@ -418,7 +553,12 @@ fn group_contours(mut contours: Vec<Contour>) -> Result<Shapes> {
         }
         let mut shape = vec![contours[i].clone()];
         for j in 0..contours.len() {
-            if depths[j] == depths[i] + 1 && inside(contours[j][0], &contours[i]) {
+            contour_work(work, 1)?;
+            if depths[j] == depths[i] + 1 {
+                contour_work(work, contours[i].len())?;
+                if !inside(contours[j][0], &contours[i]) {
+                    continue;
+                }
                 shape.push(contours[j].clone());
             }
         }
@@ -436,6 +576,7 @@ fn difference(subject: &Shapes, clip: &Shapes, adapter: &FloatPointAdapter<Point
         .unsafe_add_source(clip, ShapeType::Clip)
         .overlay(OverlayRule::Difference, FillRule::EvenOdd)
 }
+
 #[derive(Default)]
 struct Builder {
     mesh: Mesh,
@@ -482,7 +623,14 @@ fn cap(builder: &mut Builder, shapes: &Shapes, z: f64, up: bool) -> Result<()> {
             let mut p = std::array::from_fn::<_, 3, _>(|i| {
                 [vertices[indices[i] * 2], vertices[indices[i] * 2 + 1], z]
             });
-            if (cross([p[0][0], p[0][1]], [p[1][0], p[1][1]], [p[2][0], p[2][1]]) > 0.) != up {
+            let area = cross([p[0][0], p[0][1]], [p[1][0], p[1][1]], [p[2][0], p[2][1]]);
+            // Earcut can include a zero-area ear among nearly collinear grid
+            // intersections. It covers no region; boundary conformance restores
+            // any intervening boundary vertices on the remaining faces.
+            if area == 0. {
+                continue;
+            }
+            if (area > 0.) != up {
                 p.swap(1, 2);
             }
             builder.triangle(p)?;
@@ -501,58 +649,6 @@ fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-/// Split exactly shared layer-boundary edges at existing boolean vertices. This
-/// adds topology only; it never closes a gap or removes a feature.
-fn split_boundary_edges(mesh: Mesh, tolerance: f64) -> Result<Mesh> {
-    if mesh.positions.len().saturating_mul(mesh.triangles.len()) > WORK_BUDGET {
-        return Err("experimental mesh edge-conformance budget exceeded".into());
-    }
-    let mut result = Builder::default();
-    for triangle in &mesh.triangles {
-        let p = triangle.map(|i| mesh.positions[i as usize]);
-        let mut perimeter = Vec::new();
-        for i in 0..3 {
-            let a = p[i];
-            let b = p[(i + 1) % 3];
-            perimeter.push(a);
-            if a[2] != b[2] {
-                continue;
-            }
-            let delta = [b[0] - a[0], b[1] - a[1]];
-            let length2 = delta[0] * delta[0] + delta[1] * delta[1];
-            let mut splits = Vec::new();
-            for candidate in &mesh.positions {
-                if candidate[2] != a[2] || *candidate == a || *candidate == b {
-                    continue;
-                }
-                let t =
-                    ((candidate[0] - a[0]) * delta[0] + (candidate[1] - a[1]) * delta[1]) / length2;
-                if t > 0.
-                    && t < 1.
-                    && point_distance([candidate[0], candidate[1]], [a[0], a[1]], [b[0], b[1]])
-                        <= tolerance
-                {
-                    splits.push((t, *candidate));
-                }
-            }
-            splits.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for (_, point) in splits {
-                if perimeter.last() != Some(&point) {
-                    perimeter.push(point);
-                }
-            }
-        }
-        if perimeter.len() == 3 {
-            result.triangle(p)?;
-        } else {
-            let center = std::array::from_fn(|i| (p[0][i] + p[1][i] + p[2][i]) / 3.);
-            for i in 0..perimeter.len() {
-                result.triangle([center, perimeter[i], perimeter[(i + 1) % perimeter.len()]])?;
-            }
-        }
-    }
-    Ok(result.mesh)
-}
 fn compact(mesh: &mut Mesh) {
     let used: BTreeSet<_> = mesh.triangles.iter().flatten().copied().collect();
     let mut remap = BTreeMap::new();
@@ -572,6 +668,20 @@ fn compact(mesh: &mut Mesh) {
 #[cfg(test)]
 mod buildup_tests {
     use super::*;
+
+    #[test]
+    fn cap_omits_zero_area_ears_from_nearly_collinear_overlay() {
+        let shape = vec![vec![
+            [11.63769531187063, 6.116708395313026],
+            [11.588859558105469, 5.9186660051345825],
+            [11.635055541396838, 6.106003401249325],
+            [11.6376953125, 6.116708397865295],
+        ]];
+        let mut builder = Builder::default();
+        cap(&mut builder, &vec![shape], 6.4, true).unwrap();
+        assert!(!builder.mesh.triangles.is_empty());
+        assert!(area(&builder.mesh) > 0.);
+    }
 
     fn square_solid(inner: Option<f64>) -> Mesh {
         let outer = vec![[-1., -1.], [1., -1.], [1., 1.], [-1., 1.]];
