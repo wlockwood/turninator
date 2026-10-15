@@ -1,4 +1,5 @@
 use crate::Result;
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
@@ -8,6 +9,17 @@ use std::{
 pub const MAX_VERTICES: usize = 2_000_000;
 pub const MAX_TRIANGLES: usize = 4_000_000;
 const HEADER_BYTES: u64 = 20;
+
+struct SnapshotDigest(Sha256);
+impl Write for SnapshotDigest {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
@@ -46,6 +58,26 @@ impl Mesh {
     }
 
     pub fn write_binary(&self, path: &Path) -> Result<()> {
+        self.validate_binary()?;
+        let mut out = BufWriter::new(File::create(path)?);
+        self.write_snapshot(&mut out)?;
+        out.flush()?;
+        Ok(())
+    }
+
+    /// Hash the exact TNMESH01 bytes without allocating another mesh-sized buffer.
+    pub fn snapshot_hash(&self) -> Result<String> {
+        self.validate_binary()?;
+        let mut digest = SnapshotDigest(Sha256::new());
+        {
+            let mut out = BufWriter::new(&mut digest);
+            self.write_snapshot(&mut out)?;
+            out.flush()?;
+        }
+        Ok(format!("{:x}", digest.0.finalize()))
+    }
+
+    fn validate_binary(&self) -> Result<()> {
         self.bounds()?;
         if self
             .positions
@@ -55,8 +87,10 @@ impl Mesh {
         {
             return Err("mesh coordinates exceed f32 snapshot range".into());
         }
-        self.validate_snapshot_precision()?;
-        let mut out = BufWriter::new(File::create(path)?);
+        self.validate_snapshot_precision()
+    }
+
+    fn write_snapshot(&self, out: &mut impl Write) -> Result<()> {
         out.write_all(b"TNMESH01")?;
         for value in [1, self.positions.len() as u32, self.triangles.len() as u32] {
             out.write_all(&value.to_le_bytes())?;
@@ -71,7 +105,6 @@ impl Mesh {
                 out.write_all(&v.to_le_bytes())?;
             }
         }
-        out.flush()?;
         Ok(())
     }
 

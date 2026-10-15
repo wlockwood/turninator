@@ -37,6 +37,19 @@ impl CacheStore {
         atomic_write(&path.join(".turninator-job"), b"Turninator job v1\n")?;
         Ok(path)
     }
+    /// Reopen only our own marked directory; never adopt a foreign collision.
+    pub fn render_job(&self, key: &str) -> Result<PathBuf> {
+        if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("invalid render cache key".into());
+        }
+        let name = format!("render-{key}");
+        let path = self.root.join(&name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => self.owned(&path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.create_job(&name),
+            Err(error) => Err(error.into()),
+        }
+    }
     fn owned(&self, path: &Path) -> Result<PathBuf> {
         let metadata = fs::symlink_metadata(path)?;
         #[cfg(windows)]
@@ -60,6 +73,23 @@ impl CacheStore {
     }
     pub fn owned_job(&self, path: &Path) -> Result<PathBuf> {
         self.owned(path)
+    }
+    /// Keep the lock outside the job so storage removal can hold it throughout.
+    /// OS locks are released on process exit, including a crash.
+    pub fn lock_job(&self, path: &Path) -> Result<fs::File> {
+        let path = self.owned(path)?;
+        let name = path
+            .file_name()
+            .ok_or("job name missing")?
+            .to_string_lossy();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join(format!(".{name}.lock")))?;
+        file.try_lock().map_err(|_| "This retained render is in use by another export. Wait for it to finish before exporting or removing it.")?;
+        Ok(file)
     }
     pub fn save_record(&self, path: &Path, record: &JobRecord) -> Result<()> {
         let path = self.owned(path)?;
@@ -92,6 +122,7 @@ impl CacheStore {
         if active.and_then(|p| fs::canonicalize(p).ok()).as_ref() == Some(&path) {
             return Err("cannot remove the active job".into());
         }
+        let _guard = self.lock_job(&path)?;
         // Reject any nested link/junction before recursion, including links introduced after import.
         check_tree(&path)?;
         fs::remove_dir_all(path)?;

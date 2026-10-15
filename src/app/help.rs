@@ -34,7 +34,7 @@ pub(super) const LAYER_HEIGHT: &str = "Spacing between later printed layers, in 
 pub(super) const FIRST_LAYER: &str = "Thickness of the first printed layer, in millimetres. It can differ from later layers. For G-code this is a fallback where HEIGHT metadata is absent.";
 pub(super) const GROOVE: &str = "Depth of the visual layer seam, in millimetres. Increase for stronger lines or reduce for a smoother finish. This surface shading keeps the original STL silhouette; depth is limited to a quarter of the smaller layer height.";
 pub(super) const NATIVE_VIEW: &str = "Drag with the left button to orbit, right-drag to pan, and scroll to zoom. Native inspection responds immediately; use Render preview to check Blender materials and lighting.";
-pub(super) const EXPORT: &str = "Choose a destination and export the selected format using the settings shown above. The suggested filename follows the loaded model. A model must be loaded, with no render, import or storage operation in progress.";
+pub(super) const EXPORT: &str = "Choose a destination and export the selected format using the settings shown above. Matching rendered frames are retained across exports and app restarts, so changing GIF/MP4, codec or filename only re-encodes them. Changes to the model, appearance, camera, animation or render quality require matching new frames. Manage retained frames in Tools / storage. The suggested filename follows the loaded model. A model must be loaded, with no render, import or storage operation in progress.";
 
 pub(super) fn encoding(format: crate::export::OutputFormat) -> &'static str {
     use crate::export::OutputFormat;

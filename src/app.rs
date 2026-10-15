@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 #[derive(Default)]
@@ -561,7 +561,6 @@ impl Studio {
         let result = (|| -> Result<()> {
             self.prefs.tools.validate()?;
             self.next_job += 1;
-            let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
             let cache = CacheStore::new(self.data_dir.join("jobs"))?;
             let render_size = if preview {
                 768
@@ -592,17 +591,8 @@ impl Studio {
             } else {
                 crate::animation::frame_count_for_duration(4., self.frame_rate)?
             };
-            let reserve = u64::from(render_size).pow(2)
-                * 8
-                * if matches!(kind, ExportKind::Gif | ExportKind::Mp4) {
-                    u64::from(frames)
-                } else {
-                    4
-                };
-            if self.cache_usage.saturating_add(reserve) > self.prefs.cache_budget_bytes {
-                return Err("Job storage budget exceeded; review Tools / storage.".into());
-            }
-            let job = cache.create_job(&format!("job-{stamp}-{}", self.next_job))?;
+            // Resolve the scene before choosing its stable, format-independent cache job.
+            let job = self.data_dir.join("jobs").join("pending-render");
             let destination = if destination.is_absolute() {
                 destination
             } else {
@@ -687,21 +677,16 @@ impl Studio {
                     ) as u32,
                 });
             }
-            fs::write(
-                request.job_dir.join("request.json"),
-                serde_json::to_vec_pretty(&request)?,
+            let mut scene = self.snapshot(&request)?;
+            let model = self.model.as_ref().ok_or("open a model first")?;
+            let key = crate::export::identity::retained_render_key(
+                &scene,
+                &model.snapshot_hash,
+                &request,
             )?;
-            cache.save_record(
-                &request.job_dir,
-                &JobRecord {
-                    schema_version: 1,
-                    label: format!("{:?}", request.kind),
-                    state: "running".into(),
-                    destination: request.destination.clone(),
-                    error: None,
-                },
-            )?;
-            let scene = self.snapshot(&request)?;
+            request.job_dir = cache.render_job(&key)?;
+            request.scene_path = request.job_dir.join("scene.json");
+            scene["mesh_path"] = serde_json::json!(request.job_dir.join("mesh.bin"));
             let mesh = self
                 .model
                 .as_ref()
@@ -829,6 +814,7 @@ impl Studio {
     fn record_result(&mut self, state: &str, error: Option<String>) {
         if let Some((request, _, _, _, _)) = &self.last_task
             && let Ok(cache) = CacheStore::new(self.data_dir.join("jobs"))
+            && let Ok(_guard) = cache.lock_job(&request.job_dir)
         {
             let _ = cache.save_record(
                 &request.job_dir,

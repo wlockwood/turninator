@@ -211,6 +211,7 @@ pub struct ImportedModel {
     pub picking: Arc<crate::viewport::PickingMesh>,
     pub geometry_kind: String,
     pub source_hash: String,
+    pub snapshot_hash: String,
     pub warnings: Vec<String>,
     pub segment_count: usize,
     pub bead_layout: Option<String>,
@@ -472,12 +473,14 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
         }
         picking.set_triangle_layer_tops(&tops)?;
     }
+    let snapshot_hash = mesh.snapshot_hash()?;
     Ok(ImportedModel {
         path: fs::canonicalize(path)?,
         mesh: Arc::new(mesh),
         picking: Arc::new(picking),
         geometry_kind: geometry_kind.into(),
         source_hash,
+        snapshot_hash,
         warnings,
         segment_count,
         bead_layout,

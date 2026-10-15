@@ -1,12 +1,14 @@
 use crate::{
     Result,
-    export::{ExportKind, ExportRequest, ExportResult, JobEvent, run_export},
+    export::{ExportKind, ExportRequest, ExportResult, JobEvent},
     mesh::Mesh,
     render::{ToolPaths, WorkerClient},
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
+    io::Read,
     path::PathBuf,
     sync::{
         Arc,
@@ -75,6 +77,7 @@ impl RenderService {
                             .to_path_buf(),
                     )?;
                     cache.owned_job(&task.request.job_dir)?;
+                    let _job_lock = cache.lock_job(&task.request.job_dir)?;
                     let frames = if matches!(
                         task.request.kind,
                         ExportKind::Gif | ExportKind::Mp4 | ExportKind::SectionTurntable
@@ -132,9 +135,28 @@ impl RenderService {
                         .and_then(|n| n.checked_add(timeline_bytes))
                         .and_then(|n| n.checked_add(1024 * 1024))
                         .ok_or("snapshot reservation overflow")?;
-                    cache.check_budget(task.cache_budget_bytes, reserve)?;
-                    task.mesh.write_binary(&mesh_path)?;
-                    fs::write(&task.request.scene_path, scene_bytes)?;
+                    let snapshots_match = snapshot_matches(&mesh_path, &task.mesh)?
+                        && crate::settings::read_bounded(&task.request.scene_path, 1024 * 1024)
+                            .is_ok_and(|bytes| bytes == scene_bytes);
+                    if !snapshots_match {
+                        cache.check_budget(task.cache_budget_bytes, reserve)?;
+                        task.mesh.write_binary(&mesh_path)?;
+                        crate::settings::atomic_write(&task.request.scene_path, &scene_bytes)?;
+                    }
+                    crate::settings::atomic_write(
+                        &task.request.job_dir.join("request.json"),
+                        &serde_json::to_vec_pretty(&task.request)?,
+                    )?;
+                    cache.save_record(
+                        &task.request.job_dir,
+                        &crate::cache::JobRecord {
+                            schema_version: 1,
+                            label: format!("{:?}", task.request.kind),
+                            state: "running".into(),
+                            destination: task.request.destination.clone(),
+                            error: None,
+                        },
+                    )?;
                     let changed = last_tools.as_ref().is_none_or(|p| {
                         p.blender != task.tools.blender
                             || p.ffmpeg != task.tools.ffmpeg
@@ -145,11 +167,12 @@ impl RenderService {
                         last_tools = Some(task.tools.clone());
                     }
                     let event_sender = events.clone();
-                    run_export(
+                    crate::export::jobs::run_export_with_budget(
                         worker.as_mut().ok_or("renderer unavailable")?,
                         &task.tools,
                         &task.request,
                         &actor_cancel,
+                        Some(task.cache_budget_bytes),
                         |event| {
                             let _ = event_sender.send(RenderEvent::Progress { id: task.id, event });
                         },
@@ -194,6 +217,26 @@ impl RenderService {
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
     }
+}
+
+fn snapshot_matches(path: &std::path::Path, mesh: &Mesh) -> Result<bool> {
+    let Ok(mut file) = fs::File::open(path) else {
+        return Ok(false);
+    };
+    let expected_len = 20 + mesh.positions.len() as u64 * 12 + mesh.triangles.len() as u64 * 12;
+    if file.metadata()?.len() != expected_len {
+        return Ok(false);
+    }
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()) == mesh.snapshot_hash()?)
 }
 impl Drop for RenderService {
     fn drop(&mut self) {

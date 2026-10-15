@@ -119,18 +119,31 @@ fn prove_repeated_turns(frame_rate: u32) {
         );
     }
     // Retrying validated jobs renders and copies nothing.
+    worker.cancel();
+    assert!(!worker.is_running());
     request.destination = dir.join("retry.mp4");
     request.kind = ExportKind::Mp4;
-    let retry = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
+    let mut retained_frames = 0;
+    let retry = run_export(&mut worker, &tools, &request, &cancel, |event| {
+        if let turninator::export::JobEvent::Progress { stage, .. } = event
+            && stage == "Reusing retained frames"
+        {
+            retained_frames += 1;
+        }
+    })
+    .unwrap();
     assert_eq!((retry.frame_count, retry.duration_ms), (total_frames, 600));
     let retried = details();
-    assert_eq!(retried["rendered_frame_count"], 0);
-    assert_eq!(retried["copied_frame_count"], 0);
-    assert_eq!(retried["verified_frame_count"], total_frames);
+    assert_eq!(
+        retried, first,
+        "native reuse must not invoke Blender or rewrite its result"
+    );
+    assert_eq!(retained_frames, total_frames);
     // Retry validates each PNG completely; one corrupt image must be regenerated
     // without publishing progress out of order or touching its valid siblings.
     let untouched = fs::read(render_dir.join("frames/frame_0000.png")).unwrap();
     fs::write(render_dir.join("frames/frame_0001.png"), b"broken PNG").unwrap();
+    worker = WorkerClient::spawn(&tools).unwrap();
     request.destination = dir.join("repaired.mp4");
     run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
     let repaired = details();
@@ -180,7 +193,23 @@ fn prove_repeated_turns(frame_rate: u32) {
         let analysis = stats["frame_analysis"].as_array().unwrap();
         assert_eq!(analysis[0], analysis[unique_frames as usize]);
     }
+    worker.cancel();
+    request.kind = ExportKind::Mp4;
+    request.destination = dir.join("paired-retained.mp4");
+    let mut analyses = 0;
+    run_export(&mut worker, &tools, &request, &cancel, |event| {
+        if matches!(event, turninator::export::JobEvent::Analysis(_)) {
+            analyses += 1;
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        analyses, 1,
+        "retained section metadata must remain available"
+    );
+    assert!(!worker.is_running());
     if frame_rate != 20 {
+        worker = WorkerClient::spawn(&tools).unwrap();
         use turninator::animation::{CameraKeyframe, Timeline};
         use turninator::viewport::OrbitCamera;
         let camera = OrbitCamera {
@@ -227,6 +256,21 @@ fn prove_repeated_turns(frame_rate: u32) {
             (growing.frame_count, growing.duration_ms),
             (frame_rate / 5, 200)
         );
+        // PNG and four-view exports share the same retained-image path, and
+        // neither should require a running Blender process on repeat export.
+        for kind in [ExportKind::Still, ExportKind::Diagram] {
+            request.animation = turninator::export::AnimationMode::Turntable;
+            request.kind = kind;
+            request.destination = dir.join(format!("{kind:?}.png"));
+            let first_png = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
+            let pixels = fs::read(&first_png.path).unwrap();
+            worker.cancel();
+            request.destination = dir.join(format!("{kind:?}-retained.png"));
+            let retained = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
+            assert_eq!(fs::read(&retained.path).unwrap(), pixels);
+            assert!(!worker.is_running());
+            worker = WorkerClient::spawn(&tools).unwrap();
+        }
     }
     fs::write(
         dir.join("acceptance.json"),
