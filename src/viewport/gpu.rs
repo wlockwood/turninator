@@ -2158,6 +2158,76 @@ mod buildup_gpu_tests {
     use super::tests::{block_on, capture};
     use super::*;
 
+    #[test]
+    #[ignore = "requires GPU and TURNINATOR_BUILDUP_MODEL; checks the reported 28.4 mm cap"]
+    fn gpu_real_model_buildup_renders_reported_height_without_warning() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("TURNINATOR_BUILDUP_MODEL").expect("set original STL model path"),
+        );
+        let model = crate::presentation::load_model(&path, &Default::default()).unwrap();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        let scope = state.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut viewport = Viewport::new(&state);
+        viewport.set_mesh(&model.mesh, "original", 1).unwrap();
+        let mut settings = ViewportSettings {
+            buildup_height_mm: Some(28.4),
+            ..Default::default()
+        };
+        let mut camera = OrbitCamera::default();
+        camera.canonical(super::super::CanonicalView::Top);
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        viewport.resize([256, 256]);
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("artifacts/buildup-cap-diagnosis/native");
+        std::fs::create_dir_all(&output).unwrap();
+        for mode in [
+            InspectionMode::Opaque,
+            InspectionMode::Ghost,
+            InspectionMode::Xray,
+        ] {
+            settings.inspection_mode = mode;
+            viewport.render(&camera, &settings);
+            assert!(
+                viewport.buildup_cap_warning().is_none(),
+                "{:?}",
+                viewport.buildup_cap_warning()
+            );
+            assert!(viewport.buildup_cap_picker.is_some());
+            let closed = capture(&viewport);
+            let cap = viewport
+                .buildup_cap
+                .take()
+                .expect("solid cap must be present");
+            // Compare actual GPU pixels with the same clipped source sans cap.
+            viewport.rendered_frame = None;
+            viewport.render(&camera, &settings);
+            let open = capture(&viewport);
+            let different = closed
+                .chunks_exact(4)
+                .zip(open.chunks_exact(4))
+                .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 3))
+                .count();
+            assert!(
+                different > 100,
+                "{mode:?}: generated cap did not fill visible cut surfaces"
+            );
+            image::RgbaImage::from_raw(256, 256, closed)
+                .unwrap()
+                .save(output.join(format!("{mode:?}.png")))
+                .unwrap();
+            viewport.buildup_cap = Some(cap);
+            viewport.rendered_frame = None;
+        }
+        assert!(block_on(scope.pop()).is_none());
+    }
+
     fn cube() -> Mesh {
         Mesh {
             positions: vec![

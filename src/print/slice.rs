@@ -86,9 +86,33 @@ impl BuildUpSolid {
         }
         let mut builder = Builder::default();
         cap(&mut builder, &shapes, z, true)?;
-        Ok(builder.mesh)
+        Ok(native_cap(builder.mesh))
     }
 }
+
+/// The native renderer and picker consume f32 vertices. Interpolated section
+/// points can form nonzero f64 ears which become exactly collinear there. Such
+/// generated ears cover no GPU area and must not invalidate the entire cap.
+/// Keep the source mesh untouched and preserve every noncollapsed cap face.
+fn native_cap(mut mesh: Mesh) -> Mesh {
+    for point in &mut mesh.positions {
+        *point = point.map(|v| v as f32 as f64);
+    }
+    mesh.triangles.retain_mut(|triangle| {
+        let [a, b, c] = triangle.map(|i| mesh.positions[i as usize]);
+        let normal = cross3(sub3(b, a), sub3(c, a));
+        if normal == [0.; 3] {
+            return false;
+        }
+        if normal[2] < 0. {
+            triangle.swap(1, 2);
+        }
+        true
+    });
+    compact(&mut mesh);
+    mesh
+}
+
 pub fn slice_stepped(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<Mesh> {
     Ok(slice_stepped_with_report(mesh, boundaries_mm)?.mesh)
 }
@@ -668,6 +692,75 @@ fn compact(mesh: &mut Mesh) {
 #[cfg(test)]
 mod buildup_tests {
     use super::*;
+
+    #[test]
+    fn native_cap_discards_only_faces_with_no_area_at_renderer_precision() {
+        let cap = Mesh {
+            positions: vec![
+                [0., 0., 1.1],
+                [2., 0., 1.1],
+                [1., 1e-50, 1.1],
+                [2., 2., 1.1],
+                [0., 2., 1.1],
+            ],
+            triangles: vec![[0, 1, 2], [0, 1, 3], [0, 3, 4]],
+        };
+        let cap = native_cap(cap);
+        assert_eq!(cap.triangles.len(), 2);
+        assert_eq!(cap.positions.len(), 4);
+        assert_eq!(area(&cap), 4.);
+        assert!(
+            cap.positions
+                .iter()
+                .flatten()
+                .all(|&v| v == v as f32 as f64)
+        );
+        crate::viewport::PickingMesh::new(&cap).unwrap();
+    }
+
+    #[test]
+    fn native_cap_omits_the_reported_collinear_gpu_face() {
+        let cap = Mesh {
+            positions: vec![
+                [44.69956588745117, 5.065960884094238, 28.399999618530273],
+                [44.888004302978516, 4.91094445182251, 28.399999618530273],
+                [45.07644271850586, 4.755928039550781, 28.399999618530273],
+            ],
+            triangles: vec![[0, 1, 2]],
+        };
+        assert!(area(&cap) > 0., "the original f64 ear is nonzero");
+        let cap = native_cap(cap);
+        assert!(cap.triangles.is_empty());
+        assert!(cap.positions.is_empty());
+    }
+
+    #[test]
+    fn native_cap_keeps_a_small_nonzero_face_without_an_area_cutoff() {
+        let cap = native_cap(Mesh {
+            positions: vec![[0., 0., 0.], [1e-12, 0., 0.], [0., 1e-12, 0.]],
+            triangles: vec![[0, 1, 2]],
+        });
+        assert_eq!(cap.triangles.len(), 1);
+        assert!(area(&cap) > 0.);
+        crate::viewport::PickingMesh::new(&cap).unwrap();
+    }
+
+    #[test]
+    fn native_cap_preserves_upward_winding_after_coordinate_rounding() {
+        let cap = Mesh {
+            positions: vec![
+                [7.873971570789526, 3.2956212316547955, 0.],
+                [9.873971570789525, 4.2956212316547955, 0.],
+                [8.873971570789525, 3.7956212416547954, 0.],
+            ],
+            triangles: vec![[0, 1, 2]],
+        };
+        assert!(area(&cap) > 0.);
+        let cap = native_cap(cap);
+        assert_eq!(cap.triangles.len(), 1);
+        assert!(area(&cap) > 0.);
+        crate::viewport::PickingMesh::new(&cap).unwrap();
+    }
 
     #[test]
     fn cap_omits_zero_area_ears_from_nearly_collinear_overlay() {
