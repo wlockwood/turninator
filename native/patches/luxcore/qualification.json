@@ -133,8 +133,18 @@
     },
     {
       "path": "tools/build-luxcore-sdk.ps1",
-      "size": 8035,
-      "sha256": "6d99ff13508f37d0d03065021813fbb0b58e845c709f6993246b604340a601fc"
+      "size": 7512,
+      "sha256": "b7ebbf3962e2916fcfafe0775986085469ae169d1b56d2f59d0941987cd37e7e"
+    },
+    {
+      "path": "native/patches/luxcore/materialize-inputs.ps1",
+      "size": 2538,
+      "sha256": "a131d508b843d8d33741eda751611b1381bf38a24c8d0ad4bcd88d7e35402e16"
+    },
+    {
+      "path": "native/patches/luxcore/test-build-inputs.ps1",
+      "size": 3300,
+      "sha256": "32d66ea61ac4c89427e2893859556532bcd176f7d4bf9237db634fe2b088c476"
     }
   ],
   "evidence": [
@@ -285,6 +295,54 @@
     {
       "path": "cache-parallel.json",
       "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "fixround1/poison-red.json",
+      "sha256": "df3f57443549ed6e5b7c15dc1b7fa322bb28a3c6114a73a01b2175465fa503d7"
+    },
+    {
+      "path": "fixround1/poison-red.log",
+      "sha256": "440bbb8767997513c31a2c43ba16d349a05b3e30004a546d5da021419339b6fa"
+    },
+    {
+      "path": "fixround1/inputs-green.log",
+      "sha256": "f229aa48ba4902569b67dc2a40bf04edef7093135f7eab75e81b59549d4de6f7"
+    },
+    {
+      "path": "fixround1/getopt-red.log",
+      "sha256": "c2cf5d9b142fa8355abb4753d0391ebf076a8f6993f24fd3ad5b049318951c4a"
+    },
+    {
+      "path": "fixround1/configure-rehearsal.log",
+      "sha256": "aae0824c0d760ed5bccc20305890746a041ba1d6f89da82de9af7cc88e54ca06"
+    },
+    {
+      "path": "fixround1/installed-tools.json",
+      "sha256": "c79e1735000e9401330337e635e253ad04306edad91cf1d426ceea25ba2be801"
+    },
+    {
+      "path": "fixround1/rehearsal-tool-install.log",
+      "sha256": "a0bccbf81b967488c6f6fa01d0112a65dd34909044e33286465b0119302b15f9"
+    },
+    {
+      "path": "fixround1/rehearsal-tool-check.log",
+      "sha256": "672aec65a45bed50e70229c70934a7eebf0462595c459b83023027645d57cccf"
+    },
+    {
+      "path": "fixround1/rehearsal-bootstrap.log",
+      "sha256": "bb0bcac9a92f66dee080ea041769957ecdd49cc2ba5f8826f668130eed22ee0e"
+    },
+    {
+      "path": "fixround1/rehearsal-resolve.log",
+      "sha256": "d0c784b807fa450af72e448d5f6f0d12416b5c299c765c8ade690ca22318dd6c"
+    },
+    {
+      "path": "fixround1/rehearsal-configure.log",
+      "sha256": "71431b7ee2225e8d68eead28b00935291e81912f34689cb649cce192775fc258"
+    },
+    {
+      "path": "fixround1/rehearsal-getopt-restore.log",
+      "sha256": "41d0c33821cae63397c43ed5599f386d791a45ef38b1c4043044b2b467d42da4"
     }
   ],
   "checks": {
@@ -338,5 +396,15 @@
     "Caller must attest canonical compiler/builtins paths and hashes before Init",
     "Trusted app-owned cache root; not an ACL sandbox against concurrent hostile directory mutation",
     "Driver-managed OptiX/JIT caches remain separate"
-  ]
+  ],
+  "recipe_correction": {
+    "base_commit": "7466398ce012152a257948a561fa3389481e12dd",
+    "previous_qualification_manifest_sha256": "5a2dfe6b0fc407790150f3e0a602bad41bc57ff383c207ef5f219dc817325a5f",
+    "original_build_recipe_sha256": "6d99ff13508f37d0d03065021813fbb0b58e845c709f6993246b604340a601fc",
+    "validation": "recipe-only offline ConfigureOnly with unlocked compatible wheel present; all16 locked installed versions and pip check passed",
+    "native_rebuild": false,
+    "gpu_repeat": false,
+    "sdk_outputs_unchanged": true,
+    "getopt_acquisition": "verified offline archive required; AllowToolDownload applies only to locked PyPI tools"
+  }
 }

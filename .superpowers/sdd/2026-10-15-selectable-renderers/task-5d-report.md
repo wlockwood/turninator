@@ -260,3 +260,69 @@ Upstream pixel-boundary float sampling, numerical non-bitwise determinism and
 canonical recipe semantics remain unchanged. Full PBR/resin/layers, shared image
 conversion, production cancellation/owner-thread integration and adapter
 promotion remain Task8. No fake backend is marked available.
+
+
+## Fix round 1 — build recipe provenance (after 7466398)
+
+Independent review `task-5d-review.md` found two P2 recipe issues. The actual
+compiled SDK and its CUDA12.8 functional evidence remained supported. This round
+changes only tool-input materialization/installation, documentation, and evidence
+hashes. No vendor source, compiled dependency, pinned tool version, SDK binary,
+Cargo code, GPU work, or native target rebuild changed.
+
+I1 RED used a real inert `requests-2.99.0-py3-none-any.whl` added beside the locked
+archives. The old pip invocation (`--no-index --find-links <reused directory>
+conan==2.18.1`) selected that unlisted compatible transitive dependency. The dry-run
+report `B/fixround1/poison-red.json` records its file URL and version2.99.0; the
+wheel was not installed or executed in that RED run.
+
+The corrected recipe calls `materialize-inputs.ps1` to copy only the sixteen
+locked archives plus the verified getopt archive into a fresh owned directory.
+It verifies source and copied SHA256 values, emits explicit file requirements
+with hashes, installs with `--isolated --no-index --no-build-isolation --no-deps
+--require-hashes`, then runs `pip check`. Bootstrap setuptools/wheel and all
+Conan transitives are explicit pinned files. No resolver receives the reusable
+download directory or can select its extra candidates.
+
+I2 is resolved by requiring the existing SHA256-verified `getopt-exact.tgz` for
+all recipe paths. `-AllowToolDownload` now applies only to locked PyPI tools.
+Missing/corrupt getopt fails before tool installation. The build recipe no longer
+acquires Conan packages from a remote; the previously acquired exact offline
+artifact remains unchanged. Separately acquiring a replacement export requires
+its own payload qualification and pin update, since export metadata may vary.
+
+Focused tests (`test-build-inputs.ps1`) inject a valid extra compatible wheel,
+corrupt the listed requests wheel, corrupt getopt, and omit getopt while download
+permission is enabled. GREEN excludes the extra wheel and rejects all invalid
+inputs. A temporary ignored helper mutation removing only SHA enforcement makes
+the corrupt-getopt assertion fail with `INVALID_INPUT_ACCEPTED`, exit1, proving
+that test detects bypassing the payload check (`fixround1/getopt-red.log`). The
+real helper is unchanged by the mutation and passes (`fixround1/inputs-green.log`).
+
+Commands from this worktree:
+
+```powershell
+pwsh -NoProfile -File native/patches/luxcore/test-build-inputs.ps1 `
+  -ArchiveDirectory artifacts/luxcore-sdk/tool-wheels `
+  -OutputDirectory artifacts/luxcore-sdk/fixround1/green-fixtures
+pwsh -NoProfile -File tools/build-luxcore-sdk.ps1 `
+  -QualificationRoot $Q `
+  -OutputRoot artifacts/luxcore-sdk-fixround1-configure `
+  -ToolArchives artifacts/luxcore-sdk/fixround1/poisoned-archives `
+  -ConfigureOnly
+```
+
+The offline ConfigureOnly rehearsal passed against the directory containing the
+unlisted2.99.0 wheel. Installed metadata confirms all sixteen original versions,
+including requests2.34.2 and Conan2.18.1; `pip check` reports no broken requirements.
+The verified offline Conan restore, `--no-remote --build=never` resolution, pinned
+compiler checks, and final CMake configuration all passed. No SDK native target
+was built. Logs and installed versions are retained under `B/fixround1`; the full
+fresh rehearsal tree is `artifacts/luxcore-sdk-fixround1-configure`.
+
+`qualification.json` retains the original build recipe SHA and qualification
+manifest SHA as historical evidence, updates current recipe input hashes, adds
+these focused test/configuration evidence hashes, and states that this was a
+recipe-only rehearsal. The product lock updates only that manifest SHA. All six
+actual output hashes, prior GPU/CPU evidence hashes, original source/dependency
+archive identities, and compiler-pair/SDK identities remain unchanged.

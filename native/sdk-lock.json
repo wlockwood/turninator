@@ -28,7 +28,7 @@
       "production_qualified": false,
       "evidence": {
         "path": "patches/luxcore/qualification.json",
-        "sha256": "5a2dfe6b0fc407790150f3e0a602bad41bc57ff383c207ef5f219dc817325a5f"
+        "sha256": "ac39e7ea7958ab2f5b415ca84d910cf2d7a42c24538345136f47afdef2740498"
       }
     }
   },

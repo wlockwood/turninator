@@ -36,11 +36,22 @@ Build-time Python interpreter discovery and kernel generation remain enabled.
 
 The tool archive directory contains the exact files in
 `native/patches/luxcore/tools-lock.json`, plus `getopt-exact.tgz` with the SHA256
-in `getopt-archive.sha256`. `-AllowToolDownload` permits downloading missing
-locked public build tools and the exact missing header-only Conan package. It
-never enables runtime downloads or compiled dependency rebuilds. Tool hashes
-were checked against official PyPI release metadata; installation uses a private
-venv and pip cache. Conan's cache is private to this output, and `CONAN_HOME` is
+in `getopt-archive.sha256`. `-AllowToolDownload` permits downloading only missing
+locked PyPI build tools. The SHA-verified `getopt-exact.tgz` is always required;
+its separate acquisition is not part of this build recipe. An absent or corrupt
+archive fails before tool installation, including when downloads are enabled.
+Do not replace it with a new Conan cache export without separately qualifying
+and pinning that artifact: export metadata can change its bytes.
+
+`materialize-inputs.ps1` copies only the sixteen listed tool archives and the
+verified getopt archive into a fresh `verified-inputs` directory, checking the
+copied hashes again. Pip installs explicit file requirements with required hashes,
+`--no-deps`, `--no-index`, `--no-build-isolation` and isolated configuration, then
+checks the installed dependency graph with `pip check`. Extra files in the reused
+download directory cannot become candidates. Tool hashes were checked against
+official PyPI release metadata; installation uses a private venv and pip cache.
+The recipe never enables runtime downloads or compiled dependency rebuilds.
+Conan's cache is private to this output, and `CONAN_HOME` is
 restored on exit. HOME/TEMP/TMP and system installation are untouched.
 
 The original dependency archive omits one header-only dependency referenced by
@@ -59,6 +70,13 @@ build-tool dependencies for packages that cannot be rebuilt; winflexbison and
 Ninja are retained as full dependencies in the official graph. Package manager
 mode is overridden from `install` to `check`. No compiled dependency identities
 are substituted. Missing packages fail the build.
+
+Run `native/patches/luxcore/test-build-inputs.ps1 -ArchiveDirectory <tool archives>
+-OutputDirectory <fresh owned test directory>` for the focused archive checks.
+It injects a compatible unlisted wheel and corrupt wheel/getopt fixtures, and
+verifies that missing getopt cannot enter a download branch. The recorded offline
+configuration rehearsal also installed the exact locked versions with the
+unlisted newer wheel present in the download directory.
 
 The patch and the additional header are separate reviewable inputs. The source
 extractor omits archive links, including upstream's dangling editor

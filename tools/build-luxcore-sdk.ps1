@@ -36,22 +36,16 @@ New-Item -ItemType Directory -Path $output | Out-Null
 $toolsDir = [IO.Path]::GetFullPath((Join-Path $repo $ToolArchives))
 if (!$toolsDir.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase)) { throw 'ToolArchives must be in this worktree artifacts directory' }
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-$toolsLock = Get-Content (Join-Path $support 'tools-lock.json') -Raw | ConvertFrom-Json
-foreach ($item in $toolsLock.artifacts) {
-    $local = Join-Path $toolsDir $item.filename
-    if (!(Test-Path -LiteralPath $local)) {
-        if (!$AllowToolDownload) { throw "Missing pinned tool archive $local; supply it or use -AllowToolDownload" }
-        Invoke-WebRequest -Uri $item.url -OutFile $local
-    }
-    Assert-Hash $local $item.sha256
-}
+$verifiedTools = Join-Path $output 'verified-inputs'
+& (Join-Path $support 'materialize-inputs.ps1') -ArchiveDirectory $toolsDir -OutputDirectory $verifiedTools -AllowToolDownload:$AllowToolDownload
 $venv = Join-Path $output 'venv'
 Invoke-Checked 'python' @('-m','venv',$venv) (Join-Path $output 'venv.log')
 $python = Join-Path $venv 'Scripts/python.exe'
 $conan = Join-Path $venv 'Scripts/conan.exe'
-$pipArgs = @('-m','pip','install','--cache-dir',(Join-Path $output 'pip-cache'),'--no-index','--no-build-isolation','--find-links',$toolsDir)
-Invoke-Checked $python ($pipArgs + @('setuptools==80.9.0','wheel==0.45.1')) (Join-Path $output 'bootstrap.log')
-Invoke-Checked $python ($pipArgs + @('conan==2.18.1')) (Join-Path $output 'tool-install.log')
+$pipArgs = @('-m','pip','--isolated','install','--cache-dir',(Join-Path $output 'pip-cache'),'--no-index','--no-build-isolation','--no-deps','--require-hashes')
+Invoke-Checked $python ($pipArgs + @('-r',(Join-Path $verifiedTools 'bootstrap-requirements.txt'))) (Join-Path $output 'bootstrap.log')
+Invoke-Checked $python ($pipArgs + @('-r',(Join-Path $verifiedTools 'tools-requirements.txt'))) (Join-Path $output 'tool-install.log')
+Invoke-Checked $python @('-m','pip','--isolated','check') (Join-Path $output 'tool-check.log')
 $source = Join-Path $output 'source'
 Invoke-Checked $python @((Join-Path $support 'extract-source.py'),$archive,$source) (Join-Path $output 'extract.log')
 # Extract the original ZIP into our own tree: the existing unpacked cache is never mutated.
@@ -65,14 +59,9 @@ try {
     Invoke-Checked $conan @('cache','restore',$cacheArchive.FullName) (Join-Path $output 'restore.log')
     # Header-only package omitted from the official archive, referenced exactly
     # by giflib's conaninfo.txt. No compiled dependency can be rebuilt here.
-    $getopt = 'getopt-for-visual-studio/20200201#32ee360e2552fe65ad8bec52edcd64fd:da39a3ee5e6b4b0d3255bfef95601890afd80709#26eb4a9cdd6e4c7b9d2c892b970f14d3'
-    $extra = Join-Path $toolsDir 'getopt-exact.tgz'
-    if (Test-Path -LiteralPath $extra) {
-        Assert-Hash $extra (Get-Content (Join-Path $support 'getopt-archive.sha256') -Raw).Trim()
-        Invoke-Checked $conan @('cache','restore',$extra) (Join-Path $output 'getopt-restore.log')
-    } elseif ($AllowToolDownload) {
-        Invoke-Checked $conan @('download',$getopt,'-r','conancenter') (Join-Path $output 'getopt-download.log')
-    } else { throw 'Missing pinned getopt-exact.tgz; supply the qualified archive or use -AllowToolDownload' }
+    $extra = Join-Path $verifiedTools 'getopt-exact.tgz'
+    Assert-Hash $extra (Get-Content (Join-Path $support 'getopt-archive.sha256') -Raw).Trim()
+    Invoke-Checked $conan @('cache','restore',$extra) (Join-Path $output 'getopt-restore.log')
     $profiles = Get-ChildItem -LiteralPath $env:CONAN_HOME -Filter conan-profile-common -Recurse | Select-Object -First 1
     if (!$profiles) { throw 'Restored dependency profile missing' }
     (Get-Content $profiles.FullName -Raw).Replace('tools.system.package_manager:mode=install','tools.system.package_manager:mode=check') | Set-Content (Join-Path $output 'conan-profile-common')
