@@ -22,6 +22,7 @@ pub struct ProjectFile {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputPreferences {
+    pub output_format: crate::export::OutputFormat,
     pub still_size: u32,
     pub still_engine: String,
     pub still_samples: u32,
@@ -39,6 +40,7 @@ pub struct OutputPreferences {
 impl Default for OutputPreferences {
     fn default() -> Self {
         Self {
+            output_format: Default::default(),
             still_size: 4096,
             still_engine: "cycles".into(),
             still_samples: 64,

@@ -3,5 +3,5 @@ pub mod encode;
 pub mod jobs;
 pub use jobs::{
     AnimationMode, BuildStage, ExportKind, ExportLayout, ExportRequest, ExportResult, JobEvent,
-    SectionSpec, VideoCodec, run_export,
+    OutputFormat, SectionSpec, VideoCodec, run_export,
 };

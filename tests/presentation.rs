@@ -18,6 +18,34 @@ fn triangle() -> Mesh {
 }
 
 #[test]
+fn palette_control_indices_match_colors_used_by_geometry() {
+    use turninator::presentation::{GeometryGroup, group_color, group_color_index};
+    let mut scene = SceneSettings::default();
+    let group = GeometryGroup {
+        start_triangle: 0,
+        end_triangle: 1,
+        tool: 5,
+        feature: "Outer wall".into(),
+        layer_index: 0,
+        z_top_mm: 0.2,
+    };
+    assert_eq!(group_color_index(&group, &scene), None);
+    assert_eq!(group_color(&group, &scene), scene.color);
+    for mode in ["tool", "feature"] {
+        scene.color_mode = mode.into();
+        let index = group_color_index(&group, &scene).unwrap();
+        assert!(index < scene.tool_colors.len());
+        assert_eq!(group_color(&group, &scene), scene.tool_colors[index]);
+        let unused = (index + 1) % scene.tool_colors.len();
+        scene.tool_colors[unused] = [1., 1., 1.];
+        assert_eq!(group_color(&group, &scene), scene.tool_colors[index]);
+        if mode == "tool" {
+            assert_eq!(index, 1);
+        }
+    }
+}
+
+#[test]
 fn build_pose_reorients_print_coordinates_and_places_the_bottom_on_the_bed() {
     let original = triangle();
     let built = make_build_mesh(&original, [90., 0., 0.]).unwrap();

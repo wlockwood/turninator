@@ -1,15 +1,16 @@
 //! Native studio. Import and rendering run independently of the UI thread.
+mod controls;
 use crate::{
     Result,
     animation::{CameraKeyframe, Easing, Timeline, Transition, TurntableTiming},
     cache::{CacheStore, JobRecord},
     export::{
         AnimationMode, ExportKind, ExportLayout, ExportRequest, ExportResult, JobEvent,
-        SectionSpec, VideoCodec,
+        OutputFormat, SectionSpec, VideoCodec,
     },
     presentation::{
-        ImportSettings, ImportedModel, RevisionGate, SceneSettings, group_color, load_model,
-        model_scene,
+        ImportSettings, ImportedModel, RevisionGate, SceneSettings, group_color, group_color_index,
+        load_model, model_scene,
     },
     project::{OutputPreferences, ProjectFile, SourceStatus, load_project, save_project},
     session::{RenderEvent, RenderService, RenderTask, default_request},
@@ -208,6 +209,7 @@ pub struct Studio {
     show_edges: bool,
     show_tools: bool,
     codec: VideoCodec,
+    output_format: OutputFormat,
     section: bool,
     section_axis: u8,
     section_position: f64,
@@ -312,6 +314,7 @@ impl Studio {
             show_edges: false,
             show_tools: false,
             codec: VideoCodec::H264,
+            output_format: OutputFormat::default(),
             section: false,
             section_axis: 2,
             section_position: 0.,
@@ -353,16 +356,32 @@ impl Studio {
         Ok(studio)
     }
     fn viewport_settings(&self) -> ViewportSettings {
+        let sheet = self.output_format == OutputFormat::FourView;
+        let beads = self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.geometry_kind == "beads");
         ViewportSettings {
-            color: self.scene.color,
-            roughness: self.scene.roughness,
-            layer_appearance: self.scene.layer_appearance && !self.scene.import.stepped_envelope,
+            color: if sheet {
+                [0.32, 0.35, 0.4]
+            } else {
+                self.scene.color
+            },
+            roughness: if sheet { 0.6 } else { self.scene.roughness },
+            layer_appearance: !sheet
+                && !beads
+                && self.scene.layer_appearance
+                && !self.scene.import.stepped_envelope,
             layer_height_mm: self.scene.import.layer_height_mm as f32,
             first_layer_height_mm: self.scene.import.first_layer_height_mm as f32,
             groove_depth_mm: self.scene.groove_depth_mm as f32,
-            display_rotation_degrees: self.scene.display_rotation_degrees.map(|v| v as f32),
+            display_rotation_degrees: if sheet {
+                [0.; 3]
+            } else {
+                self.scene.display_rotation_degrees.map(|v| v as f32)
+            },
             show_edges: self.show_edges,
-            section: if self.section {
+            section: if self.section && self.output_format.supports_section() {
                 Some(SectionPlane {
                     axis: self.section_axis,
                     position_mm: self.section_position as f32,
@@ -371,7 +390,7 @@ impl Studio {
             } else {
                 None
             },
-            buildup_height_mm: if self.buildup {
+            buildup_height_mm: if self.buildup && beads {
                 Some(self.model.as_ref().map_or(self.buildup_height, |model| {
                     crate::presentation::visible_layer_height(model, self.buildup_height as f64)
                         as f32
@@ -385,7 +404,7 @@ impl Studio {
                 .is_none_or(|model| model.layer_tops_mm.is_empty()),
             inspection_mode: self.inspection,
             opacity: self.opacity,
-            turntable_angle_degrees: self.timeline_angle,
+            turntable_angle_degrees: if sheet { 0. } else { self.timeline_angle },
         }
     }
     fn changed(&mut self) {
@@ -464,7 +483,9 @@ impl Studio {
         Some(hit)
     }
     fn sample_timeline(&mut self) {
-        match self.timeline.sample(self.timeline_time) {
+        let mut timeline = self.timeline.clone();
+        timeline.buildup |= self.export_buildup;
+        match timeline.sample(self.timeline_time) {
             Ok(sample) => {
                 self.camera = sample.camera;
                 self.timeline_angle = sample.turntable_degrees as f32;
@@ -506,10 +527,25 @@ impl Studio {
         )?;
         Ok(scene)
     }
+    fn preview_engine(&self) -> &str {
+        if self.output_format.animated() {
+            &self.engine
+        } else {
+            &self.still_engine
+        }
+    }
+    fn preview_kind(&self) -> ExportKind {
+        if self.output_format == OutputFormat::FourView {
+            ExportKind::Diagram
+        } else {
+            ExportKind::Still
+        }
+    }
     fn start_export(&mut self, kind: ExportKind, destination: PathBuf, preview: bool) {
         if self.busy.is_some() || self.importing || self.cache_action_pending {
             return;
         }
+        let kind = if preview { self.preview_kind() } else { kind };
         let result = (|| -> Result<()> {
             self.prefs.tools.validate()?;
             self.next_job += 1;
@@ -564,7 +600,9 @@ impl Studio {
                 job,
                 destination,
                 kind,
-                if !preview && kind == ExportKind::Still {
+                if preview {
+                    self.preview_engine().to_owned()
+                } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
                     self.still_engine.clone()
                 } else {
                     self.engine.clone()
@@ -572,12 +610,14 @@ impl Studio {
                 render_size,
                 if preview {
                     16
-                } else if kind == ExportKind::Still {
+                } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
                     self.still_samples
                 } else {
                     self.samples
                 },
-                self.transparent,
+                self.transparent
+                    && kind == ExportKind::Still
+                    && (!preview || self.output_format.supports_transparency()),
             );
             request.timeline = timeline;
             request.turntable_timing = turntable_timing;
@@ -1140,6 +1180,7 @@ impl Studio {
         self.samples = options.samples;
         self.transparent = options.transparent;
         self.codec = options.video_codec;
+        self.output_format = options.output_format;
         self.export_buildup = options.animation == AnimationMode::BuildUp;
         self.turntable_timing = options.turntable_timing;
         self.timeline_enabled = options.timeline.is_some();
@@ -1193,6 +1234,7 @@ impl Studio {
     }
     fn output_preferences(&self) -> OutputPreferences {
         OutputPreferences {
+            output_format: self.output_format,
             still_size: self.still_size,
             still_engine: self.still_engine.clone(),
             still_samples: self.still_samples,
@@ -1245,7 +1287,6 @@ impl Studio {
             ui.checkbox(&mut self.timeline.looping, "Close camera path into a loop");
             ui.checkbox(&mut self.timeline.turntable, "Rotate the model too");
             let deposited = self.model.as_ref().is_some_and(|m| !m.groups.is_empty());
-            ui.add_enabled(deposited, egui::Checkbox::new(&mut self.timeline.buildup, "Build deposited layers during motion"));
             ui.small("20 fps. Set a time, orbit/pan to compose a view, then record it. Transition settings belong to the segment leaving each key.");
             let scrub = ui.add(egui::Slider::new(&mut self.timeline_time, 0.0..=self.timeline.duration_seconds).text("Time (s)"));
             let mut sample = scrub.changed();
@@ -1277,11 +1318,13 @@ impl Studio {
             });
             let mut remove = None;
             let mut recall = None;
+            let key_count = self.timeline.keyframes.len();
             for (index,key) in self.timeline.keyframes.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
                     ui.collapsing(format!("View {} • {:.2} s", index+1,key.time_seconds), |ui| {
                         if index > 0 { ui.add(egui::DragValue::new(&mut key.time_seconds).range(0.001..=self.timeline.duration_seconds).speed(0.05).suffix(" s")); }
                         ui.small(format!("Yaw {:.1}° • elevation {:.1}° • target {:.1?}",key.camera.yaw_degrees,key.camera.pitch_degrees,key.camera.target_mm));
+                        if index + 1 < key_count || self.timeline.looping && key.time_seconds < self.timeline.duration_seconds {
                         egui::ComboBox::from_label("Outgoing motion").selected_text(format!("{:?}",key.transition)).show_ui(ui,|ui|{
                             ui.selectable_value(&mut key.transition,Transition::Orbit,"Orbit / pan");
                             ui.selectable_value(&mut key.transition,Transition::Spiral,"Spiral");
@@ -1291,6 +1334,7 @@ impl Studio {
                             ui.selectable_value(&mut key.easing,Easing::Linear,"Linear");
                             ui.selectable_value(&mut key.easing,Easing::SmoothStep,"Ease in / out");
                         });
+                        }
                         ui.horizontal(|ui| {
                             if ui.small_button("Load view").clicked() { recall = Some((key.camera.clone(),key.time_seconds)); }
                             if ui.small_button("Replace with current view").clicked() { key.camera=self.camera.clone(); }
@@ -1310,11 +1354,17 @@ impl Studio {
             if let Err(error)=self.timeline.validate() { ui.colored_label(egui::Color32::YELLOW,error.to_string()); }
             else if let Ok(frames)=self.timeline.frame_count() { ui.small(format!("{frames} frames • {:.2} s",self.timeline.duration_seconds)); }
             if sample { self.sample_timeline(); }
-            ui.small("Build-up reveals complete deposited layers; it does not reproduce machine time, nozzle motion, or material flow.");
+            if deposited && (self.timeline.buildup || self.export_buildup) { ui.small("Build-up reveals complete deposited layers; it does not reproduce machine time, nozzle motion, or material flow."); }
         });
     }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let preview_options_before = (self.engine.clone(), self.transparent);
+        let preview_options_before = (self.preview_engine().to_owned(), self.transparent);
+        let has_model = self.model.is_some();
+        let beads = self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.geometry_kind == "beads");
+        let sheet = self.output_format == OutputFormat::FourView;
         if let Some(model) = &self.model {
             let b = model.bounds_mm;
             ui.small(format!(
@@ -1348,108 +1398,90 @@ impl Studio {
                 }
             });
         }
-        ui.heading("Print appearance");
         let before = serde_json::to_string(&self.scene).unwrap_or_default();
         let import_before = serde_json::to_string(&self.scene.import).unwrap_or_default();
-        let mut material = self.scene.material_preset.clone();
-        egui::ComboBox::from_label("Material")
-            .selected_text(material_name(&material))
-            .show_ui(ui, |ui| {
-                for value in ["matte_pla", "silk_pla", "glossy_plastic", "clay", "resin"] {
-                    ui.selectable_value(&mut material, value.into(), material_name(value));
-                }
-            });
-        if material != self.scene.material_preset {
-            self.scene.select_material(&material);
-            if material == "resin" {
-                self.engine = "cycles".into();
-                self.still_engine = "cycles".into();
-            }
-        }
-        ui.color_edit_button_rgb(&mut self.scene.color);
-        if self.model.as_ref().is_some_and(|m| !m.groups.is_empty()) {
-            egui::ComboBox::from_label("Color mapping")
-                .selected_text(&self.scene.color_mode)
+        if has_model && !sheet {
+            ui.heading("Print appearance");
+            let mut material = self.scene.material_preset.clone();
+            egui::ComboBox::from_label("Material")
+                .selected_text(material_name(&material))
                 .show_ui(ui, |ui| {
-                    for mode in ["uniform", "tool", "feature"] {
-                        ui.selectable_value(&mut self.scene.color_mode, mode.into(), mode);
+                    for value in ["matte_pla", "silk_pla", "glossy_plastic", "clay", "resin"] {
+                        ui.selectable_value(&mut material, value.into(), material_name(value));
                     }
                 });
-            if self.scene.color_mode != "uniform" {
-                ui.collapsing("Print palette", |ui| {
-                    for (index, color) in self.scene.tool_colors.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(format!(
-                                "{} {index}",
-                                if self.scene.color_mode == "tool" {
-                                    "Tool"
-                                } else {
-                                    "Palette"
-                                }
-                            ));
-                            ui.color_edit_button_rgb(color);
-                        });
-                    }
-                });
+            if material != self.scene.material_preset {
+                self.scene.select_material(&material);
+                if material == "resin" {
+                    self.engine = "cycles".into();
+                    self.still_engine = "cycles".into();
+                }
             }
+            if !beads || self.scene.color_mode == "uniform" {
+                ui.color_edit_button_rgb(&mut self.scene.color);
+            }
+            if self.model.as_ref().is_some_and(|m| !m.groups.is_empty()) {
+                egui::ComboBox::from_label("Color mapping")
+                    .selected_text(&self.scene.color_mode)
+                    .show_ui(ui, |ui| {
+                        for mode in ["uniform", "tool", "feature"] {
+                            ui.selectable_value(&mut self.scene.color_mode, mode.into(), mode);
+                        }
+                    });
+                if self.scene.color_mode != "uniform" {
+                    ui.collapsing("Print palette", |ui| {
+                        let mut used = std::collections::BTreeMap::<
+                            usize,
+                            std::collections::BTreeSet<String>,
+                        >::new();
+                        for group in &self.model.as_ref().expect("mapped model").groups {
+                            if let Some(index) = group_color_index(group, &self.scene) {
+                                used.entry(index).or_default().insert(
+                                    if self.scene.color_mode == "tool" {
+                                        format!("Tool {}", group.tool)
+                                    } else {
+                                        group.feature.clone()
+                                    },
+                                );
+                            }
+                        }
+                        for (index, labels) in used {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(labels.into_iter().collect::<Vec<_>>().join(", "));
+                                ui.color_edit_button_rgb(&mut self.scene.tool_colors[index]);
+                            });
+                        }
+                    });
+                }
+            }
+            if self.scene.material_preset != "resin" {
+                ui.add(egui::Slider::new(&mut self.scene.roughness, 0.02..=1.).text("Roughness"));
+            }
+            if !beads && !self.scene.import.stepped_envelope {
+                ui.checkbox(&mut self.scene.layer_appearance, "Show layer appearance");
+            }
+            if !beads && self.scene.layer_appearance && !self.scene.import.stepped_envelope {
+                controls::layer_settings(ui, &mut self.scene, true);
+            }
+            if self.scene.material_preset == "resin" {
+                ui.add(egui::Slider::new(&mut self.scene.resin_clarity, 0.0..=1.).text("Clarity"));
+                ui.add(
+                    egui::Slider::new(&mut self.scene.resin_cloudiness, 0.0..=1.)
+                        .text("Cloudiness"),
+                );
+                ui.small("Resin appearance is approximate; internal voids require real geometry.");
+            }
+            egui::ComboBox::from_label("Studio")
+                .selected_text(&self.scene.studio_preset)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.scene.studio_preset, "light".into(), "Light");
+                    ui.selectable_value(&mut self.scene.studio_preset, "dark".into(), "Dark");
+                });
         }
-        ui.add(egui::Slider::new(&mut self.scene.roughness, 0.02..=1.).text("Roughness"));
-        ui.checkbox(&mut self.scene.layer_appearance, "Show layer appearance");
-        let mut print_edited = false;
-        ui.horizontal(|ui| {
-            ui.label("Layer (mm)");
-            print_edited |= ui
-                .add(
-                    egui::DragValue::new(&mut self.scene.import.layer_height_mm)
-                        .speed(0.01)
-                        .range(0.02..=2.),
-                )
-                .changed();
-        });
-        ui.horizontal(|ui| {
-            ui.label("First layer (mm)");
-            print_edited |= ui
-                .add(
-                    egui::DragValue::new(&mut self.scene.import.first_layer_height_mm)
-                        .speed(0.01)
-                        .range(0.02..=2.),
-                )
-                .changed();
-        });
-        let max_groove = 0.25
-            * self
-                .scene
-                .import
-                .layer_height_mm
-                .min(self.scene.import.first_layer_height_mm);
-        self.scene.groove_depth_mm = self.scene.groove_depth_mm.min(max_groove);
-        print_edited |= ui
-            .add(
-                egui::Slider::new(&mut self.scene.groove_depth_mm, 0.0..=max_groove)
-                    .text("Groove depth (mm)"),
-            )
-            .changed();
-        if print_edited {
-            self.scene.print_settings_edited = true;
-        }
-        if ui.button("Reset print defaults").clicked() {
-            self.scene.reset_print_settings();
-        }
-        if self.scene.material_preset == "resin" {
-            ui.add(egui::Slider::new(&mut self.scene.resin_clarity, 0.0..=1.).text("Clarity"));
-            ui.add(
-                egui::Slider::new(&mut self.scene.resin_cloudiness, 0.0..=1.).text("Cloudiness"),
-            );
-            ui.small("Resin appearance is approximate; internal voids require real geometry.");
-        }
-        egui::ComboBox::from_label("Studio")
-            .selected_text(&self.scene.studio_preset)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.scene.studio_preset, "light".into(), "Light");
-                ui.selectable_value(&mut self.scene.studio_preset, "dark".into(), "Dark");
-            });
         ui.separator();
-        ui.collapsing("Physical model settings", |ui| {
+        if has_model {
+            ui.collapsing("Physical model settings", |ui| {
+            if !beads {
             ui.horizontal(|ui| {
                 ui.label("mm per source unit");
                 ui.add(
@@ -1458,6 +1490,8 @@ impl Studio {
                         .range(0.001..=1000.),
                 );
             });
+            }
+            if beads {
             ui.horizontal(|ui| {
                 ui.label("Filament (mm)");
                 ui.add(
@@ -1466,23 +1500,31 @@ impl Studio {
                         .range(0.1..=10.),
                 );
             });
+            }
+            if !beads {
             ui.label("Build rotation (changes print layers)");
             rotation_editor(ui, &mut self.scene.import.build_rotation_degrees);
             ui.checkbox(&mut self.scene.import.stepped_envelope,"Experimental STL stepped solid");
-            ui.small("Mid-layer approximation changes the silhouette; closed solids only. Features between samples may be missed.");
+            if self.scene.import.stepped_envelope { ui.small("Mid-layer approximation changes the silhouette; closed solids only. Features between samples may be missed."); }
+            }
+            if beads {
             ui.collapsing("G-code interpretation",|ui| {
                 egui::ComboBox::from_label("Firmware").selected_text(&self.scene.import.firmware).show_ui(ui,|ui|{
                     for mode in ["marlin","klipper"] {ui.selectable_value(&mut self.scene.import.firmware,mode.into(),mode);}
                 });
                 ui.checkbox(&mut self.scene.import.joined_beads,"Join contiguous bead paths");
                 ui.checkbox(&mut self.scene.import.allow_arcs,"Allow planar G2/G3 arcs");
-                ui.add(egui::DragValue::new(&mut self.scene.import.chord_error_mm).range(0.001..=1.).speed(0.001).suffix(" mm arc error"));
+                if self.scene.import.allow_arcs { ui.add(egui::DragValue::new(&mut self.scene.import.chord_error_mm).range(0.001..=1.).speed(0.001).suffix(" mm arc error")); }
                 ui.checkbox(&mut self.scene.import.allow_tool_changes,"Normalized tool changes");
-                ui.small("Tool changes assume shared XYZ / global E coordinates. Printer macros and implicit offsets require preprocessing.");
+                if self.scene.import.allow_tool_changes { ui.small("Tool changes assume shared XYZ / global E coordinates. Printer macros and implicit offsets require preprocessing."); }
                 let mut homing = self.scene.import.homing_position_mm.is_some();
                 if ui.checkbox(&mut homing,"Explicit G28 home position").changed() {self.scene.import.homing_position_mm=homing.then_some([0.;3]);}
                 if let Some(home) = &mut self.scene.import.homing_position_mm {ui.horizontal(|ui|{for (axis,value) in ["X","Y","Z"].into_iter().zip(home) {ui.add(egui::DragValue::new(value).prefix(format!("{axis} ")).speed(0.1));}});}
             });
+            }
+            if beads || self.scene.import.stepped_envelope {
+            if beads && self.scene.import.layer_boundaries_mm.is_empty() { ui.small("Layer defaults apply where the file omits HEIGHT metadata."); }
+            controls::layer_settings(ui, &mut self.scene, false);
             ui.collapsing("Explicit adaptive layer boundaries",|ui| {
                 ui.label("G-code / stepped STL: mm boundaries, starting at 0");
                 ui.text_edit_multiline(&mut self.adaptive_text);
@@ -1499,35 +1541,39 @@ impl Studio {
                 if ui.button("Use uniform layers / file metadata").clicked() {self.scene.import.layer_boundaries_mm.clear();self.adaptive_text.clear();}
                 ui.small(format!("{} explicit boundaries",self.scene.import.layer_boundaries_mm.len()));
             });
+            }
         });
-        ui.collapsing("Presentation pose", |ui| {
-            ui.label("Display rotation (keeps print layers)");
-            rotation_editor(ui, &mut self.scene.display_rotation_degrees);
-            if ui
-                .add_enabled(
-                    self.model.is_some() && !self.importing,
-                    egui::Button::new(if self.settle_face {
-                        "Cancel face selection"
-                    } else {
-                        "Settle on face…"
-                    }),
-                )
-                .clicked()
-            {
-                self.settle_face = !self.settle_face;
-                self.timeline_playing = false;
-                if self.timeline_angle != 0. {
-                    self.timeline_angle = 0.;
-                    self.changed();
-                }
-            }
-            if self.settle_face {
-                ui.label("Click a visible face in Native inspection to point it down.");
-            }
-            ui.small(
+            if !sheet {
+                ui.collapsing("Presentation pose", |ui| {
+                    ui.label("Display rotation (keeps print layers)");
+                    rotation_editor(ui, &mut self.scene.display_rotation_degrees);
+                    if ui
+                        .add_enabled(
+                            self.model.is_some() && !self.importing,
+                            egui::Button::new(if self.settle_face {
+                                "Cancel face selection"
+                            } else {
+                                "Settle on face…"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        self.settle_face = !self.settle_face;
+                        self.timeline_playing = false;
+                        if self.timeline_angle != 0. {
+                            self.timeline_angle = 0.;
+                            self.changed();
+                        }
+                    }
+                    if self.settle_face {
+                        ui.label("Click a visible face in Native inspection to point it down.");
+                    }
+                    ui.small(
                 "Uses the chosen triangle's normal; this does not simulate physical stability.",
             );
-        });
+                });
+            }
+        }
         if serde_json::to_string(&self.scene).unwrap_or_default() != before {
             self.changed();
         }
@@ -1540,120 +1586,110 @@ impl Studio {
             self.gate.advance();
         }
         ui.separator();
-        ui.heading("Camera");
-        ui.horizontal(|ui| {
-            if ui.button("Fit").clicked() {
-                self.timeline_playing = false;
-                self.fit();
-                self.changed();
-            }
-            for (label, view) in [
-                ("Front", CanonicalView::Front),
-                ("Right", CanonicalView::Right),
-                ("Top", CanonicalView::Top),
-                ("Iso", CanonicalView::Iso),
-            ] {
-                if ui.button(label).clicked() {
+        if has_model {
+            ui.heading(if sheet { "Inspection camera" } else { "Camera" });
+            ui.horizontal(|ui| {
+                if ui.button("Fit").clicked() {
                     self.timeline_playing = false;
-                    self.camera.canonical(view);
                     self.fit();
                     self.changed();
                 }
-            }
-        });
-        if ui
-            .checkbox(&mut self.camera.orthographic, "Orthographic")
-            .changed()
-        {
-            self.timeline_playing = false;
-            self.changed();
-        }
-        self.timeline_controls(ui);
-        ui.checkbox(&mut self.show_edges, "Triangle edges");
-        egui::ComboBox::from_label("Inspection")
-            .selected_text(format!("{:?}", self.inspection))
-            .show_ui(ui, |ui| {
-                for mode in [
-                    InspectionMode::Opaque,
-                    InspectionMode::Ghost,
-                    InspectionMode::Xray,
+                for (label, view) in [
+                    ("Front", CanonicalView::Front),
+                    ("Right", CanonicalView::Right),
+                    ("Top", CanonicalView::Top),
+                    ("Iso", CanonicalView::Iso),
                 ] {
-                    ui.selectable_value(&mut self.inspection, mode, format!("{mode:?}"));
+                    if ui.button(label).clicked() {
+                        self.timeline_playing = false;
+                        self.camera.canonical(view);
+                        self.fit();
+                        self.changed();
+                    }
                 }
             });
-        if self.inspection != InspectionMode::Opaque {
-            ui.add(egui::Slider::new(&mut self.opacity, 0.02..=0.95).text("Inspection opacity"));
-        }
-        if ui
-            .checkbox(&mut self.buildup, "Show printed build-up")
-            .changed()
-        {
-            self.changed();
-        }
-        if self.buildup {
-            let top = self
-                .model
-                .as_ref()
-                .map_or(1., |m| m.bounds_mm.max[2] as f32);
             if ui
-                .add(
-                    egui::Slider::new(&mut self.buildup_height, 0.0..=top)
-                        .text("Printed height (mm)"),
-                )
+                .checkbox(&mut self.camera.orthographic, "Orthographic")
                 .changed()
             {
                 self.timeline_playing = false;
                 self.changed();
             }
-            ui.checkbox(&mut self.buildup_playing, "Play build-up");
-        }
-        ui.small("Drag to orbit • right-drag to pan • wheel to zoom");
-        ui.separator();
-        ui.heading("Export");
-        egui::ComboBox::from_label("Renderer")
-            .selected_text(&self.engine)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.engine, "eevee".into(), "EEVEE (fast)");
-                ui.selectable_value(&mut self.engine, "cycles".into(), "Cycles / OptiX");
-            });
-        ui.horizontal(|ui| {
-            ui.label("GIF/video pixels");
-            ui.add(
-                egui::DragValue::new(&mut self.size)
-                    .range(64..=8000)
-                    .speed(64),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Samples");
-            ui.add(egui::DragValue::new(&mut self.samples).range(1..=4096));
-        });
-        ui.checkbox(&mut self.transparent, "Transparent PNG background");
-        ui.collapsing("PNG and sheet quality", |ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.still_size)
-                    .range(64..=8000)
-                    .speed(64)
-                    .suffix(" px PNG/sheet"),
-            );
-            egui::ComboBox::from_label("PNG renderer")
-                .selected_text(&self.still_engine)
+            ui.checkbox(&mut self.show_edges, "Triangle edges");
+            egui::ComboBox::from_label("Inspection")
+                .selected_text(format!("{:?}", self.inspection))
                 .show_ui(ui, |ui| {
-                    for engine in ["cycles", "eevee"] {
-                        ui.selectable_value(&mut self.still_engine, engine.into(), engine);
+                    for mode in [
+                        InspectionMode::Opaque,
+                        InspectionMode::Ghost,
+                        InspectionMode::Xray,
+                    ] {
+                        ui.selectable_value(&mut self.inspection, mode, format!("{mode:?}"));
                     }
                 });
-            ui.add(
-                egui::DragValue::new(&mut self.still_samples)
-                    .range(1..=4096)
-                    .suffix(" PNG samples"),
-            );
-        });
-        ui.add_enabled(
-            self.model.as_ref().is_some_and(|m| !m.groups.is_empty()),
-            egui::Checkbox::new(&mut self.export_buildup, "Export build-up animation"),
-        );
-        if !self.timeline_enabled && !self.export_buildup {
+            if self.inspection != InspectionMode::Opaque {
+                ui.add(
+                    egui::Slider::new(&mut self.opacity, 0.02..=0.95).text("Inspection opacity"),
+                );
+            }
+            if beads {
+                if ui
+                    .checkbox(&mut self.buildup, "Show printed build-up")
+                    .changed()
+                {
+                    self.changed();
+                }
+                if self.buildup {
+                    let top = self
+                        .model
+                        .as_ref()
+                        .map_or(1., |m| m.bounds_mm.max[2] as f32);
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.buildup_height, 0.0..=top)
+                                .text("Printed height (mm)"),
+                        )
+                        .changed()
+                    {
+                        self.timeline_playing = false;
+                        self.changed();
+                    }
+                    ui.checkbox(&mut self.buildup_playing, "Play build-up");
+                }
+            }
+            ui.small("Drag to orbit • right-drag to pan • wheel to zoom");
+        }
+        ui.separator();
+        ui.heading("Export");
+        if (controls::OutputEditor {
+            format: &mut self.output_format,
+            codec: &mut self.codec,
+            animation_engine: &mut self.engine,
+            animation_size: &mut self.size,
+            animation_samples: &mut self.samples,
+            still_engine: &mut self.still_engine,
+            still_size: &mut self.still_size,
+            still_samples: &mut self.still_samples,
+            transparent: &mut self.transparent,
+        })
+        .show(ui)
+        {
+            self.timeline_playing = false;
+            self.settle_face = false;
+            self.changed();
+        }
+        let animated = self.output_format.animated();
+        if has_model && animated {
+            self.timeline_controls(ui);
+            if beads {
+                controls::build_up_checkbox(
+                    ui,
+                    &mut self.export_buildup,
+                    self.timeline_enabled.then_some(&mut self.timeline),
+                );
+            }
+        }
+        if has_model && animated && !self.timeline_enabled && !(beads && self.export_buildup) {
             ui.group(|ui| {
                 ui.label("Basic turntable");
                 ui.horizontal(|ui| {
@@ -1678,19 +1714,11 @@ impl Studio {
                 ui.small("Matching frames are rendered once and reused. Length rounds to the nearest frame.");
             });
         }
-        egui::ComboBox::from_label("MP4 codec")
-            .selected_text(if self.codec == VideoCodec::Av1 {
-                "AV1"
-            } else {
-                "H.264"
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.codec, VideoCodec::H264, "H.264");
-                ui.selectable_value(&mut self.codec, VideoCodec::Av1, "AV1");
-            });
-        ui.collapsing("Section analysis", |ui| {
+        if has_model && self.output_format.supports_section() {
+            ui.collapsing("Section analysis", |ui| {
             let before = (self.section,self.section_axis,self.section_position,self.section_positive,self.section_cap,self.side_by_side);
             ui.checkbox(&mut self.section, "Show section / export cutaway");
+            if self.section {
             ui.horizontal(|ui| { ui.label("Build axis"); for (axis, label) in [(0, "X"), (1, "Y"), (2, "Z")] { ui.selectable_value(&mut self.section_axis, axis, label); } });
             ui.horizontal(|ui| { ui.label("Position (mm)"); ui.add(egui::DragValue::new(&mut self.section_position).speed(0.1)); });
             ui.checkbox(&mut self.section_positive, "Keep positive side");
@@ -1699,26 +1727,22 @@ impl Studio {
             ui.small("STL sections show the modeled solid. G-code sections preserve deposited beads and voids.");
             ui.small("Native cutaway is uncapped. Reliable caps and area/volume metrics are computed during export.");
             if let Some(analysis) = &self.analysis {ui.label(serde_json::to_string_pretty(analysis).unwrap_or_default());}
+            }
             if before != (self.section,self.section_axis,self.section_position,self.section_positive,self.section_cap,self.side_by_side) { self.changed(); }
         });
+        }
         ui.add_enabled_ui(
             self.model.is_some()
                 && self.busy.is_none()
                 && !self.importing
                 && !self.cache_action_pending,
             |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (label, kind) in [
-                        ("GIF", ExportKind::Gif),
-                        ("PNG", ExportKind::Still),
-                        ("4-view sheet", ExportKind::Diagram),
-                        ("MP4", ExportKind::Mp4),
-                    ] {
-                        if ui.button(label).clicked() {
-                            self.pick_export(kind);
-                        }
-                    }
-                });
+                if ui
+                    .button(format!("Export {}...", self.output_format.label()))
+                    .clicked()
+                {
+                    self.pick_export(self.output_format.kind());
+                }
                 if ui.button("Render preview").clicked() {
                     self.start_export(
                         ExportKind::Still,
@@ -1734,7 +1758,7 @@ impl Studio {
         {
             self.save_prefs();
         }
-        if (self.engine.clone(), self.transparent) != preview_options_before {
+        if (self.preview_engine().to_owned(), self.transparent) != preview_options_before {
             self.changed();
         }
     }
@@ -1810,7 +1834,7 @@ impl Studio {
         let Some(directory) = self.smoke_output.clone() else {
             return;
         };
-        if self.started.elapsed() > Duration::from_secs(120) {
+        if self.started.elapsed() > Duration::from_secs(180) {
             let _ = fs::create_dir_all(&directory);
             let _ = fs::write(
                 directory.join("failed.txt"),
@@ -1997,6 +2021,7 @@ impl Studio {
                 ..Default::default()
             };
             self.timeline_enabled = true;
+            self.output_format = OutputFormat::Mp4;
             self.section = true;
             self.section_axis = 0;
             self.section_position = 0.75;
@@ -2059,6 +2084,8 @@ impl Studio {
                 self.turntable_timing.seconds_per_turn == 4.
                     && self.turntable_timing.duration_seconds == 12.
             );
+            self.smoke_checks["selected_encoding_project_restored"] =
+                serde_json::json!(self.output_format == OutputFormat::Mp4);
             if let Ok((mut project, _)) = load_project(&directory.join("smoke.turninator")) {
                 project.source_path = directory.join("missing-project-source.stl");
                 let path = directory.join("missing.turninator");
@@ -2126,7 +2153,7 @@ impl Studio {
                 self.section_position = (model.bounds_mm.min[0] + model.bounds_mm.max[0]) / 2.;
                 self.section = true;
                 self.side_by_side = true;
-                self.timeline.buildup = true;
+                self.timeline.buildup = false;
                 self.export_buildup = true;
                 self.scene.select_material("resin");
                 self.scene.color_mode = "tool".into();
@@ -2193,6 +2220,119 @@ impl Studio {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "timeline",
             )));
+            self.smoke_stage = 90;
+        }
+        if self.smoke_stage == 90 && self.busy.is_none() {
+            self.output_format = OutputFormat::Mp4;
+            self.changed();
+            self.start_export(
+                ExportKind::Still,
+                directory.join("format-mp4-preview.png"),
+                true,
+            );
+            self.smoke_stage = 91;
+        }
+        if self.smoke_stage == 91 && self.preview_revision == Some(self.revision) {
+            self.smoke_checks["mp4_preview_uses_animation_renderer"] = serde_json::json!(
+                self.last_task
+                    .as_ref()
+                    .is_some_and(|task| task.0.engine == self.engine && !task.0.transparent)
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "format-mp4",
+            )));
+            self.output_format = OutputFormat::Png;
+            self.still_engine = "eevee".into();
+            self.transparent = true;
+            self.changed();
+            self.start_export(
+                ExportKind::Still,
+                directory.join("format-png-preview.png"),
+                true,
+            );
+            self.smoke_stage = 92;
+        }
+        if self.smoke_stage == 92 && self.preview_revision == Some(self.revision) {
+            self.smoke_checks["png_preview_uses_png_renderer_and_alpha"] = serde_json::json!(
+                self.last_task
+                    .as_ref()
+                    .is_some_and(|task| task.0.engine == self.still_engine && task.0.transparent)
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "format-png",
+            )));
+            self.output_format = OutputFormat::FourView;
+            self.changed();
+            self.start_export(
+                ExportKind::Still,
+                directory.join("format-sheet-preview.png"),
+                true,
+            );
+            self.smoke_stage = 93;
+        }
+        if self.smoke_stage == 93 && self.preview_revision == Some(self.revision) {
+            self.smoke_checks["sheet_preview_uses_sheet_renderer_and_views"] = serde_json::json!(
+                self.last_task
+                    .as_ref()
+                    .is_some_and(|task| task.0.kind == ExportKind::Diagram
+                        && task.0.engine == self.still_engine
+                        && task.0.section.is_none()
+                        && !task.0.transparent)
+                    && self.viewport_settings().section.is_none()
+                    && self.viewport_settings().display_rotation_degrees == [0.; 3]
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "format-sheet",
+            )));
+            self.still_size = 512;
+            self.still_samples = 4;
+            self.start_export(
+                ExportKind::Diagram,
+                directory.join("selected-sheet.png"),
+                false,
+            );
+            self.smoke_stage = 95;
+        }
+        if self.smoke_stage == 95
+            && self.busy.is_none()
+            && self
+                .last_output
+                .as_ref()
+                .is_some_and(|output| output.path == directory.join("selected-sheet.png"))
+            && self
+                .output
+                .as_ref()
+                .is_some_and(|output| output.frames.len() == 1)
+        {
+            self.smoke_checks["sheet_export_uses_visible_quality"] =
+                serde_json::json!(self.last_task.as_ref().is_some_and(|task| task.0.engine
+                    == self.still_engine
+                    && task.0.size == 512
+                    && task.0.samples == 4
+                    && task.0.kind == ExportKind::Diagram));
+            self.output_format = OutputFormat::Gif;
+            self.show_output = false;
+            self.changed();
+            self.start_export(
+                ExportKind::Still,
+                directory.join("format-gif-preview.png"),
+                true,
+            );
+            self.smoke_stage = 94;
+        }
+        if self.smoke_stage == 94 && self.preview_revision == Some(self.revision) {
+            self.smoke_checks["gif_restores_hidden_settings_and_opaque_preview"] = serde_json::json!(
+                self.transparent
+                    && self
+                        .last_task
+                        .as_ref()
+                        .is_some_and(|task| !task.0.transparent && task.0.engine == self.engine)
+                    && self.output_format.supports_section()
+                    && self.timeline_enabled
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "complete",
+            )));
             self.smoke_stage = 9;
         }
         let screenshots = ctx.input(|input| {
@@ -2226,7 +2366,7 @@ impl Studio {
                 image.size[1] as u32,
                 image::ColorType::Rgba8,
             );
-            if name == "timeline" {
+            if name == "complete" {
                 let _ = fs::write(directory.join("result.json"), serde_json::json!({"model":self.model.as_ref().map(|m| &m.path), "triangles":self.viewport.triangle_count(),"revision":self.revision,"preview_revision":self.preview_revision,"error":self.error,"checks":self.smoke_checks}).to_string());
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -2267,12 +2407,18 @@ impl eframe::App for Studio {
             }
             ctx.request_repaint_after(Duration::from_millis(33));
         }
-        let color_signature =
-            serde_json::to_string(&(&self.scene.color_mode, &self.scene.tool_colors))
-                .unwrap_or_default();
+        let color_signature = serde_json::to_string(&(
+            self.output_format,
+            &self.scene.color_mode,
+            &self.scene.tool_colors,
+        ))
+        .unwrap_or_default();
         if self.color_signature != color_signature {
             if let Some(model) = &self.model {
-                let colors = if self.scene.color_mode == "uniform" || model.groups.is_empty() {
+                let colors = if self.output_format == OutputFormat::FourView
+                    || self.scene.color_mode == "uniform"
+                    || model.groups.is_empty()
+                {
                     Vec::new()
                 } else {
                     let mut colors = vec![self.scene.color; model.mesh.triangles.len()];

@@ -457,7 +457,10 @@ fn group(segment: &BeadSegment, start_triangle: usize, end_triangle: usize) -> G
         z_top_mm: segment.end[2],
     }
 }
-pub fn group_color(group: &GeometryGroup, settings: &SceneSettings) -> [f32; 3] {
+pub fn group_color_index(group: &GeometryGroup, settings: &SceneSettings) -> Option<usize> {
+    if settings.color_mode == "uniform" {
+        return None;
+    }
     let index = if settings.color_mode == "feature" {
         group.feature.bytes().fold(0usize, |sum, b| {
             sum.wrapping_mul(31).wrapping_add(b as usize)
@@ -465,11 +468,10 @@ pub fn group_color(group: &GeometryGroup, settings: &SceneSettings) -> [f32; 3] 
     } else {
         group.tool as usize
     };
-    if settings.color_mode == "uniform" {
-        settings.color
-    } else {
-        settings.tool_colors[index % settings.tool_colors.len()]
-    }
+    Some(index % settings.tool_colors.len())
+}
+pub fn group_color(group: &GeometryGroup, settings: &SceneSettings) -> [f32; 3] {
+    group_color_index(group, settings).map_or(settings.color, |index| settings.tool_colors[index])
 }
 pub fn model_scene(
     model: &ImportedModel,

@@ -161,6 +161,42 @@ fn project_preserves_basic_turntable_timing_and_defaults_legacy_files() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn project_restores_selected_output_without_losing_hidden_preferences() {
+    use turninator::export::{OutputFormat, VideoCodec};
+    let (root, value) = fixture();
+    let path = root.join("formats.turninator");
+    let mut project: ProjectFile = serde_json::from_value(value.clone()).unwrap();
+    project.output_options.video_codec = VideoCodec::Av1;
+    project.output_options.transparent = true;
+    project.output_options.still_samples = 128;
+    for format in [
+        OutputFormat::Gif,
+        OutputFormat::Png,
+        OutputFormat::FourView,
+        OutputFormat::Mp4,
+    ] {
+        project.output_options.output_format = format;
+        save_project(&path, &project).unwrap();
+        let (restored, _) = load_project(&path).unwrap();
+        assert_eq!(restored.output_options.output_format, format);
+        assert_eq!(restored.output_options.video_codec, VideoCodec::Av1);
+        assert!(restored.output_options.transparent);
+        assert_eq!(restored.output_options.still_samples, 128);
+    }
+    let mut legacy = value;
+    legacy["output_options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("output_format");
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(
+        load_project(&path).unwrap().0.output_options.output_format,
+        OutputFormat::Gif
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn invalid_timelines() -> Vec<(&'static str, Value)> {
     let mut cases = Vec::new();
     let mut add = |name, pointer, replacement| {

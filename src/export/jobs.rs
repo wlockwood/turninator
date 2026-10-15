@@ -21,6 +21,42 @@ pub enum ExportKind {
     SectionTurntable,
     SectionStill,
 }
+/// User-facing output selection; section variants are derived from scene options.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutputFormat {
+    #[default]
+    Gif,
+    Mp4,
+    Png,
+    FourView,
+}
+impl OutputFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Gif => "GIF animation",
+            Self::Mp4 => "MP4 video",
+            Self::Png => "PNG image",
+            Self::FourView => "4-view sheet",
+        }
+    }
+    pub fn kind(self) -> ExportKind {
+        match self {
+            Self::Gif => ExportKind::Gif,
+            Self::Mp4 => ExportKind::Mp4,
+            Self::Png => ExportKind::Still,
+            Self::FourView => ExportKind::Diagram,
+        }
+    }
+    pub fn animated(self) -> bool {
+        matches!(self, Self::Gif | Self::Mp4)
+    }
+    pub fn supports_transparency(self) -> bool {
+        self == Self::Png
+    }
+    pub fn supports_section(self) -> bool {
+        self != Self::FourView
+    }
+}
 impl ExportKind {
     pub fn extension(self) -> &'static str {
         match self {
@@ -184,6 +220,30 @@ fn write_scene_json(path: &Path, value: &Value) -> Result<()> {
         return Err("derived render scene exceeds 1 MiB byte budget".into());
     }
     crate::settings::atomic_write(path, &bytes)
+}
+
+#[cfg(test)]
+mod diagram_style_tests {
+    use super::*;
+    #[test]
+    fn fixed_diagram_ignores_hidden_material_pose_and_palette() {
+        let source = json!({"face_groups":[{"color":[1.,0.,0.],"start_triangle":0,"end_triangle":1}],
+            "material_preset":"resin","layer_appearance":true,"display_rotation_degrees":[10,20,30]});
+        let camera = json!({"projection":"orthographic"});
+        let panel = diagram_panel_scene(&source, &camera);
+        assert_eq!(panel["face_groups"], json!([]));
+        assert_eq!(panel["material_preset"], "clay");
+        assert_eq!(panel["layer_appearance"], false);
+        assert_eq!(panel["display_rotation_degrees"], json!([0., 0., 0.]));
+        assert_eq!(panel["camera"], camera);
+        assert_eq!(source["face_groups"].as_array().unwrap().len(), 1);
+        let printed = diagram_panel_scene(
+            &json!({"diagram_printed_surface":true,"face_groups":source["face_groups"],"material_preset":"resin"}),
+            &camera,
+        );
+        assert_eq!(printed["face_groups"], source["face_groups"]);
+        assert_eq!(printed["material_preset"], "resin");
+    }
 }
 
 #[cfg(test)]
@@ -844,6 +904,21 @@ fn diagram_stage_visibility(
     Ok(Some(visible))
 }
 
+fn diagram_panel_scene(scene: &Value, camera: &Value) -> Value {
+    let mut panel = scene.clone();
+    panel["display_rotation_degrees"] = json!([0., 0., 0.]);
+    panel["camera"] = camera.clone();
+    panel["studio_preset"] = json!("diagram");
+    if !scene["diagram_printed_surface"].as_bool().unwrap_or(false) {
+        panel["layer_appearance"] = json!(false);
+        panel["material_preset"] = json!("clay");
+        panel["color"] = json!([0.32, 0.35, 0.4]);
+        panel["roughness"] = json!(0.6);
+        panel["face_groups"] = json!([]);
+    }
+    panel
+}
+
 fn render_diagram(
     worker: &mut WorkerClient,
     request: &ExportRequest,
@@ -875,16 +950,7 @@ fn render_diagram(
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let mut panel_scene = scene.clone();
-        panel_scene["display_rotation_degrees"] = json!([0., 0., 0.]);
-        panel_scene["camera"] = cameras[index].clone();
-        panel_scene["studio_preset"] = json!("diagram");
-        if !scene["diagram_printed_surface"].as_bool().unwrap_or(false) {
-            panel_scene["layer_appearance"] = json!(false);
-            panel_scene["material_preset"] = json!("clay");
-            panel_scene["color"] = json!([0.32, 0.35, 0.4]);
-            panel_scene["roughness"] = json!(0.6);
-        }
+        let panel_scene = diagram_panel_scene(scene, &cameras[index]);
         let scene_path = directory.join(format!("diagram-{index}.json"));
         write_scene_json(&scene_path, &panel_scene)?;
         let frames = directory.join(format!("panel-{index}"));

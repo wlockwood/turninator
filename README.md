@@ -16,10 +16,12 @@ STL Layer Appearance preserves the original silhouette. G-code creates actual ro
 
 Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leave native inspection available. No tools are installed or updated automatically. Exact tested binaries and maintained Blender LTS qualification are in [docs/runtime-support.md](docs/runtime-support.md).
 
+Under **Export**, choose **Encoding** first: GIF animation, MP4 video, PNG image or 4-view sheet. Only settings for that output appear. MP4 codec is directly below Encoding for MP4; transparent background appears for PNG. Renderer, pixels and samples belong to the selected output, with separate animation and PNG/sheet preferences retained when switching. Use the **Export** button for that selection. **Render preview** follows its renderer/background and previews the complete layout for sheets.
+
 - GIF defaults: 960 square, 80 frames, 20 fps, four seconds, infinite looping. The studio plays the actual encoded GIF.
 - Basic turntables: with camera timelines and build-up disabled, set **Seconds per turn** and **Animation length (s)** under Export. The studio shows total turns and the actual frame count/duration. For example, 4 seconds per turn over 12 seconds produces 3 turns. Length rounds to the nearest 20 fps frame; fractional turns are supported.
 - PNG defaults: 4096 square, Cycles/OptiX, optional transparent background independent of material transmission.
-- Four-view sheets: TOP / ISO above FRONT / RIGHT at a shared orthographic scale, with design edges and one millimetre dimension per view. Each annotation measures the larger visible projected width or height; selected deposited stages use their visible geometry.
+- Four-view sheets: TOP / ISO above FRONT / RIGHT at a shared orthographic scale, with a fixed gray diagram style, design edges and one millimetre dimension per view. Each annotation measures the larger visible projected width or height; selected deposited stages use their visible geometry.
 - MP4: explicit H.264 or AV1, capability checks and verified timing. Unavailable AV1 does not silently become H.264. Matching requests reuse verified frames.
 - Section exports: full model beside a cutaway through the whole turntable; reliable caps/statistics require closed input. G-code cuts retain deposited gaps.
 - Build-up exports: complete deposited layers, including adaptive heights, combined with resin/Cycles, studio lighting, tool/feature colors, camera motion and capped or paired sections. Selected stages also export to PNGs and four-view sheets; zero layers produces an empty build.
@@ -27,11 +29,11 @@ Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leav
 
 Repeated animation poses render once, then copy the verified PNG into each matching position in the output sequence. A three-turn basic rotation at 4 seconds per turn exports 240 frames from 80 renders. Reuse requires an identical camera, rotation and visible deposited layers, so advancing build-up and moving cameras retain their distinct frames. Non-integral frames per turn reuse only phases that coincide exactly.
 
-Animation and PNG/sheet quality have separate controls. Native lighting approximates Blender; Render preview provides the selected material/studio result. Resin on overlapping beads retains internal interfaces and is an illustration rather than fused-resin physics. Section volume is a mesh estimate, not calibrated deposited material or strength.
+Controls follow the loaded source and selected features. STL units/build orientation and stepped solids appear for STL; G-code shows filament, interpretation and deposited-layer settings. Layer/groove details require layer appearance, arc precision requires enabled arcs, and section details require an enabled section. Adaptive boundaries replace numeric height defaults, and palettes show only colors used by the loaded paths. One build-up export checkbox controls both basic and camera-timeline animations. Hidden preferences are retained. Native lighting approximates Blender; Render preview provides the selected material/studio result. Resin on overlapping beads retains internal interfaces and is an illustration rather than fused-resin physics. Section volume is a mesh estimate, not calibrated deposited material or strength.
 
 Export save dialogs suggest the loaded model's base name with the chosen output extension. You can edit the filename before saving. A model change invalidates a pending save choice so it cannot export a different model under the previous suggestion.
 
-To author a motion, set the time slider, compose a view with orbit/pan/zoom or a canonical camera, then **Record this view**. Edit each key's outgoing transition and easing; **Play** previews the path natively. Camera loops reserve a closing transition or end at the starting camera. Build-up reveals whole deposited layers rather than reproducing printer time or nozzle motion; its last exported frame is complete.
+To author a motion, select GIF or MP4 and expand **Camera keyframes and motion** under Export. Set the time slider, compose a view with orbit/pan/zoom or a canonical camera, then **Record this view**. Edit each key's outgoing transition and easing; **Play** previews the path natively. Camera loops reserve a closing transition or end at the starting camera. Build-up reveals whole deposited layers rather than reproducing printer time or nozzle motion; its last exported frame is complete.
 
 ## Projects and recovery
 
