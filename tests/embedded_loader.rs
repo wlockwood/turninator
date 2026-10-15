@@ -63,6 +63,37 @@ fn config() -> EmbeddedConfig {
         },
     }
 }
+#[test]
+fn runtime_diagnostics_tracks_actual_completed_worker_frames() {
+    let library =
+        EmbeddedLibrary::load_fixture(&fixture("tn_fixture_diagnostic_snapshot.dll")).unwrap();
+    let mut context = library.create(&config()).unwrap();
+    let initial = context.runtime_info().unwrap();
+    assert_eq!(initial.diagnostics.unwrap().counters["frames"], 0);
+    upload(&mut context, 1);
+    context.begin_frame(&frame(1)).unwrap();
+    wait_for_state(&mut context, EmbeddedState::Ready);
+    let info = context.runtime_info().unwrap();
+    assert_eq!(info.device_id, initial.device_id);
+    let diagnostics = info.diagnostics.unwrap();
+    assert_eq!(diagnostics.schema_version, 1);
+    assert_eq!(diagnostics.counters["frames"], 1);
+    assert_eq!(diagnostics.timings_ms["render"], 1.);
+    assert_eq!(diagnostics.settings["effective_aa"], "cpu-complete");
+    let mut pixels = [0; 16];
+    context.read_pixels(&mut pixels).unwrap();
+    context.begin_frame(&frame(1)).unwrap();
+    wait_for_state(&mut context, EmbeddedState::Ready);
+    assert_eq!(
+        context
+            .runtime_info()
+            .unwrap()
+            .diagnostics
+            .unwrap()
+            .counters["frames"],
+        2
+    );
+}
 fn frame(revision: u64) -> EmbeddedFrame {
     EmbeddedFrame {
         geometry_revision: revision,

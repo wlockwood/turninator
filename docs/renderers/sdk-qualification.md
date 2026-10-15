@@ -190,6 +190,49 @@ sha256 is 64 hex digits and path is absolute. Bridges report actual loaded modul
 identity; the adapter must verify it against the lock and record it in effective
 `BackendIdentity`. Describe is also permitted for Failed diagnostics.
 
+An optional `diagnostics` object carries observational statistics. Older bridges
+may omit it; explicit null is invalid. It requires exactly `schema_version:1`,
+`counters`, `timings_ms`, `settings`, and `artifacts`. All four maps may be empty
+and contain at most 64 entries each. Keys match `[a-z][a-z0-9_.-]*`, with at most
+128 ASCII bytes. Counter values are exact unsigned 64-bit JSON integers (floats,
+booleans and negative values are rejected). Timings are finite, nonnegative
+numbers in milliseconds. Settings are nonempty UTF-8 strings up to 1024 bytes,
+without control characters. Artifacts have exactly `{path, sha256}`: a path up
+to 4096 UTF-8 bytes and a digest of exactly 64 hexadecimal digits. Unknown fields
+in the diagnostics object or artifact records are rejected. The complete native
+description, including diagnostics, remains bounded to 1 MiB. Both receivers
+reject duplicate diagnostic map keys; Rust bounds each map while deserializing.
+
+Artifact paths follow the reviewed lexical Windows drive/UNC/verbatim policy:
+drive-absolute and server/share UNC paths are accepted, including canonical
+verbatim drive/UNC paths. Relative, dot/traversal, device namespace, forbidden
+Windows characters and C0 controls are rejected; verbatim paths reject forward
+slashes. Legal DEL/C1 filename characters remain valid. Native and Rust receivers
+perform no filesystem existence/metadata reads for these observations. Producers
+report actual loaded modules, and the adapter separately verifies their identity
+against the lock. Diagnostics do not establish module trust.
+
+The dedicated SDK worker calls its existing `describe()` initially and after
+each successfully drained work item, including cooperative cancellation, before
+publishing Ready/Cancelled. Backends retain their static module hashes and
+identity; this does not require a new SDK probe or hash pass per frame. The
+facade validates each candidate, compares all stable description fields against
+the initial description with only diagnostics excluded, and publishes the whole
+string under a separate snapshot mutex. Owner-thread describe copies that
+snapshot and never calls SDK code. Invalid or changed identity fails only after
+backend drain and preserves the last valid snapshot. SDK exceptions retain their
+original failure and do not trigger a refresh. Poll/cancel acquire no new locks;
+the snapshot lock is never held with the task queue lock.
+
+Description length can change between capacity query and copy. Native short
+buffers remain untouched and receive the current required size; a successful
+shorter snapshot reports its actual size. Rust accepts only bounded, internally
+consistent lengths/statuses, retries a growing `TN_CAPACITY` at most four copy
+attempts, and truncates a successful shorter snapshot before parsing. Diagnostics
+are excluded from stable runtime/pixel identity. Effective quality policy still
+belongs to the backend's explicit recipe, even when diagnostics report actual
+sample counts, effective AA, resource reservations/reuse, or phase timings.
+
 ## DLL search and remaining production identity checks
 
 Production load accepts only a canonical absolute

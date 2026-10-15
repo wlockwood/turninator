@@ -117,9 +117,20 @@ TN_EXPORT int32_t tn_renderer_create(const tn_config *, tn_context *, tn_error *
  * {schema_version:1, backend:string, sdk_version:string, device_id:string,
  * device_name:string, api:string, driver:string, compiler?:
  * {name:string,version:string,sha256:string,path:absolute-string}}.
+ * Optional diagnostics is schema1 {schema_version:1,counters:{key:u64},
+ * timings_ms:{key:finite-nonnegative-number},settings:{key:bounded-text},
+ * artifacts:{key:{path:absolute-Windows-UTF8-path,sha256:64-hex}}}.
+ * Each map <=64 keys matching [a-z][a-z0-9_.-]* (<=128 bytes); settings
+ * values are nonempty <=1024 UTF8 bytes without controls; artifact paths
+ * are <=4096 bytes, lexical drive/UNC/verbatim paths (no filesystem IO).
+ * The dedicated SDK worker refreshes a validated snapshot after drained work,
+ * including cancellation, before Ready/Cancelled. Other fields remain stable.
+ * Diagnostics are observational and are not runtime/pixel identity.
  * required is byte length without NUL, <=1MiB. Query with NULL/0 or retry with
  * short capacity returns TN_CAPACITY, sets required and writes NO buffer bytes.
  * A complete copy does not change render state. Allowed for Failed diagnostics.
+ * Snapshot length may grow/shrink between query and copy; successful copy sets
+ * actual required length. Retry TN_CAPACITY with its new bounded required size.
  */
 TN_EXPORT int32_t tn_renderer_describe(tn_context, uint8_t *, uint64_t, uint64_t *required, tn_error *);
 TN_EXPORT int32_t tn_renderer_upload_scene(tn_context, const tn_scene *, tn_error *);

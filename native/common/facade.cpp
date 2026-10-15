@@ -39,6 +39,9 @@ struct Context {
     uint32_t width=0,height=0;
     std::vector<uint8_t> pixels;
     std::string description;
+    // Never nested with the queue mutex. Only worker publication and owner
+    // describe use this mutex; poll/cancel remain lock-free with respect to it.
+    std::mutex description_mutex;
     std::array<char,4096> diagnostic{};
     std::mutex mutex;
     std::condition_variable changed;
@@ -62,7 +65,9 @@ struct Context {
         try {
             backend=make_backend(config);
             if(!backend) throw std::runtime_error("native factory returned null backend");
-            description=backend->describe(); validate_description(description,config);
+            auto initial=backend->describe(); validate_description(initial,config);
+            auto identity=Json::parse(initial); identity.erase("diagnostics");
+            { std::lock_guard lock(description_mutex); description=std::move(initial); }
             { std::lock_guard lock(mutex); initialized=true; } changed.notify_one();
             uint64_t uploaded_generation=0;
             for(;;) {
@@ -96,6 +101,13 @@ struct Context {
                         }
                     }
                 }
+                // SDK work has drained, including cooperative cancellation.
+                // Refresh before completion, without probing SDK on the owner.
+                // Validate first so any failure retains the prior good snapshot.
+                auto refreshed=backend->describe(); validate_description(refreshed,config);
+                auto stable=Json::parse(refreshed); stable.erase("diagnostics");
+                if(stable!=identity) throw std::runtime_error("native runtime identity changed during work");
+                { std::lock_guard lock(description_mutex); description=std::move(refreshed); }
                 // Release owned queued inputs before publishing completion. From
                 // Ready/Cancelled onwards the worker will not touch this frame.
                 next.reset();
@@ -164,6 +176,7 @@ int32_t create(const tn_config* raw,tn_context* out,tn_error* e) noexcept {
 int32_t describe(tn_context p,uint8_t* buffer,uint64_t capacity,uint64_t* required,tn_error* e) noexcept {
     return guarded(p,e,[&](Context& c)->int32_t {
         if(!required) return error(e,TN_INVALID_ARGUMENT,"null description length output");
+        std::lock_guard lock(c.description_mutex);
         *required=c.description.size();
         if(capacity<*required) return error(e,TN_CAPACITY,"description capacity too small");
         if(!buffer) return error(e,TN_INVALID_ARGUMENT,"null description buffer");

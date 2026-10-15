@@ -16,6 +16,7 @@ uint32_t matrix_fingerprint(const double* matrix) noexcept {
     return hash;
 }
 struct Fixture final : tn::Backend {
+    uint64_t rendered=0;
     std::string describe() override {
 #ifdef TN_BAD_INFO
         return R"({"schema_version":2,"backend":"fixture","device_id":"cpu-fixture"})";
@@ -24,7 +25,11 @@ struct Fixture final : tn::Backend {
 #elif defined(TN_LARGE_INFO)
         return std::string(1048577,'x');
 #else
-        return R"({"schema_version":1,"backend":"fixture","sdk_version":"cpu-abi1","device_id":"cpu-fixture","device_name":"CPU ABI fixture","api":"fixture","driver":"none"})";
+        auto info=tn::Json::parse(R"({"schema_version":1,"backend":"fixture","sdk_version":"cpu-abi1","device_id":"cpu-fixture","device_name":"CPU ABI fixture","api":"fixture","driver":"none"})");
+#ifdef TN_DIAGNOSTICS
+        info["diagnostics"]={{"schema_version",1},{"counters",{{"frames",rendered}}},{"timings_ms",{{"render",double(rendered)}}},{"settings",{{"effective_aa",rendered?"cpu-complete":"cpu-initial"}}},{"artifacts",tn::Json::object()}};
+#endif
+        return info.dump();
 #endif
     }
     void upload(const tn::Scene&,tn::Work&) override {}
@@ -46,7 +51,7 @@ struct Fixture final : tn::Backend {
         std::vector<uint8_t> bytes(size_t(f.width)*f.height*4);
         work.total=bytes.size();
         for(size_t i=0;i<bytes.size();++i) bytes[i]=pattern[i%16];
-        work.completed=bytes.size(); return bytes;
+        work.completed=bytes.size(); ++rendered; return bytes;
     }
 };
 }

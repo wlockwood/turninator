@@ -91,6 +91,37 @@ mod platform {
             Err(message.into())
         }
     }
+    fn description_bytes(
+        mut describe: impl FnMut(*mut u8, u64, &mut u64) -> (i32, String),
+    ) -> Result<Vec<u8>> {
+        let mut required = 0;
+        let (code, message) = describe(ptr::null_mut(), 0, &mut required);
+        if code != 3 {
+            return Err(format!("invalid native describe capacity response: {message}").into());
+        }
+        if required == 0 || required > abi::MAX_JSON as u64 {
+            return Err("native runtime info exceeds bounds".into());
+        }
+        // The worker can publish a larger or smaller snapshot between calls.
+        // Four copy attempts bound a producer that keeps increasing its size.
+        for _ in 0..4 {
+            let capacity = required;
+            let mut bytes = vec![0u8; capacity as usize];
+            let (code, message) = describe(bytes.as_mut_ptr(), capacity, &mut required);
+            if required == 0 || required > abi::MAX_JSON as u64 {
+                return Err("native runtime info exceeds bounds".into());
+            }
+            match code {
+                0 if required <= capacity => {
+                    bytes.truncate(required as usize);
+                    return Ok(bytes);
+                }
+                3 if required > capacity => continue,
+                _ => return Err(format!("invalid native describe copy response: {message}").into()),
+            }
+        }
+        Err("native runtime info kept growing during bounded retries".into())
+    }
     fn json(value: &impl serde::Serialize, limit: usize) -> Result<Vec<u8>> {
         let bytes = serde_json::to_vec(value)?;
         if bytes.len() > limit.min(abi::MAX_JSON) {
@@ -321,26 +352,10 @@ mod platform {
     }
     impl EmbeddedContext {
         pub fn runtime_info(&mut self) -> Result<RuntimeInfo> {
-            let mut required = 0;
-            // SAFETY: capacity query writes only required/error and must not mutate state.
-            let (code, message) = invoke(|e| unsafe {
-                (self.api.describe)(self.raw, ptr::null_mut(), 0, &mut required, e)
-            });
-            if code != 3 {
-                return Err(format!("invalid native describe capacity response: {message}").into());
-            }
-            if required == 0 || required > abi::MAX_JSON as u64 {
-                return Err("native runtime info exceeds bounds".into());
-            }
-            let mut bytes = vec![0u8; required as usize];
-            let capacity = required;
-            // SAFETY: capacity matched to caller-owned buffer, no native allocation transfer.
-            call(|e| unsafe {
-                (self.api.describe)(self.raw, bytes.as_mut_ptr(), capacity, &mut required, e)
+            let bytes = description_bytes(|buffer, capacity, required| {
+                // SAFETY: helper pairs each owned buffer with its true capacity.
+                invoke(|e| unsafe { (self.api.describe)(self.raw, buffer, capacity, required, e) })
             })?;
-            if required != capacity {
-                return Err("native runtime info changed length during query".into());
-            }
             let text = std::str::from_utf8(&bytes)?;
             let info: RuntimeInfo = serde_json::from_str(text)?;
             let expected = if self.api.backend == abi::FIXTURE {
@@ -664,6 +679,55 @@ mod platform {
         pub fn cancel(&mut self) -> Result<()> {
             // SAFETY: live context; ABI requires nonblocking cooperative request.
             call(|e| unsafe { (self.api.cancel)(self.raw, e) })
+        }
+    }
+    #[cfg(test)]
+    mod describe_tests {
+        use super::*;
+        fn replies(sequence: &[(i32, u64)]) -> (Result<Vec<u8>>, usize) {
+            let mut calls = 0;
+            let result = description_bytes(|buffer, capacity, required| {
+                let (code, length) = sequence[calls];
+                calls += 1;
+                *required = length;
+                if code == 0 && !buffer.is_null() && length <= capacity {
+                    // SAFETY: description_bytes supplied this true capacity.
+                    unsafe { std::ptr::write_bytes(buffer, b'x', length as usize) };
+                }
+                (code, "test reply".into())
+            });
+            (result, calls)
+        }
+        #[test]
+        fn describe_retries_growth_and_accepts_shrink() {
+            assert_eq!(replies(&[(3, 2), (3, 8), (0, 5)]).0.unwrap(), b"xxxxx");
+            assert_eq!(replies(&[(3, 8), (0, 3)]).0.unwrap(), b"xxx");
+            let (result, calls) = replies(&[(3, 1), (3, 2), (3, 3), (3, 4), (0, 4)]);
+            assert_eq!(result.unwrap(), b"xxxx");
+            assert_eq!(calls, 5);
+            assert_eq!(
+                replies(&[(3, 1_048_576), (0, 1_048_576)]).0.unwrap().len(),
+                1_048_576
+            );
+        }
+        #[test]
+        fn describe_rejects_impossible_lengths_statuses_and_unbounded_growth() {
+            for sequence in [
+                vec![(0, 2)],
+                vec![(3, 0)],
+                vec![(3, 1_048_577)],
+                vec![(3, 2), (3, 2)],
+                vec![(3, 2), (3, 1)],
+                vec![(3, 2), (0, 3)],
+                vec![(3, 2), (0, 0)],
+                vec![(3, 2), (3, 1_048_577)],
+                vec![(3, 2), (6, 2)],
+            ] {
+                assert!(replies(&sequence).0.is_err(), "{sequence:?}");
+            }
+            let (result, calls) = replies(&[(3, 1), (3, 2), (3, 3), (3, 4), (3, 5)]);
+            assert!(result.is_err());
+            assert_eq!(calls, 5);
         }
     }
 }

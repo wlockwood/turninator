@@ -79,6 +79,29 @@ void cache_directory(const Json& j) {
     }
     require(!unc||components>=2,"cache directory UNC requires server/share");
 }
+void diagnostics(const Json& j) {
+    shape(j,{"schema_version","counters","timings_ms","settings","artifacts"}); schema(j);
+    for(auto map:{"counters","timings_ms","settings","artifacts"}) {
+        const auto& entries=j.at(map);
+        require(entries.is_object()&&entries.size()<=64,"diagnostics map bound/type");
+        for(auto it=entries.begin();it!=entries.end();++it) {
+            const auto& key=it.key();
+            require(!key.empty()&&key.size()<=128&&key[0]>='a'&&key[0]<='z',"diagnostics key bound/prefix");
+            require(std::all_of(key.begin(),key.end(),[](unsigned char b){return (b>='a'&&b<='z')||(b>='0'&&b<='9')||b=='_'||b=='.'||b=='-';}),"diagnostics key character");
+            const auto& value=it.value();
+            if(std::string_view(map)=="counters") integer(value);
+            else if(std::string_view(map)=="timings_ms") number(value,0);
+            else if(std::string_view(map)=="settings") text(value,1024);
+            else {
+                shape(value,{"path","sha256"});
+                // Same reviewed lexical Windows path policy; no filesystem IO.
+                cache_directory(value.at("path"));
+                const auto hash=text(value.at("sha256"));
+                require(hash.size()==64&&std::all_of(hash.begin(),hash.end(),[](unsigned char b){return (b>='0'&&b<='9')||(b>='a'&&b<='f')||(b>='A'&&b<='F');}),"invalid artifact digest");
+            }
+        }
+    }
+}
 void vector3(const Json& j,double min=-std::numeric_limits<double>::max(),double max=std::numeric_limits<double>::max()) {
     require(j.is_array()&&j.size()==3,"expected three components"); for(const auto& n:j) number(n,min,max);
 }
@@ -183,7 +206,8 @@ Frame copy_frame(const tn_frame* raw,const Config& c,uint64_t revision) {
 }
 void validate_description(const std::string& info,const Config& c) {
     const auto j=parse(reinterpret_cast<const uint8_t*>(info.data()),info.size());
-    shape(j,{"schema_version","backend","sdk_version","device_id","device_name","api","driver"},{"compiler"}); schema(j);
+    shape(j,{"schema_version","backend","sdk_version","device_id","device_name","api","driver"},{"compiler","diagnostics"}); schema(j);
+    if(j.contains("diagnostics")) diagnostics(j.at("diagnostics"));
     for(auto k:{"backend","sdk_version","device_id","device_name","api","driver"}) text(j.at(k),4096);
     require(text(j.at("backend"))==(backend_id()==TN_BACKEND_FIXTURE?"fixture":c.backend),"actual runtime backend mismatch");
     const auto& selected=c.document.at("selection").at("device");
