@@ -106,6 +106,33 @@ fn check(cancel: &AtomicBool) -> Result<()> {
     }
 }
 
+fn report_rejection(state: &Value) -> Option<String> {
+    (!state["report_rejection"].is_null()).then(|| format!(
+        "Retained renderer report was rejected: {}. Discard this retained job and start a new export, or use a different validated renderer recipe. Existing frames were preserved.",
+        state["report_rejection"].as_str().unwrap_or("invalid rejection record")
+    ))
+}
+
+fn reject_report<T>(state: &mut Value, manifest: &Path, reason: &str) -> Result<T> {
+    state["report_rejection"] = json!(reason);
+    // Persist the rejection before returning; a prior valid report cannot make
+    // pixels from a rejected repair eligible for encode-only recovery.
+    write_json(manifest, state)?;
+    Err(report_rejection(state).unwrap().into())
+}
+
+fn is_report_rejection(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error.is::<RenderReportRejected>() {
+            return true;
+        }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
+    }
+}
+
 pub fn run_export_with_backend(
     backend: &mut dyn RenderBackend,
     tools: &ToolPaths,
@@ -179,6 +206,9 @@ pub(crate) fn run_export_with_backend_budget(
         return Err("existing job recipe differs".into());
     }
     let prior = read_json(&manifest).ok();
+    if let Some(reason) = prior.as_ref().and_then(report_rejection) {
+        return Err(reason.into());
+    }
     let mut state = json!({"recipe":recipe,"stage":"rendering","destination":request.destination,"encoding":{"kind":request.kind,"codec":request.video_codec,"frame_rate":request.frame_rate}});
     if let Some(prior) = prior {
         state["report"] = prior["report"].clone();
@@ -246,7 +276,7 @@ pub(crate) fn run_export_with_backend_budget(
                 };
                 let mut emitted = std::collections::BTreeSet::new();
                 let mut metadata_emitted = std::collections::BTreeSet::new();
-                let report = backend.render_sequence(
+                let rendered = backend.render_sequence(
                     render_scene,
                     &work_plan,
                     &producer_context,
@@ -289,37 +319,51 @@ pub(crate) fn run_export_with_backend_budget(
                         callback(JobEvent::Frame(path));
                         Ok(())
                     },
-                )?;
-                if emitted.len() != work_plan.frames.len() - work_plan.repeat_of.len() {
-                    return Err("renderer omitted unique frames".into());
-                }
-                if report.identity != *context.identity
-                    || report.quality != context.selection.quality
-                    || report.frame_count as usize
-                        != work_plan.frames.len() - work_plan.repeat_of.len()
-                {
-                    return Err("renderer report identity/quality/count differs".into());
-                }
-                let mut completed = json!({"rendered_frame_count":report.frame_count,"warnings":report.warnings,"analyses":report.analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy,"cap_supported":a.cap_supported})).collect::<Vec<_>>(),"build_analyses":report.build_analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy})).collect::<Vec<_>>(),"phase_seconds":report.phase_timings.iter().map(|(k,v)|(k.clone(),v.as_secs_f64())).collect::<std::collections::BTreeMap<_,_>>()});
-                validate_report(&completed, &work_plan)?;
-                for field in ["analyses", "build_analyses"] {
-                    let streamed: Vec<_> = state["frame_metadata"][field]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter(|r| work_plan.frames.iter().any(|f| r["key"] == json!(f.key)))
-                        .collect();
-                    let reported = completed[field].as_array().unwrap();
-                    if reported.len() != streamed.len()
-                        || streamed.iter().any(|r| !reported.contains(r))
-                    {
-                        return Err(
-                            "renderer final analysis differs from durable frame metadata".into(),
-                        );
+                );
+                let report = match rendered {
+                    Ok(report) => report,
+                    Err(error) if is_report_rejection(error.as_ref()) => {
+                        return reject_report(&mut state, &manifest, &error.to_string());
                     }
-                    completed[field] = state["frame_metadata"][field].clone();
-                }
-                state["report"] = completed;
+                    Err(error) => return Err(error),
+                };
+                let validated = (|| -> Result<Value> {
+                    if emitted.len() != work_plan.frames.len() - work_plan.repeat_of.len() {
+                        return Err("renderer omitted unique frames".into());
+                    }
+                    if report.identity != *context.identity
+                        || report.quality != context.selection.quality
+                        || report.frame_count as usize
+                            != work_plan.frames.len() - work_plan.repeat_of.len()
+                    {
+                        return Err("renderer report identity/quality/count differs".into());
+                    }
+                    let mut completed = json!({"rendered_frame_count":report.frame_count,"warnings":report.warnings,"analyses":report.analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy,"cap_supported":a.cap_supported})).collect::<Vec<_>>(),"build_analyses":report.build_analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy})).collect::<Vec<_>>(),"phase_seconds":report.phase_timings.iter().map(|(k,v)|(k.clone(),v.as_secs_f64())).collect::<std::collections::BTreeMap<_,_>>()});
+                    validate_report(&completed, &work_plan)?;
+                    for field in ["analyses", "build_analyses"] {
+                        let streamed: Vec<_> = state["frame_metadata"][field]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|r| work_plan.frames.iter().any(|f| r["key"] == json!(f.key)))
+                            .collect();
+                        let reported = completed[field].as_array().unwrap();
+                        if reported.len() != streamed.len()
+                            || streamed.iter().any(|r| !reported.contains(r))
+                        {
+                            return Err(
+                                "renderer final analysis differs from durable frame metadata"
+                                    .into(),
+                            );
+                        }
+                        completed[field] = state["frame_metadata"][field].clone();
+                    }
+                    Ok(completed)
+                })();
+                state["report"] = match validated {
+                    Ok(completed) => completed,
+                    Err(error) => return reject_report(&mut state, &manifest, &error.to_string()),
+                };
             }
             // Producer paths are still present until the entire render_sequence returns.
         } else {
@@ -681,6 +725,7 @@ pub(crate) fn encode_only_locked(
     protect(&request, &scene.legacy_scene)?;
     let mesh_hash = scene.mesh.snapshot_hash()?;
     let intent = retained_render_key(&scene.legacy_scene, &mesh_hash, &request)?;
+    let mut rejected = None;
     for entry in fs::read_dir(&request.job_dir)? {
         check(cancel)?;
         let directory = entry?.path();
@@ -698,8 +743,14 @@ pub(crate) fn encode_only_locked(
         if recipe["intent_key"] != intent
             || recipe["mesh_hash"] != mesh_hash
             || recipe["scene_hash"] != hash(&request.scene_path)?
-            || state["report"].is_null()
         {
+            continue;
+        }
+        if let Some(reason) = report_rejection(&state) {
+            rejected = Some(reason);
+            continue;
+        }
+        if state["report"].is_null() {
             continue;
         }
         let identity: BackendIdentity = serde_json::from_value(recipe["identity"].clone())?;
@@ -753,6 +804,9 @@ pub(crate) fn encode_only_locked(
         });
         let frames = compose(&request, &scene, &plan, &sink, &directory, cancel)?;
         return Ok(Some(publish(&request, tools, &frames, cancel, callback)?));
+    }
+    if let Some(reason) = rejected {
+        return Err(reason.into());
     }
     encode_legacy(tools, &request, &scene, cancel, callback)
 }

@@ -366,66 +366,78 @@ impl RenderBackend for BlenderBackend {
                 self.worker.cancel();
                 return Err("cancelled".into());
             }
-            if accepted.len() != group.len() {
-                return Err("Blender did not produce every planned frame".into());
-            }
-            let mut payload = completed["payload"].clone();
-            if let Some(path) = payload["details_path"].as_str() {
-                let path = fs::canonicalize(path)?;
-                if !path.starts_with(fs::canonicalize(directory.join("frames"))?) {
-                    return Err("Blender completion details outside owned scratch".into());
+            // A response returned: subsequent validation failures are known
+            // integrity rejections, not interrupted/no-report render attempts.
+            (|| -> Result<()> {
+                if accepted.len() != group.len() {
+                    return Err("Blender did not produce every planned frame".into());
                 }
-                let budget = context
-                    .limits
-                    .max_timeline_bytes
-                    .saturating_mul(8)
-                    .min(context.limits.host_bytes / 4);
-                payload = serde_json::from_slice(&crate::settings::read_bounded(&path, budget)?)?;
-            }
-            if let Some(warnings) = payload["warnings"].as_array() {
-                for warning in warnings {
-                    if let Some(warning) = warning.as_str()
-                        && !report.warnings.iter().any(|w| w == warning)
-                    {
-                        report.warnings.push(warning.into());
+                let mut payload = completed["payload"].clone();
+                if let Some(path) = payload["details_path"].as_str() {
+                    let path = fs::canonicalize(path)?;
+                    if !path.starts_with(fs::canonicalize(directory.join("frames"))?) {
+                        return Err("Blender completion details outside owned scratch".into());
                     }
+                    let budget = context
+                        .limits
+                        .max_timeline_bytes
+                        .saturating_mul(8)
+                        .min(context.limits.host_bytes / 4);
+                    payload =
+                        serde_json::from_slice(&crate::settings::read_bounded(&path, budget)?)?;
                 }
-            }
-            for key in ["prepare_seconds", "total_seconds"] {
-                if let Some(seconds) = payload[key].as_f64().filter(|n| n.is_finite() && *n >= 0.) {
-                    *report.phase_timings.entry(key.into()).or_default() +=
-                        Duration::try_from_secs_f64(seconds)
-                            .map_err(|_| "invalid Blender timing")?;
-                }
-            }
-            for field in ["frame_analysis", "frame_build_analysis"] {
-                if let Some(analyses) = payload[field].as_array() {
-                    if analyses.len() != group.len() {
-                        return Err("Blender analysis count differs from panel frame count".into());
-                    }
-                    for (frame, analysis) in group
-                        .iter()
-                        .zip(analyses)
-                        .filter(|(_, analysis)| !analysis.is_null())
-                    {
-                        if field == "frame_analysis" {
-                            report.analyses.insert(
-                                frame.key,
-                                SectionAnalysis::from_legacy(
-                                    analysis.clone(),
-                                    analysis["closed_input"] == true,
-                                )?,
-                            );
-                        } else {
-                            report
-                                .build_analyses
-                                .insert(frame.key, BuildAnalysis::from_legacy(analysis.clone())?);
+                if let Some(warnings) = payload["warnings"].as_array() {
+                    for warning in warnings {
+                        if let Some(warning) = warning.as_str()
+                            && !report.warnings.iter().any(|w| w == warning)
+                        {
+                            report.warnings.push(warning.into());
                         }
                     }
-                } else if !payload[field].is_null() {
-                    return Err("Blender analysis records must be arrays".into());
                 }
-            }
+                for key in ["prepare_seconds", "total_seconds"] {
+                    if let Some(seconds) =
+                        payload[key].as_f64().filter(|n| n.is_finite() && *n >= 0.)
+                    {
+                        *report.phase_timings.entry(key.into()).or_default() +=
+                            Duration::try_from_secs_f64(seconds)
+                                .map_err(|_| "invalid Blender timing")?;
+                    }
+                }
+                for field in ["frame_analysis", "frame_build_analysis"] {
+                    if let Some(analyses) = payload[field].as_array() {
+                        if analyses.len() != group.len() {
+                            return Err(
+                                "Blender analysis count differs from panel frame count".into()
+                            );
+                        }
+                        for (frame, analysis) in group
+                            .iter()
+                            .zip(analyses)
+                            .filter(|(_, analysis)| !analysis.is_null())
+                        {
+                            if field == "frame_analysis" {
+                                report.analyses.insert(
+                                    frame.key,
+                                    SectionAnalysis::from_legacy(
+                                        analysis.clone(),
+                                        analysis["closed_input"] == true,
+                                    )?,
+                                );
+                            } else {
+                                report.build_analyses.insert(
+                                    frame.key,
+                                    BuildAnalysis::from_legacy(analysis.clone())?,
+                                );
+                            }
+                        }
+                    } else if !payload[field].is_null() {
+                        return Err("Blender analysis records must be arrays".into());
+                    }
+                }
+                Ok(())
+            })()
+            .map_err(|error| RenderReportRejected(error.to_string()))?;
         }
         Ok(report)
     }

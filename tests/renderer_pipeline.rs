@@ -785,6 +785,238 @@ fn interrupted_paired_analysis_survives_retry_and_completed_frame_repair() {
     }
 }
 
+struct RejectedReportPixels {
+    pixels: AnalyzedPixels,
+    rejection: &'static str,
+}
+impl RenderBackend for RejectedReportPixels {
+    fn id(&self) -> BackendId {
+        self.pixels.id()
+    }
+    fn identity(&self) -> BackendIdentity {
+        self.pixels.identity()
+    }
+    fn assess(
+        &self,
+        _: &RenderSceneSnapshot,
+        _: &ExportRequest,
+    ) -> Vec<turninator::render::capabilities::FeatureSupport> {
+        vec![]
+    }
+    fn render_sequence(
+        &mut self,
+        scene: &RenderSceneSnapshot,
+        plan: &FramePlan,
+        ctx: &RenderContext<'_>,
+        emit: &mut dyn FnMut(FrameArtifact) -> Result<()>,
+    ) -> Result<RenderReport> {
+        let mut report = self.pixels.render_sequence(scene, plan, ctx, emit)?;
+        match self.rejection {
+            "identity" => report.identity.runtime_digest.push_str("-unexpected"),
+            "quality" => report.quality = turninator::render::BackendQuality::Eevee { samples: 1 },
+            "count" => report.frame_count += 1,
+            "missing" => report.analyses.clear(),
+            "malformed" => {
+                report.build_analyses.values_mut().next().unwrap().legacy["visible_layer"] =
+                    serde_json::json!(-8)
+            }
+            "disagreement" => {
+                report.analyses.values_mut().next().unwrap().legacy["remaining_volume_mm3"] =
+                    serde_json::json!(0.25)
+            }
+            "valid" => {}
+            _ => unreachable!(),
+        }
+        Ok(report)
+    }
+}
+
+fn rejected_report_cannot_recover(rejection: &'static str) {
+    for repair in [false, true] {
+        let (_scratch, mut request, mut scene, identity) = fixture();
+        request.layout = turninator::export::ExportLayout::SideBySide;
+        request.size = 32;
+        request.section = Some(turninator::export::SectionSpec {
+            axis: 0,
+            position_mm: 0.5,
+            keep_positive: true,
+            cap: true,
+        });
+        request.build_stage = Some(turninator::export::BuildStage { visible_layers: 1 });
+        scene.legacy_scene["solid_layer_tops_mm"] = serde_json::json!([1.]);
+        scene.metadata.solid_layer_tops_mm = vec![1.];
+        fs::write(
+            &request.scene_path,
+            serde_json::to_vec(&scene.legacy_scene).unwrap(),
+        )
+        .unwrap();
+        fs::write(&request.destination, b"original destination").unwrap();
+        let mut backend = RejectedReportPixels {
+            pixels: AnalyzedPixels {
+                identity,
+                fail_after: None,
+                emitted: vec![],
+                generation: 1,
+            },
+            rejection: "valid",
+        };
+        let directory = request.job_dir.join(
+            &pixel_recipe_key(
+                &scene.legacy_scene,
+                &scene.mesh.snapshot_hash().unwrap(),
+                &request,
+                &backend.identity(),
+            )
+            .unwrap()[..20],
+        );
+        let full = directory.join("host-frames/Full-0000.png");
+        let section = directory.join("host-frames/Section-0000.png");
+        if repair {
+            execute(&request, &scene, &mut backend, &AtomicBool::new(false)).unwrap();
+            fs::write(&section, b"corrupt").unwrap();
+        }
+        let good_before = repair.then(|| {
+            (
+                fs::read(&full).unwrap(),
+                fs::metadata(&full).unwrap().modified().unwrap(),
+            )
+        });
+        let destination = fs::read(&request.destination).unwrap();
+        backend.rejection = rejection;
+        assert!(execute(&request, &scene, &mut backend, &AtomicBool::new(false)).is_err());
+        let retained: Vec<_> = [&full, &section]
+            .into_iter()
+            .map(|p| {
+                (
+                    p,
+                    fs::read(p).unwrap(),
+                    fs::metadata(p).unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        if let Some((bytes, mtime)) = good_before {
+            assert_eq!(fs::read(&full).unwrap(), bytes);
+            assert_eq!(fs::metadata(&full).unwrap().modified().unwrap(), mtime);
+        }
+        assert_eq!(fs::read(&request.destination).unwrap(), destination);
+        backend.rejection = "valid";
+        backend.pixels.emitted.clear();
+        let recovery = encode_only(&tools(), &request, &AtomicBool::new(false), &mut |_| {});
+        let retry = execute(&request, &scene, &mut backend, &AtomicBool::new(false));
+        assert!(
+            retry.is_err(),
+            "{rejection}, repair={repair}: retry adopted rejected artifacts"
+        );
+        assert!(
+            recovery.is_err(),
+            "{rejection}, repair={repair}: recovery did not reject known invalid artifacts"
+        );
+        assert!(backend.pixels.emitted.is_empty());
+        assert_eq!(fs::read(&request.destination).unwrap(), destination);
+        if rejection == "identity" {
+            // A new frozen runtime identity owns a distinct artifact directory;
+            // the rejected original remains intact and cannot shadow good output.
+            backend
+                .pixels
+                .identity
+                .runtime_digest
+                .push_str("-new-runtime");
+            execute(&request, &scene, &mut backend, &AtomicBool::new(false)).unwrap();
+            assert_eq!(backend.pixels.emitted.len(), 2);
+            assert!(
+                encode_only(&tools(), &request, &AtomicBool::new(false), &mut |_| {})
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        for (path, bytes, mtime) in retained {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), mtime);
+        }
+    }
+}
+#[test]
+fn rejected_identity_remains_rejected_on_retry_and_recovery() {
+    rejected_report_cannot_recover("identity");
+}
+#[test]
+fn rejected_quality_remains_rejected_on_retry_and_recovery() {
+    rejected_report_cannot_recover("quality");
+}
+#[test]
+fn rejected_count_remains_rejected_on_retry_and_recovery() {
+    rejected_report_cannot_recover("count");
+}
+#[test]
+fn rejected_missing_analysis_remains_rejected_on_retry_and_recovery() {
+    rejected_report_cannot_recover("missing");
+}
+#[test]
+fn rejected_malformed_analysis_remains_rejected_on_retry_and_recovery() {
+    rejected_report_cannot_recover("malformed");
+}
+#[test]
+fn rejected_analysis_disagreement_remains_rejected_on_retry_and_recovery() {
+    rejected_report_cannot_recover("disagreement");
+}
+
+struct InvalidCompletionWorker(serde_json::Value);
+impl turninator::render::worker::WorkerTransport for InvalidCompletionWorker {
+    fn request(
+        &mut self,
+        request: serde_json::Value,
+        _: &AtomicBool,
+        emit: &mut dyn FnMut(serde_json::Value),
+    ) -> Result<serde_json::Value> {
+        let directory = std::path::Path::new(request["output_dir"].as_str().unwrap());
+        fs::create_dir_all(directory)?;
+        let path = directory.join("still.png");
+        image::RgbaImage::from_pixel(
+            request["width"].as_u64().unwrap() as u32,
+            request["height"].as_u64().unwrap() as u32,
+            image::Rgba([255; 4]),
+        )
+        .save(&path)?;
+        emit(serde_json::json!({"kind":"frame","payload":{"index":0,"path":path}}));
+        Ok(serde_json::json!({"kind":"complete","payload":{"frame_analysis":self.0}}))
+    }
+    fn cancel(&mut self) {}
+}
+#[test]
+fn rejected_blender_completion_remains_rejected_on_retry_and_recovery() {
+    for analysis in [
+        serde_json::json!("malformed final report"),
+        serde_json::json!([]),
+        serde_json::json!([{}]),
+    ] {
+        let (_scratch, mut request, scene, mut identity) = fixture();
+        request.selection = RenderSelection::for_backend(BackendId::BlenderEevee, true);
+        identity.backend = BackendId::BlenderEevee;
+        let mut selection = request.selection.clone();
+        selection.device = Some(identity.device.clone());
+        let mut backend = turninator::render::backends::blender::BlenderBackend::with_transport(
+            selection,
+            request.clone(),
+            identity,
+            Box::new(InvalidCompletionWorker(analysis)),
+        )
+        .unwrap();
+        fs::write(&request.destination, b"original destination").unwrap();
+        assert!(execute(&request, &scene, &mut backend, &AtomicBool::new(false)).is_err());
+        let recovery = encode_only(&tools(), &request, &AtomicBool::new(false), &mut |_| {});
+        let retry = execute(&request, &scene, &mut backend, &AtomicBool::new(false));
+        assert!(retry.is_err(), "retry adopted malformed Blender completion");
+        assert!(
+            recovery.is_err(),
+            "recovery did not reject malformed Blender completion"
+        );
+        assert_eq!(
+            fs::read(&request.destination).unwrap(),
+            b"original destination"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires installed FFmpeg/ffprobe; fake renderer exercises real GIF/MP4 encoding without Blender"]
 fn gif_and_mp4_share_verified_pixels_without_rerendering() {

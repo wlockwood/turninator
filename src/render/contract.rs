@@ -633,6 +633,18 @@ pub enum FrameArtifact {
         path: PathBuf,
     },
 }
+
+/// A completed backend response failed integrity validation. Unlike interruption
+/// or transport failure, accepted pixels from this batch must not be recovered.
+#[derive(Debug)]
+pub struct RenderReportRejected(pub String);
+impl std::fmt::Display for RenderReportRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for RenderReportRejected {}
+
 pub struct RenderContext<'a> {
     pub cancel: &'a AtomicBool,
     pub limits: &'a RenderLimits,
