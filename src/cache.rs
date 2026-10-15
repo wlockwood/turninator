@@ -146,7 +146,7 @@ impl CacheStore {
             .checked_add(reserve)
             .is_none_or(|v| v > budget)
         {
-            return Err("Job storage budget exceeded. Remove inactive jobs in Tools / storage or increase the budget.".into());
+            return Err("Job storage budget exceeded. Remove inactive jobs in Settings or increase the budget.".into());
         }
         Ok(())
     }

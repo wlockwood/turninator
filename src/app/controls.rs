@@ -27,44 +27,77 @@ pub(super) fn layer_settings(
 ) {
     let mut edited = false;
     if scene.import.layer_boundaries_mm.is_empty() {
-        for (label, value) in [
-            ("Layer (mm)", &mut scene.import.layer_height_mm),
-            ("First layer (mm)", &mut scene.import.first_layer_height_mm),
+        for (id, label, value, help) in [
+            (
+                "layer_height",
+                "Layer (mm)",
+                &mut scene.import.layer_height_mm,
+                help::LAYER_HEIGHT,
+            ),
+            (
+                "first_layer_height",
+                "First layer (mm)",
+                &mut scene.import.first_layer_height_mm,
+                help::FIRST_LAYER,
+            ),
         ] {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                edited |= ui
-                    .add(egui::DragValue::new(value).speed(0.01).range(0.02..=2.))
-                    .help(if label.starts_with("First") {
-                        help::FIRST_LAYER
-                    } else {
-                        help::LAYER_HEIGHT
-                    })
-                    .changed();
-            });
+            let label = ui.label(label).help(help);
+            edited |= numeric_field(
+                ui,
+                id,
+                egui::DragValue::new(value)
+                    .speed(0.01)
+                    .range(0.02..=2.)
+                    .suffix(" mm"),
+            )
+            .labelled_by(label.id)
+            .help(help)
+            .changed();
         }
     } else {
         ui.small("Layer heights come from the explicit adaptive boundaries.");
     }
+    clamp_groove_depth(scene);
+    if grooves {
+        groove_settings(ui, scene);
+    }
+    scene.print_settings_edited |= edited;
+    if ui.button("Reset print defaults").help("Restore this material's default layer heights and groove depth, and clear explicit adaptive boundaries. The source file is unchanged.").clicked() {
+        scene.reset_print_settings();
+    }
+}
+
+fn clamp_groove_depth(scene: &mut crate::presentation::SceneSettings) -> f64 {
     let max_groove = 0.25
         * scene
             .import
             .layer_height_mm
             .min(scene.import.first_layer_height_mm);
     scene.groove_depth_mm = scene.groove_depth_mm.min(max_groove);
-    if grooves {
-        edited |= ui
-            .add(
-                egui::Slider::new(&mut scene.groove_depth_mm, 0.0..=max_groove)
-                    .text("Groove depth (mm)"),
+    max_groove
+}
+
+pub(super) fn groove_settings(ui: &mut egui::Ui, scene: &mut crate::presentation::SceneSettings) {
+    let max_groove = clamp_groove_depth(scene);
+    let label = ui.label("Groove depth (mm)").help(help::GROOVE);
+    let response = ui
+        .push_id("groove_depth", |ui| {
+            ui.add_sized(
+                [ui.available_width(), ui.spacing().interact_size.y],
+                egui::Slider::new(&mut scene.groove_depth_mm, 0.0..=max_groove).suffix(" mm"),
             )
-            .help(help::GROOVE)
-            .changed();
-    }
-    scene.print_settings_edited |= edited;
-    if ui.button("Reset print defaults").help("Restore this material's default layer heights and groove depth, and clear explicit adaptive boundaries. The source file is unchanged.").clicked() {
-        scene.reset_print_settings();
-    }
+        })
+        .inner
+        .labelled_by(label.id)
+        .help(help::GROOVE);
+    scene.print_settings_edited |= response.changed();
+}
+
+fn numeric_field(ui: &mut egui::Ui, id: &str, value: egui::DragValue<'_>) -> egui::Response {
+    ui.push_id(id, |ui| {
+        ui.add_sized([ui.available_width(), ui.spacing().interact_size.y], value)
+    })
+    .inner
 }
 
 pub(super) struct OutputEditor<'a> {
@@ -82,7 +115,9 @@ pub(super) struct OutputEditor<'a> {
 impl OutputEditor<'_> {
     pub fn show(self, ui: &mut egui::Ui) -> bool {
         let previous = *self.format;
-        egui::ComboBox::from_label("Encoding")
+        let encoding_label = ui.label("Encoding").help(help::ENCODING);
+        egui::ComboBox::from_id_salt("output_encoding")
+            .width(ui.available_width())
             .selected_text(self.format.label())
             .show_ui(ui, |ui| {
                 for format in [
@@ -95,9 +130,14 @@ impl OutputEditor<'_> {
                         .help(help::encoding(format));
                 }
             })
+            .response
+            .labelled_by(encoding_label.id)
             .help(help::ENCODING);
         if *self.format == OutputFormat::Mp4 {
-            egui::ComboBox::from_label("MP4 codec")
+            let codec_help = "Choose the codec inside the MP4 file. H.264 favors broad compatibility; AV1 can reduce file size but needs a compatible encoder and player. Unavailable codecs produce an error rather than silently switching.";
+            let codec_label = ui.label("MP4 codec").help(codec_help);
+            egui::ComboBox::from_id_salt("output_mp4_codec")
+                .width(ui.available_width())
                 .selected_text(if *self.codec == VideoCodec::Av1 {
                     "AV1"
                 } else {
@@ -106,7 +146,7 @@ impl OutputEditor<'_> {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(self.codec, VideoCodec::H264, "H.264").help("A widely supported video format and a good default for sharing. Uses the configured FFmpeg H.264 encoder.");
                     ui.selectable_value(self.codec, VideoCodec::Av1, "AV1").help("An alternative video codec that can give smaller files. Encoding can take longer and some players may not support it. Requires AV1 support in your FFmpeg.");
-                }).help("Choose the codec inside the MP4 file. H.264 favors broad compatibility; AV1 can reduce file size but needs a compatible encoder and player. Unavailable codecs produce an error rather than silently switching.");
+                }).response.labelled_by(codec_label.id).help(codec_help);
         }
         if self.format.animated() {
             frame_rate_control(ui, self.frame_rate);
@@ -120,33 +160,60 @@ impl OutputEditor<'_> {
         } else {
             (self.still_engine, self.still_size, self.still_samples)
         };
-        egui::ComboBox::from_label("Renderer")
-            .selected_text(engine.as_str())
+        let renderer_label = ui.label("Renderer").help(help::RENDERER);
+        egui::ComboBox::from_id_salt(("output_renderer", self.format.animated()))
+            .width(ui.available_width())
+            .selected_text(if engine == "cycles" { "Cycles / OptiX" } else { "EEVEE (fast)" })
             .show_ui(ui, |ui| {
                 ui.selectable_value(engine, "eevee".into(), "EEVEE (fast)").help("Fast Blender rendering for lighting, color and layer-detail checks. Transmission and fine shadows are approximate.");
                 ui.selectable_value(engine, "cycles".into(), "Cycles / OptiX").help("Trace light for more realistic reflections, shadows and resin. Requires a supported NVIDIA OptiX GPU; there is no silent CPU fallback.");
-            }).help(help::RENDERER);
-        ui.horizontal(|ui| {
-            ui.label(if *self.format == OutputFormat::FourView {
+            }).response.labelled_by(renderer_label.id).help(help::RENDERER);
+        let size_help = if *self.format == OutputFormat::FourView {
+            "Width and height of the complete sheet, in pixels, from 256 to 8000. More pixels make small labels and edges clearer, but use more render time and storage."
+        } else {
+            "Output height and per-view width, in pixels, from 64 to 8000. Paired sections are twice as wide. Doubling this value creates roughly four times as many pixels, increasing render time and storage."
+        };
+        let size_label = ui
+            .label(if *self.format == OutputFormat::FourView {
                 "Sheet pixels"
             } else {
                 "Output pixels"
-            });
-            let minimum = if *self.format == OutputFormat::FourView {
-                256
-            } else {
-                64
-            };
-            *size = (*size).clamp(minimum, 8000);
-            ui.add(egui::DragValue::new(size).range(minimum..=8000).speed(64)).help(if *self.format == OutputFormat::FourView {
-                "Width and height of the complete sheet, in pixels, from 256 to 8000. More pixels make small labels and edges clearer, but use more render time and storage."
-            } else { "Output height and per-view width, in pixels, from 64 to 8000. Paired sections are twice as wide. Doubling this value creates roughly four times as many pixels, increasing render time and storage." });
-        });
-        ui.horizontal(|ui| {
-            ui.label("Samples");
-            ui.add(egui::DragValue::new(samples).range(1..=4096))
-                .help(help::SAMPLES);
-        });
+            })
+            .help(size_help);
+        let minimum = if *self.format == OutputFormat::FourView {
+            256
+        } else {
+            64
+        };
+        *size = (*size).clamp(minimum, 8000);
+        let quality_id = if self.format.animated() {
+            "animation_size"
+        } else {
+            "still_size"
+        };
+        numeric_field(
+            ui,
+            quality_id,
+            egui::DragValue::new(size)
+                .range(minimum..=8000)
+                .speed(64)
+                .suffix(" px"),
+        )
+        .labelled_by(size_label.id)
+        .help(size_help);
+        let samples_label = ui.label("Samples").help(help::SAMPLES);
+        let quality_id = if self.format.animated() {
+            "animation_samples"
+        } else {
+            "still_samples"
+        };
+        numeric_field(
+            ui,
+            quality_id,
+            egui::DragValue::new(samples).range(1..=4096),
+        )
+        .labelled_by(samples_label.id)
+        .help(help::SAMPLES);
         if self.format.supports_transparency() {
             ui.checkbox(self.transparent, "Transparent background").help("Save empty background pixels with an alpha channel instead of a studio floor. Useful for placing the PNG over another background. Material transparency is controlled separately by Resin clarity.");
         }
@@ -158,16 +225,17 @@ impl OutputEditor<'_> {
 }
 
 fn frame_rate_control(ui: &mut egui::Ui, frame_rate: &mut u32) -> egui::Response {
-    ui.horizontal(|ui| {
-        ui.label("Framerate (fps)").help(help::FRAME_RATE);
-        ui.add(
-            egui::DragValue::new(frame_rate)
-                .range(1..=crate::animation::MAX_FRAME_RATE)
-                .speed(1),
-        )
-        .help(help::FRAME_RATE)
-    })
-    .inner
+    let label = ui.label("Framerate (fps)").help(help::FRAME_RATE);
+    numeric_field(
+        ui,
+        "output_frame_rate",
+        egui::DragValue::new(frame_rate)
+            .range(1..=crate::animation::MAX_FRAME_RATE)
+            .speed(1)
+            .suffix(" fps"),
+    )
+    .labelled_by(label.id)
+    .help(help::FRAME_RATE)
 }
 
 #[cfg(test)]
@@ -256,22 +324,27 @@ mod tests {
         }
     }
 
-    fn rendered_text(format: OutputFormat, options: &mut OutputPreferences) -> Vec<(String, f32)> {
+    fn rendered_output(
+        format: OutputFormat,
+        options: &mut OutputPreferences,
+        width: f32,
+    ) -> egui::FullOutput {
         let ctx = egui::Context::default();
         let mut format = format;
         let mut engine = "eevee".into();
         let mut size = 960;
         let mut samples = 7;
-        let output = ctx.run_ui(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(600., 800.),
+                    egui::vec2(width, 1000.),
                 )),
                 ..Default::default()
             },
             |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
+                    ui.spacing_mut().interact_size.y = 32.;
                     OutputEditor {
                         format: &mut format,
                         codec: &mut options.video_codec,
@@ -288,7 +361,215 @@ mod tests {
                 });
             },
         );
-        text_output(output)
+        output.textures_delta.clear();
+        output
+    }
+
+    fn rendered_text(format: OutputFormat, options: &mut OutputPreferences) -> Vec<(String, f32)> {
+        text_output(rendered_output(format, options, 600.))
+    }
+
+    fn painted_texts(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => texts.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, texts);
+                    }
+                }
+                _ => (),
+            }
+        }
+        let mut texts = Vec::new();
+        for shape in &output.shapes {
+            collect(&shape.shape, &mut texts);
+        }
+        texts
+    }
+
+    #[test]
+    fn output_labels_are_above_their_controls_at_sidebar_widths() {
+        for width in [240., 380.] {
+            let output =
+                rendered_output(OutputFormat::Mp4, &mut OutputPreferences::default(), width);
+            let texts = painted_texts(&output);
+            for (label, value) in [
+                ("Encoding", "MP4 video"),
+                ("MP4 codec", "H.264"),
+                ("Framerate (fps)", "20"),
+                ("Renderer", "EEVEE (fast)"),
+                ("Output pixels", "960"),
+                ("Samples", "7"),
+            ] {
+                let label_rect = texts.iter().find(|(text, _)| text == label).unwrap().1;
+                let value_rect = texts
+                    .iter()
+                    .find(|(text, _)| text == value)
+                    .unwrap_or_else(|| panic!("missing visible value {value:?}: {texts:?}"))
+                    .1;
+                assert!(
+                    label_rect.bottom() < value_rect.top(),
+                    "{label} must sit above {value}"
+                );
+                assert!(value_rect.right() <= width, "{value} must fit the sidebar");
+            }
+        }
+    }
+
+    #[test]
+    fn output_combos_fill_available_width_and_inherit_control_height() {
+        for width in [240., 380.] {
+            let output =
+                rendered_output(OutputFormat::Mp4, &mut OutputPreferences::default(), width);
+            let texts = painted_texts(&output);
+            let mut boxes = Vec::new();
+            fn collect(shape: &egui::epaint::Shape, boxes: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::epaint::Shape::Rect(rect) => boxes.push(rect.rect),
+                    egui::epaint::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, boxes);
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            for shape in &output.shapes {
+                collect(&shape.shape, &mut boxes);
+            }
+            for value in ["MP4 video", "H.264", "EEVEE (fast)"] {
+                let text_rect = texts.iter().find(|(text, _)| text == value).unwrap().1;
+                let control = boxes
+                    .iter()
+                    .filter(|rect| rect.contains(text_rect.center()))
+                    .min_by(|a, b| a.area().total_cmp(&b.area()))
+                    .unwrap();
+                assert!(
+                    control.width() >= width - 20.,
+                    "{value} must fill the content width: {control:?}"
+                );
+                assert!(
+                    control.height() >= 32.,
+                    "{value} must inherit the parent control height"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn print_height_labels_are_above_values_with_units() {
+        let ctx = egui::Context::default();
+        let mut scene = crate::presentation::SceneSettings::default();
+        scene.import.first_layer_height_mm = 0.3;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            layer_settings(ui, &mut scene, true);
+        });
+        output.textures_delta.clear();
+        let texts = painted_texts(&output);
+        for (label, value) in [("Layer (mm)", "0.20"), ("First layer (mm)", "0.30")] {
+            let label_rect = texts.iter().find(|(text, _)| text == label).unwrap().1;
+            let value_rect = texts
+                .iter()
+                .find(|(text, _)| text == value)
+                .unwrap_or_else(|| panic!("missing value {value:?}: {texts:?}"))
+                .1;
+            assert!(
+                label_rect.bottom() < value_rect.top(),
+                "{label} must sit above its value"
+            );
+        }
+        assert!(
+            !scene.print_settings_edited,
+            "painting must preserve the saved print preferences"
+        );
+    }
+
+    #[test]
+    fn adaptive_print_settings_keep_grooves_below_the_adaptive_explanation() {
+        let mut scene = crate::presentation::SceneSettings::default();
+        scene.import.layer_boundaries_mm = vec![0., 0.2, 0.5];
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            layer_settings(ui, &mut scene, true);
+        });
+        let texts = text_output(output);
+        let explanation_y = texts
+            .iter()
+            .find(|(text, _)| text.contains("explicit adaptive boundaries"))
+            .unwrap()
+            .1;
+        let groove_y = texts
+            .iter()
+            .find(|(text, _)| text == "Groove depth (mm)")
+            .unwrap()
+            .1;
+        assert!(groove_y > explanation_y);
+        assert!(!texts.iter().any(|(text, _)| text == "Layer (mm)"));
+        assert!(!scene.print_settings_edited);
+    }
+
+    #[test]
+    fn standalone_grooves_enforce_layer_bounds_and_record_edits() {
+        let ctx = egui::Context::default();
+        let mut scene = crate::presentation::SceneSettings::default();
+        scene.import.layer_height_mm = 0.12;
+        scene.import.first_layer_height_mm = 0.08;
+        scene.groove_depth_mm = 0.4;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            groove_settings(ui, &mut scene);
+        });
+        output.textures_delta.clear();
+        assert_eq!(scene.groove_depth_mm, 0.02);
+        assert!(!scene.print_settings_edited);
+        let texts = painted_texts(&output);
+        assert!(texts.iter().any(|(text, _)| text == "Groove depth (mm)"));
+        assert!(!texts.iter().any(|(text, _)| text == "Layer (mm)"
+            || text == "First layer (mm)"
+            || text == "Reset print defaults"));
+        fn slider_rail(shape: &egui::epaint::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::epaint::Shape::Rect(rect)
+                    if rect.rect.height() <= 8. && rect.rect.width() > 40. =>
+                {
+                    Some(rect.rect)
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(slider_rail),
+                _ => None,
+            }
+        }
+        let rail = output
+            .shapes
+            .iter()
+            .find_map(|shape| slider_rail(&shape.shape))
+            .unwrap();
+        let pos = rail.center();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                groove_settings(ui, &mut scene);
+            },
+        );
+        output.textures_delta.clear();
+        assert!(scene.groove_depth_mm > 0. && scene.groove_depth_mm < 0.02);
+        assert!(
+            scene.print_settings_edited,
+            "editing grooves must preserve the custom print settings on save"
+        );
     }
 
     fn text_output(mut output: egui::FullOutput) -> Vec<(String, f32)> {
@@ -385,7 +666,7 @@ mod tests {
         ] {
             let texts = rendered_text(format, &mut options);
             assert_eq!(
-                texts.iter().any(|(text, _)| text == "cycles"),
+                texts.iter().any(|(text, _)| text == "Cycles / OptiX"),
                 !format.animated()
             );
             assert_eq!(
