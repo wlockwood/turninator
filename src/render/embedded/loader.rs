@@ -356,8 +356,10 @@ mod platform {
             let n = scene.positions_mm.len();
             let t = scene.triangles.len();
             let meta = scene.metadata;
-            if n > self.limits.max_source_vertices.min(2_000_000)
-                || t > self.limits.max_source_triangles.min(4_000_000)
+            // These are already-realized/aligned spans. Configurable source
+            // limits are enforced before realization, not on derived geometry.
+            if n > crate::mesh::MAX_VERTICES
+                || t > crate::mesh::MAX_TRIANGLES
                 || scene.normals.len() != n
                 || scene.build_positions_mm.len() != n
                 || scene.triangle_materials.len() != t

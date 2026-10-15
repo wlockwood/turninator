@@ -124,6 +124,11 @@ not evidence of actual runtime selection. `limits` has unsigned integer fields
 `max_source_vertices`, `max_source_triangles`, `max_scene_bytes`,
 `max_output_side`, `host_bytes`, `gpu_bytes`, `scratch_bytes`. The duplicate C
 config budget fields must match; no silent budget expansion is allowed.
+`max_source_vertices` and `max_source_triangles` belong to upstream source-snapshot
+validation. They must not be reapplied to already-realized upload spans, which may
+expand through vertex alignment, generated surfaces or section caps. At this ABI
+boundary the explicit hard derived capacities remain `Mesh::MAX_VERTICES`
+(2,000,000) and `Mesh::MAX_TRIANGLES` (4,000,000), alongside checked byte budgets.
 
 Frame quality JSON is `{schema_version:1, quality:{...}}`. Filament quality is
 `{kind:"filament", aa:"low"|"medium"|"high", shadows:"low"|"medium"|"high"}`.

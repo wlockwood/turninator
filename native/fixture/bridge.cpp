@@ -2,6 +2,7 @@
 #include "turninator_renderer.h"
 #include <windows.h>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -42,6 +43,15 @@ template<class F> int32_t guarded(tn_context p, tn_error *e, F f) noexcept {
 bool json(const uint8_t *p,uint64_t size) { return size <= 1048576 && (size==0 || p); }
 template<class T> void copy(std::vector<T>& out,const T* p,size_t n) {
     if(n) out.assign(p,p+n); else out.clear();
+}
+uint32_t matrix_fingerprint(const double *matrix) noexcept {
+    uint32_t hash=2166136261u;
+    for(size_t component=0;component<16;++component) {
+        const auto bits=std::bit_cast<uint64_t>(matrix[component]);
+        for(unsigned byte=0;byte<8;++byte)
+            hash=(hash^static_cast<uint8_t>(bits>>(byte*8)))*16777619u;
+    }
+    return hash;
 }
 }
 extern "C" {
@@ -147,8 +157,16 @@ int32_t tn_renderer_read_rgba8(tn_context p,uint8_t *pixels,uint64_t capacity,tn
         *out={sizeof(tn_image),TN_ABI_VERSION,c.width,c.height,bytes};
         if(capacity<bytes) return error(e,TN_CAPACITY,"pixel capacity too small");
         if(!pixels) return error(e,TN_INVALID_ARGUMENT,"null pixels");
-        const uint8_t pattern[16]={static_cast<uint8_t>(c.frame.sample_seed),0,0,255,
-            0,255,0,static_cast<uint8_t>(c.frame.transparent?128:255),0,0,255,255,
+        // Test-only transport evidence, not rendering: expose all 16 received
+        // double bit patterns in spare channels, relative to identity so the
+        // ordinary fixture image remains unchanged. A dropped/transposed matrix
+        // changes these bytes for an asymmetric input.
+        const double identity[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        const auto fingerprint=matrix_fingerprint(c.frame.model_to_world)^matrix_fingerprint(identity);
+        const uint8_t pattern[16]={static_cast<uint8_t>(c.frame.sample_seed),
+            static_cast<uint8_t>(fingerprint),static_cast<uint8_t>(fingerprint>>8),255,
+            static_cast<uint8_t>(fingerprint>>16),255,static_cast<uint8_t>(fingerprint>>24),
+            static_cast<uint8_t>(c.frame.transparent?128:255),0,0,255,255,
             0,0,0,static_cast<uint8_t>(c.frame.transparent?0:255)};
         for(uint64_t i=0;i<bytes;++i) pixels[i]=pattern[i%16];
         c.state=TN_IDLE; return TN_OK;

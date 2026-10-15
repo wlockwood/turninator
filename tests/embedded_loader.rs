@@ -318,14 +318,18 @@ fn describes_actual_runtime_and_rejects_incompatible_selected_device() {
 }
 
 #[test]
-fn frame_transparency_seed_and_row_major_translation_cross_the_abi() {
+fn frame_transparency_seed_and_asymmetric_row_major_matrix_cross_the_abi() {
     let library = EmbeddedLibrary::load_fixture(&fixture("tn_fixture.dll")).unwrap();
     let mut context = library.create(&config()).unwrap();
     upload(&mut context, 1);
     let mut f = frame(1);
     f.transparent = false;
     f.sample_seed = 23;
-    f.model_to_world[3] = 10.;
+    // Exact 90-degree rotation plus asymmetric translation. The fixture embeds a
+    // fingerprint of all 16 received doubles in otherwise-zero pixel channels.
+    f.model_to_world = [
+        0., -1., 0., 7., 1., 0., 0., 19., 0., 0., 1., 37., 0., 0., 0., 1.,
+    ];
     context.begin_frame(&f).unwrap();
     context.poll().unwrap();
     context.poll().unwrap();
@@ -333,8 +337,65 @@ fn frame_transparency_seed_and_row_major_translation_cross_the_abi() {
     context.read_pixels(&mut bytes).unwrap();
     assert_eq!(
         bytes,
-        [23, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255]
+        [
+            23, 129, 172, 255, 163, 255, 182, 255, 0, 0, 255, 255, 0, 0, 0, 255
+        ]
     );
+}
+
+#[test]
+fn realized_geometry_expansion_does_not_reapply_configurable_source_limits() {
+    // A valid source triangle can become four triangles with split/aligned
+    // vertices downstream. Source snapshot validation belongs upstream; this
+    // test passes only already-realized geometry to the ABI host.
+    let source = turninator::mesh::Mesh {
+        positions: vec![[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]],
+        triangles: vec![[0, 1, 2]],
+    };
+    let positions = [
+        [0., 0., 0.],
+        [1., 0., 0.],
+        [0., 1., 0.],
+        [1., 0., 0.],
+        [2., 0., 0.],
+        [1., 1., 0.],
+        [0., 1., 0.],
+        [1., 1., 0.],
+        [0., 2., 0.],
+        [1., 0., 0.],
+        [1., 1., 0.],
+        [0., 1., 0.],
+    ];
+    let triangles = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]];
+    let mut meta = metadata();
+    meta.reference_bounds_mm = source.bounds().unwrap();
+    let library = EmbeddedLibrary::load_fixture(&fixture("tn_fixture.dll")).unwrap();
+    for small_vertex_limit in [true, false] {
+        let mut cfg = config();
+        if small_vertex_limit {
+            cfg.limits.max_source_vertices = source.positions.len();
+        } else {
+            cfg.limits.max_source_triangles = source.triangles.len();
+        }
+        let mut context = library.create(&cfg).unwrap();
+        context
+            .upload_scene(&SceneUpload {
+                revision: 41,
+                positions_mm: &positions,
+                normals: &[[0., 0., 1.]; 12],
+                build_positions_mm: &positions,
+                triangles: &triangles,
+                triangle_materials: &[0; 4],
+                metadata: &meta,
+            })
+            .unwrap();
+        context.begin_frame(&frame(41)).unwrap();
+        context.poll().unwrap();
+        context.poll().unwrap();
+        let mut pixels = [0; 16];
+        context.read_pixels(&mut pixels).unwrap();
+        assert_eq!(pixels[0..4], [255, 0, 0, 255]);
+    }
 }
 
 #[test]
