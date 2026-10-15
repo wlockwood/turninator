@@ -415,7 +415,21 @@ impl Studio {
             turntable_angle_degrees: if sheet { 0. } else { self.timeline_angle },
         }
     }
+    fn render_event_matches(
+        &self,
+        id: u64,
+        revision: u64,
+        engine: crate::render::BackendId,
+    ) -> bool {
+        self.busy == Some(id)
+            && revision == self.revision
+            && self
+                .last_task
+                .as_ref()
+                .is_some_and(|(request, _, _, _, _)| request.selection.backend == engine)
+    }
     fn changed(&mut self) {
+        self.render.cancel_preview();
         self.revision += 1;
         self.changed_at = Instant::now();
     }
@@ -768,7 +782,7 @@ impl Studio {
         }
         if let Some((request, scene, mesh, preview, revision)) = self.last_task.clone() {
             self.next_job += 1;
-            match self.render.submit(RenderTask {
+            match self.render.submit_recovery(RenderTask {
                 id: self.next_job,
                 revision,
                 mesh,
@@ -1193,7 +1207,12 @@ impl Studio {
         }
         while let Ok(event) = self.render.events.try_recv() {
             match event {
-                RenderEvent::Progress { id, event } if self.busy == Some(id) => match event {
+                RenderEvent::Progress {
+                    id,
+                    revision,
+                    event,
+                    engine,
+                } if self.render_event_matches(id, revision, engine) => match event {
                     JobEvent::Progress {
                         completed,
                         total,
@@ -1208,7 +1227,8 @@ impl Studio {
                     revision,
                     preview,
                     result,
-                } if self.busy == Some(id) => {
+                    engine,
+                } if self.render_event_matches(id, revision, engine) => {
                     self.busy = None;
                     self.record_result("completed", None);
                     self.status = format!(
@@ -1241,10 +1261,20 @@ impl Studio {
                         });
                     });
                 }
-                RenderEvent::Failed { id, message } if self.busy == Some(id) => {
+                RenderEvent::Failed {
+                    id,
+                    message,
+                    revision,
+                    engine,
+                } if self.render_event_matches(id, revision, engine) => {
                     self.busy = None;
                     self.record_result("failed", Some(message.clone()));
                     self.error = Some(message);
+                }
+                RenderEvent::Completed { id, .. } | RenderEvent::Failed { id, .. }
+                    if self.busy == Some(id) =>
+                {
+                    self.busy = None;
                 }
                 _ => {}
             }

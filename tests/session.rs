@@ -92,7 +92,7 @@ fn render_actor_rejects_storage_budget_before_starting_a_worker_or_touching_outp
         })
         .unwrap();
     match service.events.recv_timeout(Duration::from_secs(2)).unwrap() {
-        RenderEvent::Failed { id, message } => {
+        RenderEvent::Failed { id, message, .. } => {
             assert_eq!(id, 42);
             assert!(message.contains("budget"));
         }

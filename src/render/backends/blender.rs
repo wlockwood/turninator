@@ -103,6 +103,21 @@ impl RenderBackend for BlenderBackend {
     fn identity(&self) -> BackendIdentity {
         self.identity.clone()
     }
+    fn configure(&mut self, request: &ExportRequest) -> Result<()> {
+        validate_quality(&request.selection)?;
+        if request.selection.backend != self.selection.backend
+            || request.selection.quality != self.selection.quality
+            || request
+                .selection
+                .device
+                .as_ref()
+                .is_some_and(|d| d != &self.identity.device)
+        {
+            return Err("request differs from immutable prepared Blender selection".into());
+        }
+        self.request = request.clone();
+        Ok(())
+    }
     fn render_sequence(
         &mut self,
         scene: &RenderSceneSnapshot,
@@ -117,7 +132,7 @@ impl RenderBackend for BlenderBackend {
             return Err("render context differs from immutable prepared Blender selection".into());
         }
         if frames.frames.is_empty()
-            || frames.frames.len() > context.limits.max_frames as usize
+            || frames.frames.len() > context.limits.max_frames as usize * 4
             || !context.scratch_dir.is_absolute()
             || scene.mesh.positions.len() > context.limits.max_source_vertices
             || scene.mesh.triangles.len() > context.limits.max_source_triangles
@@ -245,7 +260,7 @@ impl RenderBackend for BlenderBackend {
                 "output_dir":directory.join("frames"),"engine":self.id().legacy_blender_engine()?,
                 "mode":if count>1 {"turntable"} else {"still"},"size":first.width,
                 "width":first.width,"height":first.height,"samples":self.selection.blender_samples()?,
-                "frame_count":count,"frame_rate":self.request.frame_rate,"transparent":self.request.transparent,
+                "frame_count":count,"frame_rate":self.request.frame_rate,"transparent":frames.transparent,
                 "start_angle_degrees":first.angle_degrees,"reuse_verified_frames":false});
             if states_needed {
                 let states: Vec<Value> = group.iter().map(|frame| Ok(json!({"camera":if camera_changed {camera_spec(&frame.camera)?}else{Value::Null},

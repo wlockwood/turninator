@@ -474,7 +474,10 @@ fn reset_incompatible_frames(request: &mut Value, job_dir: &Path) -> Result<()> 
 /// The enclosing native recipe binds geometry, scene, renderer scripts and the
 /// Blender executable. Check the worker metadata and decode every PNG before
 /// bypassing Blender; malformed or partial entries use its verified retry path.
-fn inspect_retained_frames(request: &Value, cancel: &AtomicBool) -> Result<(Option<Value>, u32)> {
+pub(crate) fn inspect_retained_frames(
+    request: &Value,
+    cancel: &AtomicBool,
+) -> Result<(Option<Value>, u32)> {
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -1248,7 +1251,7 @@ mod retained_frame_tests {
     }
 }
 
-fn preflight_storage(directory: &Path, estimated: u64) -> Result<()> {
+pub(crate) fn preflight_storage(directory: &Path, estimated: u64) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -1470,7 +1473,7 @@ fn diagram_point_measurements(
     Ok(output)
 }
 
-fn diagram_stage_visibility(
+pub(crate) fn diagram_stage_visibility(
     mesh: &crate::mesh::Mesh,
     scene: &Value,
     stage: Option<BuildStage>,
@@ -1515,7 +1518,7 @@ fn diagram_stage_visibility(
     Ok(Some(visible))
 }
 
-fn diagram_panel_scene(scene: &Value, camera: &Value) -> Value {
+pub(crate) fn diagram_panel_scene(scene: &Value, camera: &Value) -> Value {
     let mut panel = scene.clone();
     panel["display_rotation_degrees"] = json!([0., 0., 0.]);
     panel["camera"] = camera.clone();
@@ -1680,7 +1683,11 @@ fn dimension_line(image: &mut image::RgbaImage, a: [i32; 2], b: [i32; 2]) {
     }
 }
 
-fn draw_dimension(panel: &mut image::RgbaImage, dimension: DiagramDimension, span_mm: f64) {
+pub(crate) fn draw_dimension(
+    panel: &mut image::RgbaImage,
+    dimension: DiagramDimension,
+    span_mm: f64,
+) {
     let pixels_per_mm = panel.height() as f64 / span_mm;
     let left = (panel.width() as f64 * 0.5 + dimension.min_mm[0] * pixels_per_mm).round() as i32;
     let right = (panel.width() as f64 * 0.5 + dimension.max_mm[0] * pixels_per_mm).round() as i32;
@@ -1746,7 +1753,14 @@ fn draw_dimension(panel: &mut image::RgbaImage, dimension: DiagramDimension, spa
     image::imageops::overlay(panel, &label, i64::from(x), i64::from(y));
 }
 
-fn draw_label(image: &mut image::RgbaImage, text: &str, x: u32, y: u32, width: u32, height: u32) {
+pub(crate) fn draw_label(
+    image: &mut image::RgbaImage,
+    text: &str,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
     let scale = (height / 11).max(1);
     let text_width = text.len() as u32 * 6 * scale;
     let left = x + (width.saturating_sub(text_width)) / 2;

@@ -105,6 +105,68 @@ fn plan(scene: &RenderSceneSnapshot) -> FramePlan {
 }
 
 #[test]
+fn prepared_blender_rebinds_job_rate_timing_and_alpha_without_new_transport() {
+    let scene = fixture();
+    let mut selection = RenderSelection::for_backend(BackendId::BlenderEevee, false);
+    selection.device = Some("test".into());
+    let identity = identity(&selection);
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let initial = ExportRequest {
+        selection: selection.clone(),
+        frame_rate: 20,
+        transparent: false,
+        ..Default::default()
+    };
+    let mut backend = BlenderBackend::with_transport(
+        selection.clone(),
+        initial.clone(),
+        identity.clone(),
+        Box::new(RecordingWorker {
+            requests: requests.clone(),
+            cancel_during_request: false,
+        }),
+    )
+    .unwrap();
+    let mut rebound = initial;
+    rebound.kind = ExportKind::Still;
+    rebound.transparent = true;
+    rebound.frame_rate = 30;
+    rebound.turntable_timing = Some(turninator::animation::TurntableTiming {
+        seconds_per_turn: 2.,
+        duration_seconds: 0.3,
+    });
+    backend.configure(&rebound).unwrap();
+    let scratch = turninator::export::encode::Scratch::new(&std::env::temp_dir()).unwrap();
+    let cancel = AtomicBool::new(false);
+    let limits = RenderLimits::default();
+    let context = RenderContext {
+        cancel: &cancel,
+        limits: &limits,
+        scratch_dir: &scratch.0,
+        selection: &selection,
+        identity: &identity,
+        pixel_recipe_key: "test",
+        job_id: 9,
+        revision: 4,
+        progress: &|_| {},
+    };
+    let mut frames = plan(&scene);
+    frames.transparent = true;
+    for (index, frame) in frames.frames.iter_mut().enumerate() {
+        frame.angle_degrees = index as f64 * 6.;
+    }
+    backend
+        .render_sequence(&scene, &frames, &context, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(requests.borrow().len(), 1);
+    assert_eq!(requests.borrow()[0]["frame_rate"], 30);
+    assert_eq!(requests.borrow()[0]["transparent"], true);
+    assert_eq!(requests.borrow()[0]["seconds_per_turn"], 2.);
+    rebound.selection.device = Some("other".into());
+    assert!(backend.configure(&rebound).is_err());
+}
+
+#[test]
 fn blender_adapter_keeps_batch_request_and_owned_cancel() {
     for backend in [BackendId::BlenderEevee, BackendId::BlenderCycles] {
         let scene = fixture();

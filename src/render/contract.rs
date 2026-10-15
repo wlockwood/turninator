@@ -463,7 +463,7 @@ pub struct FrameKey {
     pub index: u32,
     pub panel: RenderPanel,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrameSpec {
     pub key: FrameKey,
     pub camera: RenderCamera,
@@ -478,6 +478,8 @@ pub struct FrameSpec {
 pub struct FramePlan {
     pub frames: Vec<FrameSpec>,
     pub repeat_of: BTreeMap<FrameKey, FrameKey>,
+    /// Whether completed producer pixels may contain nonopaque alpha.
+    pub transparent: bool,
 }
 #[derive(Clone, Debug)]
 pub struct SectionAnalysis {
@@ -710,6 +712,22 @@ pub trait RenderBackend {
     fn id(&self) -> BackendId;
     fn assess(&self, scene: &RenderSceneSnapshot, request: &ExportRequest) -> Vec<FeatureSupport>;
     fn identity(&self) -> BackendIdentity;
+    /// Rebind job settings without rebuilding an owner-thread runtime context.
+    /// Device and quality changes require preparation again.
+    fn configure(&mut self, request: &ExportRequest) -> Result<()> {
+        request.selection.validate()?;
+        let identity = self.identity();
+        if request.selection.backend != self.id()
+            || request
+                .selection
+                .device
+                .as_ref()
+                .is_some_and(|d| d != &identity.device)
+        {
+            return Err("request differs from prepared renderer identity".into());
+        }
+        Ok(())
+    }
     fn render_sequence(
         &mut self,
         scene: &RenderSceneSnapshot,

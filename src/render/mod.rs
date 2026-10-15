@@ -4,6 +4,7 @@ pub mod contract;
 pub mod registry;
 pub mod requirements;
 pub mod selection;
+pub mod sequence;
 pub mod worker;
 pub use selection::{BackendId, BackendQuality, RenderSelection, RendererPreferences};
 pub use worker::{ToolPaths, WorkerClient};

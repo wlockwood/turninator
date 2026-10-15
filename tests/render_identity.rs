@@ -19,6 +19,59 @@ fn key(scene: &Value, request: &ExportRequest) -> String {
 }
 
 #[test]
+fn concrete_pixel_identity_invalidates_runtime_device_color_and_denoiser() {
+    use turninator::{
+        export::identity::pixel_recipe_key,
+        render::{BackendId, contract::BackendIdentity},
+    };
+    let request = ExportRequest::default();
+    let identity = BackendIdentity {
+        backend: BackendId::BlenderEevee,
+        adapter_recipe_version: 1,
+        runtime_digest: "runtime".into(),
+        bridge_digest: None,
+        shader_digest: None,
+        material_digest: None,
+        color_digest: "color".into(),
+        denoiser_digest: None,
+        device: "gpu".into(),
+        api: "api".into(),
+        driver: "driver".into(),
+    };
+    let key = |r: &ExportRequest, i: &BackendIdentity| {
+        pixel_recipe_key(&scene(), &"a".repeat(64), r, i).unwrap()
+    };
+    let expected = key(&request, &identity);
+    let mut codec = request.clone();
+    codec.kind = ExportKind::Mp4;
+    codec.video_codec = VideoCodec::Av1;
+    assert_eq!(expected, key(&codec, &identity));
+    for field in [
+        "runtime_digest",
+        "device",
+        "color_digest",
+        "denoiser_digest",
+        "shader_digest",
+        "material_digest",
+        "driver",
+        "api",
+        "bridge_digest",
+    ] {
+        let mut value = serde_json::to_value(&identity).unwrap();
+        value[field] = json!("changed");
+        let changed = serde_json::from_value(value).unwrap();
+        assert_ne!(expected, key(&request, &changed), "{field}");
+    }
+    let mut quality = request.clone();
+    *quality.selection.quality.samples_mut().unwrap() += 1;
+    assert_ne!(expected, key(&quality, &identity));
+    let mut backend = request.clone();
+    backend.selection =
+        turninator::render::RenderSelection::for_backend(BackendId::BlenderCycles, true);
+    assert!(pixel_recipe_key(&scene(), &"a".repeat(64), &backend, &identity).is_err());
+}
+
+#[test]
 fn animation_frames_are_shared_across_formats_codecs_and_output_paths() {
     let original = ExportRequest::default();
     let expected = key(&scene(), &original);
