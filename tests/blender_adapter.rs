@@ -105,6 +105,240 @@ fn plan(scene: &RenderSceneSnapshot) -> FramePlan {
 }
 
 #[test]
+fn prepared_v2_uploads_static_geometry_once_and_transports_denoise_false() {
+    let scene = fixture();
+    let mut selection = RenderSelection::for_backend(BackendId::BlenderCycles, false);
+    selection.device = Some("test".into());
+    selection.quality = BackendQuality::Cycles {
+        samples: 8,
+        denoise: false,
+    };
+    let mut identity = identity(&selection);
+    identity.adapter_recipe_version = 2;
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let mut adapter = BlenderBackend::with_transport(
+        selection.clone(),
+        ExportRequest {
+            selection: selection.clone(),
+            ..Default::default()
+        },
+        identity.clone(),
+        Box::new(RecordingWorker {
+            requests: requests.clone(),
+            cancel_during_request: false,
+        }),
+    )
+    .unwrap();
+    let scratch = turninator::export::encode::Scratch::new(&std::env::temp_dir()).unwrap();
+    let cancel = AtomicBool::new(false);
+    let limits = RenderLimits::default();
+    let context = RenderContext {
+        cancel: &cancel,
+        limits: &limits,
+        scratch_dir: &scratch.0,
+        selection: &selection,
+        identity: &identity,
+        pixel_recipe_key: "test",
+        job_id: 1,
+        revision: 1,
+        progress: &|_| {},
+    };
+    adapter
+        .render_sequence(&scene, &plan(&scene), &context, &mut |_| Ok(()))
+        .unwrap();
+    let requests = requests.borrow();
+    let request = &requests[0];
+    assert_eq!(request["geometry_mode"], "prepared-realization-v1");
+    assert_eq!(request["denoise"], false);
+    assert_eq!(request["mode"], "turntable");
+    assert!(request.get("frame_states_path").is_none());
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(request["prepared_manifest_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["revisions"].as_array().unwrap().len(), 1);
+    assert_eq!(manifest["frames"], json!([0, 0, 0, 0, 0, 0, 0, 0]));
+}
+
+#[test]
+fn prepared_v2_realizes_only_changed_stages_and_emits_canonical_metadata_before_pixels() {
+    let mut scene = fixture();
+    scene.metadata.solid_layer_tops_mm = vec![0.5, 1.];
+    let mut frames = plan(&scene);
+    frames.frames.truncate(6);
+    for (i, frame) in frames.frames.iter_mut().enumerate() {
+        frame.visible_layers = Some((i / 2) as u32);
+    }
+    let mut selection = RenderSelection::for_backend(BackendId::BlenderEevee, false);
+    selection.device = Some("test".into());
+    let mut identity = identity(&selection);
+    identity.adapter_recipe_version = 2;
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let mut adapter = BlenderBackend::with_transport(
+        selection.clone(),
+        ExportRequest {
+            selection: selection.clone(),
+            ..Default::default()
+        },
+        identity.clone(),
+        Box::new(RecordingWorker {
+            requests: requests.clone(),
+            cancel_during_request: false,
+        }),
+    )
+    .unwrap();
+    let scratch = turninator::export::encode::Scratch::new(&std::env::temp_dir()).unwrap();
+    let cancel = AtomicBool::new(false);
+    let limits = RenderLimits::default();
+    let context = RenderContext {
+        cancel: &cancel,
+        limits: &limits,
+        scratch_dir: &scratch.0,
+        selection: &selection,
+        identity: &identity,
+        pixel_recipe_key: "test",
+        job_id: 1,
+        revision: 1,
+        progress: &|_| {},
+    };
+    let mut artifacts = Vec::new();
+    let report = adapter
+        .render_sequence(&scene, &frames, &context, &mut |a| {
+            artifacts.push(a);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(report.build_analyses.len(), 6);
+    for pair in artifacts.chunks_exact(2) {
+        assert!(matches!(
+            pair[0],
+            FrameArtifact::Metadata { build: Some(_), .. }
+        ));
+        assert!(matches!(pair[1], FrameArtifact::Png { .. }));
+    }
+    let requests = requests.borrow();
+    let request = &requests[0];
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(request["prepared_manifest_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["revisions"].as_array().unwrap().len(), 3);
+    assert_eq!(manifest["frames"], json!([0, 0, 1, 1, 2, 2]));
+    assert!(request.get("build_stage").is_none());
+}
+
+#[test]
+#[ignore = "actual Blender GPU static batch, changing geometry and Cycles denoising; writes new evidence directory"]
+fn real_prepared_worker_batch_dynamic_and_cycles_flags() {
+    use turninator::render::{ToolPaths, registry::BackendRegistry};
+    let root = std::path::PathBuf::from(std::env::var("TN_PREPARED_WORKER_DIR").unwrap());
+    std::fs::create_dir(&root).unwrap();
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts/renderers/prepared-v1/solid-full");
+    let mut spec: Value =
+        serde_json::from_slice(&std::fs::read(source.join("scene.json")).unwrap()).unwrap();
+    spec["solid_layer_tops_mm"] = json!([5., 10.]);
+    let mesh = Arc::new(Mesh::read_binary(&source.join("source.bin")).unwrap());
+    let scene = snapshot_scene(mesh, spec).unwrap();
+    let cancel = AtomicBool::new(false);
+    let limits = RenderLimits::default();
+    let tools = ToolPaths::default();
+    let mut evidence = Vec::new();
+    for (name, backend, denoise) in [
+        ("static", BackendId::BlenderEevee, true),
+        ("dynamic", BackendId::BlenderEevee, true),
+        ("cycles-false", BackendId::BlenderCycles, false),
+        ("cycles-true", BackendId::BlenderCycles, true),
+    ] {
+        let directory = root.join(name);
+        std::fs::create_dir(&directory).unwrap();
+        let mut selection = RenderSelection::for_backend(backend, false);
+        selection.quality = if backend == BackendId::BlenderCycles {
+            BackendQuality::Cycles {
+                samples: 16,
+                denoise,
+            }
+        } else {
+            BackendQuality::Eevee { samples: 8 }
+        };
+        let request = ExportRequest {
+            selection: selection.clone(),
+            size: 128,
+            ..Default::default()
+        };
+        let mut prepared = BackendRegistry::default()
+            .prepare(&selection, &scene, &request, &tools, &limits, &cancel)
+            .unwrap();
+        assert_eq!(prepared.identity.adapter_recipe_version, 2);
+        let context = RenderContext {
+            cancel: &cancel,
+            limits: &limits,
+            scratch_dir: &directory,
+            selection: &prepared.effective_selection,
+            identity: &prepared.identity,
+            pixel_recipe_key: "qualification",
+            job_id: 1,
+            revision: 1,
+            progress: &|_| {},
+        };
+        let mut frames = plan(&scene);
+        for frame in &mut frames.frames {
+            frame.width = 128;
+            frame.height = 128;
+        }
+        if name == "dynamic" {
+            frames.frames.truncate(6);
+            for (i, frame) in frames.frames.iter_mut().enumerate() {
+                frame.visible_layers = Some((i / 2) as u32);
+                frame.angle_degrees = i as f64 * 60.;
+            }
+        }
+        if backend == BackendId::BlenderCycles {
+            frames.frames.truncate(1);
+        }
+        let report = prepared
+            .backend
+            .render_sequence(&scene, &frames, &context, &mut |_| Ok(()))
+            .unwrap();
+        let result: Value = serde_json::from_slice(
+            &std::fs::read(directory.join("blender-Single/frames/render-result.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            result["geometry_uploads"],
+            if name == "dynamic" { 3 } else { 1 }
+        );
+        assert_eq!(
+            result["render_strategy"],
+            if name == "static" {
+                "animation"
+            } else {
+                "individual_frames"
+            }
+        );
+        if name == "dynamic" {
+            assert_eq!(report.build_analyses.len(), 6);
+            assert_eq!(
+                report.build_analyses[&frames.frames[0].key].legacy["visible_layer"],
+                -1
+            );
+        }
+        if backend == BackendId::BlenderCycles {
+            assert_eq!(
+                result["cycles_settings"],
+                json!({"denoise":denoise,"seed":0,"animated_seed":false})
+            );
+        }
+        evidence.push(json!({"name":name,"identity":report.identity,"quality":report.quality,"result":result}));
+        std::fs::write(
+            root.join("qualification.json"),
+            serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn prepared_blender_rebinds_job_rate_timing_and_alpha_without_new_transport() {
     let scene = fixture();
     let mut selection = RenderSelection::for_backend(BackendId::BlenderEevee, false);
@@ -838,6 +1072,18 @@ fn real_adapter_matches_retained_still_and_animation_pixels() {
                 &AtomicBool::new(false),
             )
             .unwrap();
+        // This retained-pixel test deliberately keeps the legacy realization
+        // reference even after the production registry advances to recipe 2.
+        prepared.identity.adapter_recipe_version = 1;
+        prepared.backend = Box::new(
+            BlenderBackend::with_transport(
+                prepared.effective_selection.clone(),
+                request.clone(),
+                prepared.identity.clone(),
+                Box::new(turninator::render::WorkerClient::spawn(&tools).unwrap()),
+            )
+            .unwrap(),
+        );
         let scratch = out.join(if animation { "animation" } else { "still" });
         std::fs::create_dir(&scratch).unwrap();
         let cancel = AtomicBool::new(false);

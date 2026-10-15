@@ -211,7 +211,10 @@ fn minimal_legacy_scene_uses_existing_defaults_without_changing_wire_identity() 
     assert_eq!(snapshot.appearance.studio_preset, "light");
     assert_eq!(snapshot.appearance.resin_clarity, 0.8);
     assert_eq!(snapshot.appearance.resin_cloudiness, 0.1);
-    assert_eq!(snapshot.camera.target_mm, [15., 25., 35.]);
+    // New snapshots fit the displayed full-source envelope, while the immutable
+    // legacy wire scene remains byte-equivalent and has no injected camera.
+    assert_eq!(snapshot.camera.target_mm[0..2], [0., 0.]);
+    assert!(snapshot.camera.target_mm[2] > 0.);
     assert!(snapshot.legacy_scene.get("camera").is_none());
 }
 

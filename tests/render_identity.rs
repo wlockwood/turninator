@@ -42,6 +42,24 @@ fn concrete_pixel_identity_invalidates_runtime_device_color_and_denoiser() {
         pixel_recipe_key(&scene(), &"a".repeat(64), r, i).unwrap()
     };
     let expected = key(&request, &identity);
+    use turninator::render::prepared::{GEOMETRY_RECIPE, recipe_versions};
+    assert_eq!(
+        recipe_versions(&identity).unwrap(),
+        ("legacy-realization-v1", 1)
+    );
+    let mut prepared = identity.clone();
+    prepared.adapter_recipe_version = 2;
+    assert_eq!(recipe_versions(&prepared).unwrap(), (GEOMETRY_RECIPE, 2));
+    assert_ne!(expected, key(&request, &prepared));
+    for backend in [BackendId::Wgpu, BackendId::Filament, BackendId::LuxCore] {
+        let mut native = identity.clone();
+        native.backend = backend;
+        assert_eq!(recipe_versions(&native).unwrap(), (GEOMETRY_RECIPE, 2));
+        native.adapter_recipe_version = 2;
+        assert!(recipe_versions(&native).is_err());
+    }
+    prepared.adapter_recipe_version = 3;
+    assert!(pixel_recipe_key(&scene(), &"a".repeat(64), &request, &prepared).is_err());
     let mut codec = request.clone();
     codec.kind = ExportKind::Mp4;
     codec.video_codec = VideoCodec::Av1;

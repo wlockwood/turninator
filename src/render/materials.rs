@@ -9,6 +9,7 @@ pub fn resolve_materials(scene: &RenderSceneSnapshot) -> Result<MaterialSet> {
     let a = &scene.appearance;
     let mut base = PhysicalMaterial {
         name: a.material_preset.clone(),
+        unlit: false,
         base_color_linear: a.color,
         absorption_color_linear: a.color,
         roughness: a.roughness,

@@ -105,6 +105,22 @@ int main() {
             check(tn_renderer_poll(context,&poll,&error)==TN_OK && poll.state==TN_IDLE);
         }
         auto bad_scene=scene; bad_scene.vertex_count=2000001;
+        for (bool unlit : {false,true}) {
+            auto document=scene_document(); document["materials"][0]["unlit"]=unlit;
+            const auto bytes=document.dump(); auto input=scene; input.json=reinterpret_cast<const uint8_t*>(bytes.data()); input.json_bytes=bytes.size();
+            check(tn_renderer_upload_scene(context,&input,&error)==TN_OK);
+        }
+        for (int count : {259,260}) {
+            auto document=scene_document(); const auto entry=document["materials"][0];
+            document["materials"]=tn::Json::array(); for(int n=0;n<count;++n) document["materials"].push_back(entry);
+            const auto bytes=document.dump(); auto input=scene; input.json=reinterpret_cast<const uint8_t*>(bytes.data()); input.json_bytes=bytes.size();
+            check(tn_renderer_upload_scene(context,&input,&error)==(count==259?TN_OK:TN_INVALID_ARGUMENT));
+        }
+        {
+            auto document=scene_document(); document["materials"][0]["unlit"]=1;
+            const auto bytes=document.dump(); auto input=scene; input.json=reinterpret_cast<const uint8_t*>(bytes.data()); input.json_bytes=bytes.size();
+            check(tn_renderer_upload_scene(context,&input,&error)==TN_INVALID_ARGUMENT);
+        }
         check(tn_renderer_upload_scene(context,&bad_scene,&error)==TN_INVALID_ARGUMENT);
         bad_scene=scene; bad_scene.triangle_count=4000001;
         check(tn_renderer_upload_scene(context,&bad_scene,&error)==TN_INVALID_ARGUMENT);

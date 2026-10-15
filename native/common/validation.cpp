@@ -100,7 +100,8 @@ void appearance(const Json& a) {
     number(a.at("groove_depth_mm"),0);
 }
 void material(const Json& m) {
-    shape(m,{"name","base_color_linear","absorption_color_linear","roughness","metallic","anisotropy","coat","coat_roughness","transmission","ior","absorption_density_per_mm","scattering_per_mm","scattering_anisotropy"});
+    shape(m,{"name","base_color_linear","absorption_color_linear","roughness","metallic","anisotropy","coat","coat_roughness","transmission","ior","absorption_density_per_mm","scattering_per_mm","scattering_anisotropy"},{"unlit"});
+    if(m.contains("unlit")) boolean(m.at("unlit"));
     text(m.at("name")); vector3(m.at("base_color_linear"),0,1); vector3(m.at("absorption_color_linear"),0,1);
     for(auto k:{"roughness","metallic","coat","coat_roughness","transmission"}) number(m.at(k),0,1);
     number(m.at("anisotropy"),-1,1); number(m.at("scattering_anisotropy"),-1,1);
@@ -153,7 +154,7 @@ std::shared_ptr<const Scene> copy_scene(const tn_scene* raw,const Config& c) {
     require(number(filter.at("fade_start_pixels"))==2&&number(filter.at("fade_end_pixels"))==4&&number(filter.at("footprint_diagonal_factor"))==1.4142135623730951,"unsupported layer filter recipe");
     const auto& color=j.at("color"); shape(color,{"schema_version","exposure_ev","tone_map","output_transfer","output_alpha"}); schema(color);
     require(number(color.at("exposure_ev"))==0&&text(color.at("output_transfer"))=="srgb"&&text(color.at("output_alpha"))=="straight"&&text(color.at("tone_map"))==(c.backend=="filament"?"filament-agx-v1":"turninator-agx-v1"),"unsupported color recipe");
-    const auto& materials=j.at("materials"); require(materials.is_array()&&materials.size()<=256,"material count"); for(const auto& m:materials) material(m);
+    const auto& materials=j.at("materials"); require(materials.is_array()&&materials.size()<=259,"material count"); for(const auto& m:materials) material(m);
     const size_t n=size_t(raw->vertex_count)*3;
     for(size_t i=0;i<n;++i) require(std::isfinite(raw->positions_mm[i])&&std::isfinite(raw->normals[i])&&std::isfinite(raw->build_positions_mm[i]),"nonfinite geometry");
     for(size_t i=0;i<size_t(raw->triangle_count)*3;++i) require(raw->triangles[i]<raw->vertex_count,"triangle index out of range");

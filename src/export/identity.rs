@@ -23,7 +23,8 @@ pub fn pixel_recipe_key(
     {
         return Err("pixel identity differs from requested renderer/device".into());
     }
-    let recipe = json!({"schema_version":3,"intent":retained_render_key(scene, mesh_hash, request)?,"identity":identity,"geometry_recipe":"legacy-realization-v1","frame_plan_recipe":1,"composition_recipe":2});
+    let (geometry_recipe, frame_plan_recipe) = crate::render::prepared::recipe_versions(identity)?;
+    let recipe = json!({"schema_version":3,"intent":retained_render_key(scene, mesh_hash, request)?,"identity":identity,"geometry_recipe":geometry_recipe,"frame_plan_recipe":frame_plan_recipe,"composition_recipe":2});
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&recipe)?)

@@ -71,6 +71,36 @@ pub fn normalized_request(request: &ExportRequest) -> Result<ExportRequest> {
 }
 
 pub fn plan_frames(scene: &RenderSceneSnapshot, request: &ExportRequest) -> Result<FramePlan> {
+    plan_frames_versioned(scene, request, true)
+}
+
+pub fn plan_frames_for_identity(
+    scene: &RenderSceneSnapshot,
+    request: &ExportRequest,
+    identity: &BackendIdentity,
+) -> Result<FramePlan> {
+    let (_, version) = super::prepared::recipe_versions(identity)?;
+    if version == 1
+        && scene
+            .legacy_scene
+            .get("camera")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        let mut legacy = scene.clone();
+        let mut orbit = crate::viewport::OrbitCamera::default();
+        orbit.fit(&legacy.reference_bounds_mm);
+        legacy.camera = RenderCamera::from_orbit(&orbit)?;
+        plan_frames_versioned(&legacy, request, false)
+    } else {
+        plan_frames_versioned(scene, request, version != 1)
+    }
+}
+
+fn plan_frames_versioned(
+    scene: &RenderSceneSnapshot,
+    request: &ExportRequest,
+    canonical_fit: bool,
+) -> Result<FramePlan> {
     let request = normalized_request(request)?;
     let mut plan = FramePlan {
         transparent: request.transparent,
@@ -136,9 +166,19 @@ pub fn plan_frames(scene: &RenderSceneSnapshot, request: &ExportRequest) -> Resu
         } else {
             vec![RenderPanel::Single]
         };
+        let camera = if canonical_fit
+            && scene
+                .legacy_scene
+                .get("camera")
+                .is_none_or(serde_json::Value::is_null)
+        {
+            super::prepared::fit_legacy_camera(scene, request.size, height)?
+        } else {
+            scene.camera.clone()
+        };
         panels
             .into_iter()
-            .map(|p| (p, scene.camera.clone(), request.size, height))
+            .map(|p| (p, camera.clone(), request.size, height))
             .collect()
     };
     let mut timeline = request.timeline.clone();

@@ -11,4 +11,6 @@ pub use selection::{BackendId, BackendQuality, RenderSelection, RendererPreferen
 pub use worker::{ToolPaths, WorkerClient};
 pub mod color;
 pub mod geometry;
+mod ink;
 pub mod materials;
+pub mod prepared;

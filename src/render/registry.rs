@@ -210,7 +210,7 @@ impl BackendRegistry {
             let runtime_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&runtime)?));
             let identity = BackendIdentity {
                 backend: selection.backend,
-                adapter_recipe_version: 1,
+                adapter_recipe_version: crate::render::prepared::BLENDER_ADAPTER_VERSION,
                 runtime_digest: runtime_digest.clone(),
                 bridge_digest: None,
                 shader_digest: None,

@@ -408,7 +408,7 @@ mod platform {
             {
                 return Err("invalid native geometry spans/indices/budget".into());
             }
-            if meta.materials.len() > 256
+            if meta.materials.len() > 259
                 || meta.materials.iter().any(|m| {
                     m.name.is_empty()
                         || m.name.len() > 256

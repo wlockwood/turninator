@@ -1,5 +1,6 @@
 //! Shared scene geometry recipe v1. All geometry and normals remain in build mm.
 //! Placement is explicit in resolve_display_transform; cuts never refit a model.
+pub use super::ink::expand_design_edges;
 use super::{contract::*, materials::resolve_materials};
 use crate::{
     Result,
@@ -88,8 +89,12 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
     let mut staged = Vec::new();
     let mut section_caps = Vec::new();
     let mut all_closed = !components.is_empty();
+    let mut source_volume = 0.;
     for (shell, mut component) in components.into_iter().enumerate() {
-        let solid = if stage.is_some() || frame.section.is_some() {
+        let solid = if stage.is_some()
+            || frame.section.is_some()
+            || (scene.metadata.kind == GeometryKind::Original && frame.visible_layers.is_some())
+        {
             BuildUpSolid::new(&component.mesh).ok()
         } else {
             None
@@ -129,6 +134,7 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
                 triangle.swap(1, 2);
             }
         }
+        source_volume += volume(&faces, scene.reference_bounds_mm.min);
         if let Some(plane) = &stage {
             faces = clip_faces(faces, plane, &mut generated)?;
             if solid.is_some() {
@@ -151,6 +157,26 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
         }
     }
     let original_volume = all_closed.then(|| volume(&staged, scene.reference_bounds_mm.min));
+    let build_analysis = if scene.metadata.kind == GeometryKind::Original {
+        frame.visible_layers.map(|count| -> Result<BuildAnalysis> {
+            let mut value = if let Some(plane) = &stage {
+                let area = all_closed.then(|| staged.iter().filter(|f| f.v.iter().all(|v| v.p[2] == plane.position_mm)).map(face_area).sum::<f64>());
+                json!({"axis":2,"position_mm":plane.position_mm,"keep_positive":false,
+                    "capped":all_closed,"closed_input":all_closed,"cross_section_area_mm2":area,
+                    "original_volume_mm3":all_closed.then_some(source_volume),"remaining_volume_mm3":original_volume,
+                    "volume_basis":"Original: signed closed-mesh volume magnitude, additive for separate shells. Remaining: closed cut-mesh volume magnitude.",
+                    "output_triangles":staged.len(),"warnings":if all_closed {vec![]} else {vec!["Open or inconsistently wound geometry: section remains uncapped; area/volume unavailable."]},
+                    "meaning":"Geometric intersection of the modeled mesh; not strength, mass, or measured print behavior."})
+            } else {
+                json!({"capped":false,"closed_input":all_closed,"remaining_volume_mm3":if count==0 {Some(0.)} else {original_volume},"output_triangles":staged.len()})
+            };
+            value["visible_layer"] = json!(i64::from(count)-1);
+            value["z_top_mm"] = json!(if count==0 {0.} else {scene.metadata.solid_layer_tops_mm[count as usize-1]});
+            BuildAnalysis::from_legacy(value)
+        }).transpose()?
+    } else {
+        None
+    };
     let mut analysis = None;
     let mut output = staged;
     if let Some(section) = &frame.section {
@@ -195,11 +221,35 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
             warnings.push("Open or inconsistently wound geometry: section remains uncapped; area/volume unavailable.");
         }
         let legacy = json!({"axis":section.axis,"position_mm":section.position_mm,"keep_positive":section.keep_positive,"capped":do_cap,"closed_input":all_closed,"cross_section_area_mm2":area,"original_volume_mm3":original_volume,"remaining_volume_mm3":remaining,"volume_basis":if scene.metadata.kind==GeometryKind::Stepped{"Additive volumes of independently closed, nonoverlapping stepped layers."}else{"Original: signed closed-mesh volume magnitude, additive for separate shells. Remaining: closed cut-mesh volume magnitude."},"output_triangles":output.len(),"warnings":warnings,"meaning":"Geometric intersection of the modeled mesh; not strength, mass, or measured print behavior."});
-        let legacy = if frame.visible_layers == Some(0) {
+        let mut legacy = if frame.visible_layers == Some(0) {
             json!({"axis":section.axis,"position_mm":section.position_mm,"keep_positive":section.keep_positive,"visible_layer":-1,"visible_source_triangles":0,"output_triangles":0,"capped":false,"closed_input":false,"cross_section_area_mm2":0.0,"original_volume_mm3":0.0,"remaining_volume_mm3":0.0,"warnings":[],"meaning":"Empty build stage: no deposited geometry is visible."})
         } else {
             legacy
         };
+        if scene.metadata.kind == GeometryKind::Stepped && frame.visible_layers != Some(0) {
+            legacy["meaning"] = json!(
+                "Geometric intersection of the modeled stepped layers; not strength, mass, or measured print behavior."
+            );
+        }
+        if let Some(count) = frame.visible_layers {
+            let mut layers: Vec<_> = scene
+                .metadata
+                .layer_ranges
+                .iter()
+                .map(|r| r.layer_index)
+                .collect();
+            layers.dedup();
+            legacy["visible_layer"] = json!(if count == 0 {
+                -1
+            } else if scene.metadata.kind == GeometryKind::Original {
+                i64::from(count) - 1
+            } else {
+                i64::from(layers[count as usize - 1])
+            });
+            if scene.metadata.kind != GeometryKind::Original {
+                legacy["visible_source_triangles"] = json!(selected.len());
+            }
+        }
         analysis = Some(SectionAnalysis::from_legacy(legacy, all_closed)?);
     }
     let count = output
@@ -265,6 +315,7 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
         design_edges_mm: edges,
         reference_bounds_mm: scene.reference_bounds_mm,
         analysis,
+        build_analysis,
     })
 }
 

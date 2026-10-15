@@ -438,7 +438,7 @@ pub fn snapshot_scene(mesh: Arc<Mesh>, legacy_scene: Value) -> Result<RenderScen
             return Err("invalid section specification".into());
         }
     }
-    Ok(RenderSceneSnapshot {
+    let mut snapshot = RenderSceneSnapshot {
         mesh,
         legacy_scene,
         appearance,
@@ -446,7 +446,15 @@ pub fn snapshot_scene(mesh: Arc<Mesh>, legacy_scene: Value) -> Result<RenderScen
         camera,
         reference_bounds_mm,
         warnings,
-    })
+    };
+    if snapshot
+        .legacy_scene
+        .get("camera")
+        .is_none_or(Value::is_null)
+    {
+        snapshot.camera = super::prepared::fit_legacy_camera(&snapshot, 1, 1)?;
+    }
+    Ok(snapshot)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RenderPanel {
@@ -543,6 +551,8 @@ pub struct RealizedScene {
     pub design_edges_mm: Vec<[[f32; 3]; 2]>,
     pub reference_bounds_mm: Bounds,
     pub analysis: Option<SectionAnalysis>,
+    /// Original-solid reveal measurements before the final section is applied.
+    pub build_analysis: Option<BuildAnalysis>,
 }
 /// Existing STL layer-reveal measurements. Empty/full stages have no cutting
 /// plane or cross-section measurements; preserve that distinction and JSON.
@@ -591,6 +601,10 @@ impl BuildAnalysis {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PhysicalMaterial {
     pub name: String,
+    /// Scene-linear constant-color ink, bypassing lighting and layer shading.
+    /// Absent in older schema1 metadata; the default remains a physical material.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlit: bool,
     pub base_color_linear: [f32; 3],
     pub absorption_color_linear: [f32; 3],
     pub roughness: f32,

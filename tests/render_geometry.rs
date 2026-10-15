@@ -14,6 +14,37 @@ fn cut(axis: u8, pos: f64, positive: bool) -> SectionSpec {
         cap: true,
     }
 }
+#[test]
+fn build_analysis_precedes_section_and_preserves_empty_full_shapes() {
+    let mut s = scene(cube([0.; 3], 10.));
+    s.metadata.solid_layer_tops_mm = vec![5., 10.];
+    let mut f = frame(&s);
+    f.visible_layers = Some(1);
+    f.section = Some(cut(0, 5., false));
+    let r = realize_frame(&s, &f).unwrap();
+    let b = &r.build_analysis.unwrap().legacy;
+    assert_eq!(b["visible_layer"], 0);
+    near(b["z_top_mm"].as_f64().unwrap(), 5.);
+    near(b["original_volume_mm3"].as_f64().unwrap(), 1000.);
+    near(b["remaining_volume_mm3"].as_f64().unwrap(), 500.);
+    near(
+        r.analysis.unwrap().legacy["remaining_volume_mm3"]
+            .as_f64()
+            .unwrap(),
+        250.,
+    );
+    for count in [0, 2] {
+        f.visible_layers = Some(count);
+        let r = realize_frame(&s, &f).unwrap();
+        let b = &r.build_analysis.unwrap().legacy;
+        assert!(b.get("axis").is_none());
+        assert_eq!(b["capped"], false);
+        near(
+            b["remaining_volume_mm3"].as_f64().unwrap(),
+            if count == 0 { 0. } else { 1000. },
+        );
+    }
+}
 fn area_at(s: &RealizedScene, axis: usize, pos: f64) -> f64 {
     s.mesh
         .triangles

@@ -13,7 +13,7 @@ use crate::{
         capabilities::FeatureSupport,
         contract::*,
         requirements::{requirements_for, validate_requirements},
-        sequence::{animated, normalized_request, plan_frames},
+        sequence::{animated, normalized_request, plan_frames_for_identity},
     },
 };
 use serde_json::{Value, json};
@@ -196,7 +196,7 @@ pub(crate) fn run_export_with_backend_budget(
     if key != context.pixel_recipe_key {
         return Err("context pixel recipe differs from immutable job".into());
     }
-    let plan = plan_frames(&scene, &request)?;
+    let plan = plan_frames_for_identity(&scene, &request, context.identity)?;
     let directory = request.job_dir.join(&key[..20]);
     fs::create_dir_all(&directory)?;
     owned_path(&request.job_dir, &directory)?;
@@ -780,7 +780,7 @@ pub(crate) fn encode_only_locked(
             revision: 0,
             progress: &|_| {},
         };
-        let plan = plan_frames(&scene, &request)?;
+        let plan = plan_frames_for_identity(&scene, &request, context.identity)?;
         if recipe["frame_plan"] != serde_json::to_value(&plan.frames)?
             || recipe["repeats"] != serde_json::to_value(plan.repeat_of.iter().collect::<Vec<_>>())?
             || recipe["transparent"] != plan.transparent

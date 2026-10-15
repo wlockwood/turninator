@@ -305,6 +305,7 @@ fn metadata() -> EmbeddedSceneMetadata {
             display_rotation_degrees: [0.; 3],
         },
         materials: vec![PhysicalMaterial {
+            unlit: false,
             name: "red".into(),
             base_color_linear: [1., 0., 0.],
             absorption_color_linear: [1.; 3],
@@ -456,6 +457,27 @@ fn validates_physical_metadata_material_indices_and_upload_memory_budget() {
     cfg.limits.host_bytes = 64;
     let mut limited = library.create(&cfg).unwrap();
     assert!(limited.upload_scene(&scene).is_err());
+}
+
+#[test]
+fn optional_unlit_ink_and_259_material_table_cross_native_schema_guard() {
+    let library = EmbeddedLibrary::load_fixture(&fixture("tn_fixture.dll")).unwrap();
+    let mut context = library.create(&config()).unwrap();
+    for count in [259, 260] {
+        let mut meta = metadata();
+        meta.materials = vec![meta.materials[0].clone(); count];
+        meta.materials[count - 1].unlit = true;
+        let upload = SceneUpload {
+            revision: count as u64,
+            positions_mm: &[[0.; 3]],
+            normals: &[[0., 0., 1.]],
+            build_positions_mm: &[[0.; 3]],
+            triangles: &[[0, 0, 0]],
+            triangle_materials: &[(count - 1) as u32],
+            metadata: &meta,
+        };
+        assert_eq!(context.upload_scene(&upload).is_ok(), count == 259);
+    }
 }
 
 #[test]
