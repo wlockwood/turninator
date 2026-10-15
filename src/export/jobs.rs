@@ -21,6 +21,25 @@ pub enum ExportKind {
     SectionTurntable,
     SectionStill,
 }
+impl ExportKind {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Gif | Self::SectionTurntable => "gif",
+            Self::Mp4 => "mp4",
+            _ => "png",
+        }
+    }
+
+    /// Derive suggestions from the accepted model, without retaining a previous model's name.
+    pub fn suggested_file_name(self, source: &Path) -> String {
+        let stem = source
+            .file_stem()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(std::ffi::OsStr::new("turninator"))
+            .to_string_lossy();
+        format!("{stem}.{}", self.extension())
+    }
+}
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VideoCodec {
     #[default]

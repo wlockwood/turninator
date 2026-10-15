@@ -82,6 +82,7 @@ enum Message {
     ),
     ExportDestination {
         kind: ExportKind,
+        generation: u64,
         path: Option<PathBuf>,
     },
     Image {
@@ -784,18 +785,23 @@ impl Studio {
         });
     }
     fn pick_export(&self, kind: ExportKind) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let file_name = kind.suggested_file_name(&model.path);
+        let generation = self.gate.current();
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let extension = match kind {
-                ExportKind::Gif | ExportKind::SectionTurntable => "gif",
-                ExportKind::Mp4 => "mp4",
-                _ => "png",
-            };
+            let extension = kind.extension();
             let path = rfd::FileDialog::new()
                 .add_filter("Output", &[extension])
-                .set_file_name(format!("turninator.{extension}"))
+                .set_file_name(file_name)
                 .save_file();
-            let _ = sender.send(Message::ExportDestination { kind, path });
+            let _ = sender.send(Message::ExportDestination {
+                kind,
+                generation,
+                path,
+            });
         });
     }
     fn receive(&mut self, ctx: &egui::Context) {
@@ -1011,8 +1017,17 @@ impl Studio {
                 }
                 Message::ExportDestination {
                     kind,
+                    generation,
                     path: Some(path),
-                } => self.start_export(kind, path, false),
+                } => {
+                    if self.gate.accepts(generation) && !self.importing {
+                        self.start_export(kind, path, false);
+                    } else {
+                        self.status =
+                            "Model changed while the save dialog was open. Choose an export again."
+                                .into();
+                    }
+                }
                 Message::Image {
                     id,
                     revision,
@@ -1780,16 +1795,34 @@ impl Studio {
             self.scene.display_rotation_degrees = [20., 0., 35.];
             self.changed();
             let path = self.model.as_ref().expect("smoke model").path.clone();
+            self.smoke_checks["initial_output_name_matches_model"] = serde_json::json!(
+                ExportKind::Still.suggested_file_name(&path)
+                    == format!("{}.png", path.file_stem().unwrap().to_string_lossy())
+            );
+            let renamed = directory.join(format!(
+                "renamed-output-model.2.{}",
+                path.extension().unwrap().to_string_lossy()
+            ));
+            if let Err(error) = fs::copy(&path, &renamed) {
+                self.error = Some(error.to_string());
+                return;
+            }
             self.import(directory.join("missing-stale-import.stl"));
             self.import(path.clone());
             self.import(directory.join("another-missing-stale-import.stl"));
-            self.import(path);
+            self.import(renamed);
         }
         if self.smoke_stage == 1 && self.busy.is_none() && !self.importing {
             self.smoke_checks["stale_preview_rejected"] =
                 serde_json::json!(self.preview_revision != Some(self.revision));
             self.smoke_checks["latest_import_selected"] =
                 serde_json::json!(self.error.is_none() && self.model.is_some());
+            self.smoke_checks["output_name_follows_new_model"] = serde_json::json!(
+                self.model
+                    .as_ref()
+                    .is_some_and(|m| ExportKind::Still.suggested_file_name(&m.path)
+                        == "renamed-output-model.2.png")
+            );
             self.engine = "cycles".into();
             self.start_export(
                 ExportKind::Still,
@@ -1905,6 +1938,13 @@ impl Studio {
                     directory.join("stale-project-intent.stl"),
                     Instant::now() - Duration::from_secs(1),
                 ));
+                self.smoke_checks["save_choice_expected_job_count"] =
+                    serde_json::json!(self.next_job);
+                let _ = self.sender.send(Message::ExportDestination {
+                    kind: ExportKind::Still,
+                    generation: self.gate.current().saturating_sub(1),
+                    path: Some(directory.join("stale-save-choice.png")),
+                });
                 let _ = self.sender.send(Message::OpenProject(Some(project_path)));
             }
             self.smoke_stage = 5;
@@ -1913,6 +1953,10 @@ impl Studio {
             && !self.importing
             && self.project_path.as_ref() == Some(&directory.join("smoke.turninator"))
         {
+            self.smoke_checks["stale_save_choice_rejected"] = serde_json::json!(
+                self.smoke_checks["save_choice_expected_job_count"] == self.next_job
+                    && !directory.join("stale-save-choice.png").exists()
+            );
             self.smoke_checks["saved_section_preserved"] = serde_json::json!(
                 self.section && self.section_axis == 0 && self.section_position == 0.75
             );

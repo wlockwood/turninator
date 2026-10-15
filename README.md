@@ -26,6 +26,8 @@ Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leav
 
 Animation and PNG/sheet quality have separate controls. Native lighting approximates Blender; Render preview provides the selected material/studio result. Resin on overlapping beads retains internal interfaces and is an illustration rather than fused-resin physics. Section volume is a mesh estimate, not calibrated deposited material or strength.
 
+Export save dialogs suggest the loaded model's base name with the chosen output extension. You can edit the filename before saving. A model change invalidates a pending save choice so it cannot export a different model under the previous suggestion.
+
 To author a motion, set the time slider, compose a view with orbit/pan/zoom or a canonical camera, then **Record this view**. Edit each key's outgoing transition and easing; **Play** previews the path natively. Camera loops reserve a closing transition or end at the starting camera. Build-up reveals whole deposited layers rather than reproducing printer time or nozzle motion; its last exported frame is complete.
 
 ## Projects and recovery
