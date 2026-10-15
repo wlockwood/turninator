@@ -293,3 +293,60 @@ fn interactive_owner_drops_context_on_switch_and_delivers_only_latest_request() 
         "export can start only after owner teardown"
     );
 }
+
+#[test]
+fn interactive_teardown_does_not_block_ui_queue_access() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::{Duration, Instant};
+    use turninator::app::renderer_view::LatestFrameWorker;
+    struct SlowDrop {
+        entered: mpsc::Sender<()>,
+        release: Arc<AtomicBool>,
+    }
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            self.entered.send(()).unwrap();
+            while !self.release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+    let (entered, wait_entered) = mpsc::channel();
+    let release = Arc::new(AtomicBool::new(false));
+    let release_owner = release.clone();
+    let worker = Arc::new(LatestFrameWorker::new(move || {
+        let owned = SlowDrop {
+            entered: entered.clone(),
+            release: release_owner.clone(),
+        };
+        Box::new(move |_: (), _: &AtomicBool| {
+            std::hint::black_box(&owned);
+            Ok(())
+        })
+    }));
+    worker.submit(tag(1, 1, BackendId::Filament, 1), ());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while worker.take_completed().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    worker.release();
+    wait_entered.recv_timeout(Duration::from_secs(3)).unwrap();
+    let query_worker = worker.clone();
+    let (queried, query_result) = mpsc::channel();
+    let query = std::thread::spawn(move || {
+        queried.send(query_worker.is_released()).unwrap();
+    });
+    let response = query_result.recv_timeout(Duration::from_millis(250));
+    release.store(true, Ordering::Release);
+    query.join().unwrap();
+    assert_eq!(
+        response,
+        Ok(false),
+        "UI must remain responsive while SDK teardown drains"
+    );
+}

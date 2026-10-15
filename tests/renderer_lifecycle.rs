@@ -41,10 +41,17 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
         started: mpsc::Sender<u64>,
         dropped: Arc<AtomicUsize>,
         owner: std::thread::ThreadId,
+        drop_gate: Option<(mpsc::Sender<()>, Arc<std::sync::atomic::AtomicBool>)>,
     }
     impl Drop for Blocking {
         fn drop(&mut self) {
             assert_eq!(self.owner, std::thread::current().id());
+            if let Some((entered, release)) = &self.drop_gate {
+                entered.send(()).unwrap();
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
             self.dropped.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -122,6 +129,9 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
     let (started, starts) = mpsc::channel();
     let dropped = Arc::new(AtomicUsize::new(0));
     let drop_counter = dropped.clone();
+    let (drop_started, wait_drop) = mpsc::channel();
+    let release_drop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release_owner = release_drop.clone();
     let ui_thread = std::thread::current().id();
     let service = RenderService::with_backend_factory(move |selection, _, _, _, _, cancel| {
         assert_ne!(ui_thread, std::thread::current().id());
@@ -147,6 +157,8 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
                 started: started.clone(),
                 dropped: drop_counter.clone(),
                 owner: std::thread::current().id(),
+                drop_gate: (identity.backend == BackendId::Filament)
+                    .then(|| (drop_started.clone(), release_owner.clone())),
             }),
             identity,
             effective_selection: selection,
@@ -154,6 +166,13 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
             preparation_timings: BTreeMap::new(),
         })
     });
+    struct ReleaseOnExit(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for ReleaseOnExit {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let _release_on_exit = ReleaseOnExit(release_drop.clone());
     let task = |id, preview, engine| {
         let job = cache.create_job(&format!("job{id}")).unwrap();
         RenderTask {
@@ -229,6 +248,22 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
         "partial slot must retain newest image even inside throttle interval"
     );
     assert_eq!(mesh.triangles, vec![[0, 1, 2]]);
+    service.release_idle();
+    wait_drop.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (responded, response) = mpsc::channel();
+    let query = std::thread::spawn(move || {
+        service.cancel();
+        responded.send(()).unwrap();
+        service
+    });
+    let responsive = response.recv_timeout(Duration::from_millis(250));
+    release_drop.store(true, Ordering::Release);
+    let service = query.join().unwrap();
     drop(service);
     assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        responsive,
+        Ok(()),
+        "UI cancellation must not wait for idle SDK destruction"
+    );
 }

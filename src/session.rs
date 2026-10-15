@@ -155,10 +155,19 @@ impl RenderService {
                 let (task, ticket, recovery) = {
                     let (lock, wake) = &*actor_queue;
                     let mut queue = lock.lock().unwrap();
-                    while queue.pending.is_none() && !queue.shutdown {
+                    loop {
+                        if queue.shutdown {
+                            break;
+                        }
                         if queue.release_idle {
-                            prepared = None;
                             queue.release_idle = false;
+                            drop(queue);
+                            prepared = None;
+                            queue = lock.lock().unwrap();
+                            continue;
+                        }
+                        if queue.pending.is_some() {
+                            break;
                         }
                         queue = wake.wait(queue).unwrap();
                     }

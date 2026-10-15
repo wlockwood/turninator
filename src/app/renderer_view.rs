@@ -98,9 +98,12 @@ impl<T: Send + 'static, U: Send + 'static> LatestFrameWorker<T, U> {
                             return;
                         }
                         if state.release {
-                            execute = None;
                             state.release = false;
+                            drop(state);
+                            execute = None;
+                            state = owner.0.lock().unwrap();
                             state.released = true;
+                            continue;
                         }
                         if let Some((identity, request)) = state.queue.take_pending() {
                             let cancel = Arc::new(AtomicBool::new(false));
