@@ -140,7 +140,7 @@ fn tools() -> ToolPaths {
 fn execute(
     request: &ExportRequest,
     scene: &RenderSceneSnapshot,
-    backend: &mut Pixels,
+    backend: &mut dyn RenderBackend,
     cancel: &AtomicBool,
 ) -> Result<turninator::export::ExportResult> {
     let identity = backend.identity();
@@ -479,6 +479,310 @@ fn corrupt_panel_retry_renders_only_missing_pixels_and_keeps_good_files() {
     );
     assert_eq!(fs::read(&kept).unwrap(), before);
     assert_eq!(fs::metadata(&kept).unwrap().modified().unwrap(), modified);
+}
+
+struct InterruptedPixels {
+    pixels: Pixels,
+    fail_after_first: bool,
+}
+impl RenderBackend for InterruptedPixels {
+    fn id(&self) -> BackendId {
+        self.pixels.id()
+    }
+    fn identity(&self) -> BackendIdentity {
+        self.pixels.identity()
+    }
+    fn assess(
+        &self,
+        _: &RenderSceneSnapshot,
+        _: &ExportRequest,
+    ) -> Vec<turninator::render::capabilities::FeatureSupport> {
+        vec![]
+    }
+    fn render_sequence(
+        &mut self,
+        scene: &RenderSceneSnapshot,
+        plan: &FramePlan,
+        ctx: &RenderContext<'_>,
+        emit: &mut dyn FnMut(FrameArtifact) -> Result<()>,
+    ) -> Result<RenderReport> {
+        let fail = self.fail_after_first;
+        self.pixels
+            .render_sequence(scene, plan, ctx, &mut |artifact| {
+                emit(artifact)?;
+                if fail {
+                    ctx.cancel.store(true, Ordering::Release);
+                    Err("interrupted after durable first frame".into())
+                } else {
+                    Ok(())
+                }
+            })
+    }
+}
+
+#[test]
+fn interrupted_first_attempt_retries_only_missing_pixels() {
+    let (_scratch, mut request, scene, identity) = fixture();
+    request.kind = ExportKind::Diagram;
+    request.size = 256;
+    fs::write(&request.destination, b"original destination").unwrap();
+    let mut backend = InterruptedPixels {
+        pixels: Pixels {
+            identity,
+            calls: 0,
+            bad: false,
+            emitted: vec![],
+        },
+        fail_after_first: true,
+    };
+    assert!(
+        execute(&request, &scene, &mut backend, &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string()
+            .contains("interrupted")
+    );
+    assert_eq!(
+        fs::read(&request.destination).unwrap(),
+        b"original destination"
+    );
+    let directory = fs::read_dir(&request.job_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.join("host-frames").exists())
+        .unwrap();
+    let kept = directory.join("host-frames/Right-0000.png");
+    let bytes = fs::read(&kept).unwrap();
+    let mtime = fs::metadata(&kept).unwrap().modified().unwrap();
+    backend.fail_after_first = false;
+    backend.pixels.emitted.clear();
+    execute(&request, &scene, &mut backend, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        backend
+            .pixels
+            .emitted
+            .iter()
+            .map(|k| k.panel)
+            .collect::<Vec<_>>(),
+        vec![RenderPanel::Front, RenderPanel::Iso, RenderPanel::Top]
+    );
+    assert_eq!(fs::read(&kept).unwrap(), bytes);
+    assert_eq!(fs::metadata(&kept).unwrap().modified().unwrap(), mtime);
+}
+
+struct AnalyzedPixels {
+    identity: BackendIdentity,
+    fail_after: Option<usize>,
+    emitted: Vec<FrameKey>,
+    generation: u32,
+}
+impl RenderBackend for AnalyzedPixels {
+    fn id(&self) -> BackendId {
+        self.identity.backend
+    }
+    fn identity(&self) -> BackendIdentity {
+        self.identity.clone()
+    }
+    fn assess(
+        &self,
+        _: &RenderSceneSnapshot,
+        _: &ExportRequest,
+    ) -> Vec<turninator::render::capabilities::FeatureSupport> {
+        vec![]
+    }
+    fn render_sequence(
+        &mut self,
+        _: &RenderSceneSnapshot,
+        plan: &FramePlan,
+        ctx: &RenderContext<'_>,
+        emit: &mut dyn FnMut(FrameArtifact) -> Result<()>,
+    ) -> Result<RenderReport> {
+        let mut report = RenderReport {
+            frame_count: plan.frames.len() as u32,
+            warnings: vec![],
+            identity: self.identity(),
+            quality: ctx.selection.quality.clone(),
+            analyses: BTreeMap::new(),
+            build_analyses: BTreeMap::new(),
+            phase_timings: BTreeMap::new(),
+        };
+        for (index, f) in plan.frames.iter().rev().enumerate() {
+            if f.section.is_some() {
+                let legacy = serde_json::json!({"axis":0,"position_mm":0.5,"keep_positive":true,"capped":true,"closed_input":true,
+                    "cross_section_area_mm2":1.,"original_volume_mm3":1.,"remaining_volume_mm3":0.5,"output_triangles":12,
+                    "warnings":[],"volume_basis":"Closed source mesh.","meaning":"Geometric intersection.","generation":self.generation});
+                report
+                    .analyses
+                    .insert(f.key, SectionAnalysis::from_legacy(legacy, true)?);
+            }
+            if f.visible_layers.is_some() {
+                let legacy = serde_json::json!({"closed_input":true,"capped":false,"remaining_volume_mm3":1.,"output_triangles":12,"visible_layer":0,"z_top_mm":1.,"generation":self.generation});
+                report
+                    .build_analyses
+                    .insert(f.key, BuildAnalysis::from_legacy(legacy)?);
+            }
+            self.emitted.push(f.key);
+            emit(FrameArtifact::Metadata {
+                key: f.key,
+                section: report.analyses.get(&f.key).cloned(),
+                build: report.build_analyses.get(&f.key).cloned(),
+            })?;
+            emit(FrameArtifact::Image {
+                key: f.key,
+                image: RgbaFrame {
+                    width: f.width,
+                    height: f.height,
+                    bytes: vec![255; (f.width * f.height * 4) as usize],
+                },
+            })?;
+            if self.fail_after == Some(index + 1) {
+                return Err("interrupted after analyzed pixels".into());
+            }
+        }
+        Ok(report)
+    }
+}
+
+#[test]
+fn interrupted_paired_analysis_survives_retry_and_completed_frame_repair() {
+    for fail_after in [1, 2] {
+        let (_scratch, mut request, mut scene, identity) = fixture();
+        request.layout = turninator::export::ExportLayout::SideBySide;
+        request.size = 32;
+        request.section = Some(turninator::export::SectionSpec {
+            axis: 0,
+            position_mm: 0.5,
+            keep_positive: true,
+            cap: true,
+        });
+        request.build_stage = Some(turninator::export::BuildStage { visible_layers: 1 });
+        scene.legacy_scene["solid_layer_tops_mm"] = serde_json::json!([1.]);
+        scene.metadata.solid_layer_tops_mm = vec![1.];
+        fs::write(
+            &request.scene_path,
+            serde_json::to_vec(&scene.legacy_scene).unwrap(),
+        )
+        .unwrap();
+        fs::write(&request.destination, b"original destination").unwrap();
+        let mut backend = AnalyzedPixels {
+            identity,
+            fail_after: Some(fail_after),
+            emitted: vec![],
+            generation: 1,
+        };
+        assert!(
+            execute(&request, &scene, &mut backend, &AtomicBool::new(false))
+                .unwrap_err()
+                .to_string()
+                .contains("interrupted")
+        );
+        assert_eq!(
+            fs::read(&request.destination).unwrap(),
+            b"original destination"
+        );
+        let directory = fs::read_dir(&request.job_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.join("host-frames").exists())
+            .unwrap();
+        let kept = directory.join("host-frames/Section-0000.png");
+        let bytes = fs::read(&kept).unwrap();
+        let mtime = fs::metadata(&kept).unwrap().modified().unwrap();
+        let read_report = || -> serde_json::Value {
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(directory.join("job.json")).unwrap(),
+            )
+            .unwrap()["report"]
+                .clone()
+        };
+        assert!(read_report().is_null());
+        let partial: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("job.json")).unwrap()).unwrap();
+        let retained_section = partial["frame_metadata"]["analyses"].clone();
+        let retained_build = partial["frame_metadata"]["build_analyses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["key"]["panel"] == "Section")
+            .unwrap()
+            .clone();
+        backend.fail_after = None;
+        backend.generation = 2;
+        backend.emitted.clear();
+        execute(&request, &scene, &mut backend, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            backend.emitted,
+            if fail_after == 1 {
+                vec![FrameKey {
+                    index: 0,
+                    panel: RenderPanel::Full,
+                }]
+            } else {
+                vec![]
+            }
+        );
+        let first = read_report();
+        assert_eq!(first["analyses"], retained_section);
+        assert!(
+            first["build_analyses"]
+                .as_array()
+                .unwrap()
+                .contains(&retained_build)
+        );
+        assert_eq!(first["analyses"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            first["analyses"][0]["key"],
+            serde_json::json!({"index":0,"panel":"Section"})
+        );
+        assert_eq!(first["analyses"][0]["legacy"]["generation"], 1);
+        assert_eq!(first["build_analyses"].as_array().unwrap().len(), 2);
+        let full = first["build_analyses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["key"]["panel"] == "Full")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            full["legacy"]["generation"],
+            if fail_after == 1 { 2 } else { 1 }
+        );
+        let section = first["build_analyses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["key"]["panel"] == "Section")
+            .unwrap();
+        assert_eq!(section["legacy"]["generation"], 1);
+        assert_eq!(fs::read(&kept).unwrap(), bytes);
+        assert_eq!(fs::metadata(&kept).unwrap().modified().unwrap(), mtime);
+        fs::write(&kept, b"corrupt").unwrap();
+        backend.generation = 3;
+        backend.emitted.clear();
+        execute(&request, &scene, &mut backend, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            backend.emitted,
+            vec![FrameKey {
+                index: 0,
+                panel: RenderPanel::Section
+            }]
+        );
+        let repaired = read_report();
+        assert_eq!(repaired["analyses"][0]["key"], first["analyses"][0]["key"]);
+        assert_eq!(repaired["analyses"][0]["legacy"]["generation"], 3);
+        assert!(
+            repaired["build_analyses"]
+                .as_array()
+                .unwrap()
+                .contains(&full)
+        );
+        let section = repaired["build_analyses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["key"]["panel"] == "Section")
+            .unwrap();
+        assert_eq!(section["legacy"]["generation"], 3);
+    }
 }
 
 #[test]

@@ -626,7 +626,6 @@ impl WorkerTransport for AnalysisWorker {
             requests: self.requests.clone(),
             cancel_during_request: false,
         };
-        let mut completed = delegate.request(request, cancel, event)?;
         let build0 = json!({"closed_input":false,"capped":false,"remaining_volume_mm3":0.,"output_triangles":0,"visible_layer":-1,"z_top_mm":0.});
         let build1 = json!({"closed_input":true,"capped":false,"remaining_volume_mm3":1.,"output_triangles":12,"visible_layer":0,"z_top_mm":1.});
         let empty = json!({"axis":2,"position_mm":0.5,"keep_positive":false,"capped":false,"closed_input":false,
@@ -635,12 +634,20 @@ impl WorkerTransport for AnalysisWorker {
         let cut = json!({"axis":2,"position_mm":0.5,"keep_positive":false,"capped":true,"closed_input":true,
             "cross_section_area_mm2":1.,"original_volume_mm3":1.,"remaining_volume_mm3":0.5,"output_triangles":12,
             "warnings":[],"volume_basis":"Closed source mesh.","meaning":"Geometric intersection."});
-        completed["payload"]["frame_analysis"] = if section {
+        let analyses = if section {
             json!([empty, cut])
         } else {
             json!([null, null])
         };
-        completed["payload"]["frame_build_analysis"] = json!([build0, build1]);
+        let builds = json!([build0, build1]);
+        let mut completed = delegate.request(request, cancel, &mut |mut frame| {
+            let index = frame["payload"]["index"].as_u64().unwrap() as usize;
+            frame["payload"]["section_analysis"] = analyses[index].clone();
+            frame["payload"]["build_analysis"] = builds[index].clone();
+            event(frame);
+        })?;
+        completed["payload"]["frame_analysis"] = analyses;
+        completed["payload"]["frame_build_analysis"] = builds;
         Ok(completed)
     }
     fn cancel(&mut self) {}
@@ -708,9 +715,39 @@ fn paired_sections_and_build_stages_keep_frame_keys_and_empty_stage_analysis() {
         revision: 1,
         progress: &|_| {},
     };
+    let mut metadata = std::collections::BTreeMap::new();
+    let mut pixels = Vec::new();
     let report = adapter
-        .render_sequence(&scene, &frames, &context, &mut |_| Ok(()))
+        .render_sequence(&scene, &frames, &context, &mut |artifact| {
+            match artifact {
+                FrameArtifact::Metadata {
+                    key,
+                    section,
+                    build,
+                } => {
+                    assert!(!pixels.contains(&key));
+                    assert!(metadata.insert(key, (section, build)).is_none());
+                }
+                FrameArtifact::Png { key, .. } => {
+                    assert!(metadata.contains_key(&key), "analysis must precede PNG");
+                    pixels.push(key);
+                }
+                FrameArtifact::Image { .. } => panic!("expected Blender PNG"),
+            }
+            Ok(())
+        })
         .unwrap();
+    assert_eq!(pixels.len(), 4);
+    for (key, (section, build)) in metadata {
+        assert_eq!(
+            section.as_ref().map(|a| &a.legacy),
+            report.analyses.get(&key).map(|a| &a.legacy)
+        );
+        assert_eq!(
+            build.as_ref().map(|a| &a.legacy),
+            report.build_analyses.get(&key).map(|a| &a.legacy)
+        );
+    }
     assert_eq!(report.analyses.len(), 2);
     assert!(report.analyses.contains_key(&FrameKey {
         index: 5,

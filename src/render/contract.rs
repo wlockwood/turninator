@@ -617,8 +617,21 @@ pub struct RgbaFrame {
 }
 #[derive(Clone, Debug)]
 pub enum FrameArtifact {
-    Image { key: FrameKey, image: RgbaFrame },
-    Png { key: FrameKey, path: PathBuf },
+    /// Durable per-frame measurements, emitted before the corresponding pixels.
+    /// This is metadata only: it does not complete or count a rendered frame.
+    Metadata {
+        key: FrameKey,
+        section: Option<SectionAnalysis>,
+        build: Option<BuildAnalysis>,
+    },
+    Image {
+        key: FrameKey,
+        image: RgbaFrame,
+    },
+    Png {
+        key: FrameKey,
+        path: PathBuf,
+    },
 }
 pub struct RenderContext<'a> {
     pub cancel: &'a AtomicBool,

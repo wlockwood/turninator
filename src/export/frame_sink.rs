@@ -209,6 +209,9 @@ impl<'a> FrameSink<'a> {
         self.check_cancel()?;
         let key = match &artifact {
             FrameArtifact::Image { key, .. } | FrameArtifact::Png { key, .. } => *key,
+            FrameArtifact::Metadata { .. } => {
+                return Err("metadata is not a completed frame".into());
+            }
         };
         let frame = self
             .plan
@@ -224,6 +227,9 @@ impl<'a> FrameSink<'a> {
         writable_path(&self.root, &partial)?;
         writable_path(&self.root, &output)?;
         match artifact {
+            FrameArtifact::Metadata { .. } => {
+                unreachable!("metadata rejected before pixel staging")
+            }
             FrameArtifact::Image { image, .. } => {
                 if image.width != frame.width
                     || image.height != frame.height

@@ -182,6 +182,14 @@ pub(crate) fn run_export_with_backend_budget(
     let mut state = json!({"recipe":recipe,"stage":"rendering","destination":request.destination,"encoding":{"kind":request.kind,"codec":request.video_codec,"frame_rate":request.frame_rate}});
     if let Some(prior) = prior {
         state["report"] = prior["report"].clone();
+        state["frame_metadata"] = prior["frame_metadata"].clone();
+    }
+    if state["frame_metadata"].is_null() {
+        state["frame_metadata"] = if state["report"].is_null() {
+            json!({"analyses":[],"build_analyses":[]})
+        } else {
+            json!({"analyses":state["report"]["analyses"],"build_analyses":state["report"]["build_analyses"]})
+        };
     }
     write_json(&manifest, &state)?;
     let host_context = RenderContext {
@@ -190,20 +198,20 @@ pub(crate) fn run_export_with_backend_budget(
     };
     let operation = (|| -> Result<ExportResult> {
         let mut sink = FrameSink::new(&plan, &host_context)?;
+        validate_analysis_records(&state["frame_metadata"], &plan)?;
+        for frame in plan.frames.iter().filter(|f| sink.contains(f.key)) {
+            require_frame_metadata(&state["frame_metadata"], frame)?;
+        }
         if !sink.complete() || state["report"].is_null() {
-            let work_plan = if state["report"].is_null() {
-                plan.clone()
-            } else {
-                FramePlan {
-                    frames: plan
-                        .frames
-                        .iter()
-                        .filter(|f| !sink.contains(f.key) && !plan.repeat_of.contains_key(&f.key))
-                        .cloned()
-                        .collect(),
-                    repeat_of: Default::default(),
-                    transparent: plan.transparent,
-                }
+            let work_plan = FramePlan {
+                frames: plan
+                    .frames
+                    .iter()
+                    .filter(|f| !sink.contains(f.key) && !plan.repeat_of.contains_key(&f.key))
+                    .cloned()
+                    .collect(),
+                repeat_of: Default::default(),
+                transparent: plan.transparent,
             };
             if !work_plan.frames.is_empty() {
                 let reserve = work_plan.frames.iter().try_fold(0u64, |n, f| {
@@ -237,26 +245,46 @@ pub(crate) fn run_export_with_backend_budget(
                     &scene
                 };
                 let mut emitted = std::collections::BTreeSet::new();
+                let mut metadata_emitted = std::collections::BTreeSet::new();
                 let report = backend.render_sequence(
                     render_scene,
                     &work_plan,
                     &producer_context,
                     &mut |artifact| {
+                        check(context.cancel)?;
                         let key = match &artifact {
-                            FrameArtifact::Image { key, .. } | FrameArtifact::Png { key, .. } => {
+                            FrameArtifact::Metadata { key, .. } | FrameArtifact::Image { key, .. } | FrameArtifact::Png { key, .. } => {
                                 *key
                             }
                         };
-                        if !work_plan.frames.iter().any(|f| f.key == key)
-                            || work_plan.repeat_of.contains_key(&key)
-                            || !emitted.insert(key)
-                        {
-                            return Err("unknown, repeated or duplicate renderer frame key".into());
-                        }
-                        if sink.contains(key) {
-                            check(context.cancel)?;
+                        let frame = work_plan.frames.iter().find(|f| f.key == key)
+                            .ok_or("unknown renderer frame key")?;
+                        if let FrameArtifact::Metadata { section, build, .. } = artifact {
+                            if emitted.contains(&key) || !metadata_emitted.insert(key) {
+                                return Err("duplicate or late renderer metadata".into());
+                            }
+                            let records = json!({
+                                "analyses":section.iter().map(|a| json!({"key":key,"legacy":a.legacy,"cap_supported":a.cap_supported})).collect::<Vec<_>>(),
+                                "build_analyses":build.iter().map(|a| json!({"key":key,"legacy":a.legacy})).collect::<Vec<_>>()
+                            });
+                            validate_analysis_records(&records, &work_plan)?;
+                            require_frame_metadata(&records, frame)?;
+                            for field in ["analyses", "build_analyses"] {
+                                let entries = state["frame_metadata"][field].as_array_mut().ok_or("metadata records missing")?;
+                                entries.retain(|r| r["key"] != json!(key));
+                                entries.extend(records[field].as_array().unwrap().iter().cloned());
+                            }
+                            // Commit measurements before FrameSink can commit their pixels.
+                            write_json(&manifest, &state)?;
                             return Ok(());
                         }
+                        if !emitted.insert(key) {
+                            return Err("duplicate renderer frame key".into());
+                        }
+                        if (frame.section.is_some() || frame.visible_layers.is_some()) && !metadata_emitted.contains(&key) {
+                            return Err("renderer omitted metadata before pixels".into());
+                        }
+                        require_frame_metadata(&state["frame_metadata"], frame)?;
                         let path = sink.accept(artifact)?;
                         callback(JobEvent::Frame(path));
                         Ok(())
@@ -272,19 +300,26 @@ pub(crate) fn run_export_with_backend_budget(
                 {
                     return Err("renderer report identity/quality/count differs".into());
                 }
-                let old_report = state["report"].clone();
-                state["report"] = json!({"rendered_frame_count":report.frame_count,"warnings":report.warnings,"analyses":report.analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy,"cap_supported":a.cap_supported})).collect::<Vec<_>>(),"build_analyses":report.build_analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy})).collect::<Vec<_>>(),"phase_seconds":report.phase_timings.iter().map(|(k,v)|(k.clone(),v.as_secs_f64())).collect::<std::collections::BTreeMap<_,_>>()});
+                let mut completed = json!({"rendered_frame_count":report.frame_count,"warnings":report.warnings,"analyses":report.analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy,"cap_supported":a.cap_supported})).collect::<Vec<_>>(),"build_analyses":report.build_analyses.iter().map(|(key,a)|json!({"key":key,"legacy":a.legacy})).collect::<Vec<_>>(),"phase_seconds":report.phase_timings.iter().map(|(k,v)|(k.clone(),v.as_secs_f64())).collect::<std::collections::BTreeMap<_,_>>()});
+                validate_report(&completed, &work_plan)?;
                 for field in ["analyses", "build_analyses"] {
-                    for record in old_report[field].as_array().into_iter().flatten() {
-                        let key: FrameKey = serde_json::from_value(record["key"].clone())?;
-                        if !work_plan.frames.iter().any(|f| f.key == key) {
-                            state["report"][field]
-                                .as_array_mut()
-                                .ok_or("report records missing")?
-                                .push(record.clone());
-                        }
+                    let streamed: Vec<_> = state["frame_metadata"][field]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|r| work_plan.frames.iter().any(|f| r["key"] == json!(f.key)))
+                        .collect();
+                    let reported = completed[field].as_array().unwrap();
+                    if reported.len() != streamed.len()
+                        || streamed.iter().any(|r| !reported.contains(r))
+                    {
+                        return Err(
+                            "renderer final analysis differs from durable frame metadata".into(),
+                        );
                     }
+                    completed[field] = state["frame_metadata"][field].clone();
                 }
+                state["report"] = completed;
             }
             // Producer paths are still present until the entire render_sequence returns.
         } else {
@@ -294,7 +329,26 @@ pub(crate) fn run_export_with_backend_budget(
                 stage: "Reusing retained frames".into(),
             });
         }
+        // Equivalent repeats inherit the source measurements under their own key.
+        for (target, source) in &plan.repeat_of {
+            for field in ["analyses", "build_analyses"] {
+                let records = state["frame_metadata"][field].as_array_mut().unwrap();
+                let source = records.iter().find(|r| r["key"] == json!(source)).cloned();
+                records.retain(|r| r["key"] != json!(target));
+                if let Some(mut record) = source {
+                    record["key"] = json!(target);
+                    records.push(record);
+                }
+            }
+        }
+        if state["report"].is_null() {
+            state["report"] = json!({"rendered_frame_count":0,"warnings":[],"phase_seconds":{}});
+        }
+        for field in ["analyses", "build_analyses"] {
+            state["report"][field] = state["frame_metadata"][field].clone();
+        }
         validate_report(&state["report"], &plan)?;
+        write_json(&manifest, &state)?;
         sink.finish()?;
         if hash(mesh_path)? != mesh_hash || hash(&request.scene_path)? != scene_hash {
             return Err("job source changed during render".into());
@@ -378,6 +432,32 @@ fn publish(
 }
 
 fn validate_report(report: &Value, plan: &FramePlan) -> Result<()> {
+    validate_analysis_records(report, plan)?;
+    for frame in &plan.frames {
+        require_frame_metadata(report, frame)?;
+    }
+    Ok(())
+}
+
+fn require_frame_metadata(records: &Value, frame: &FrameSpec) -> Result<()> {
+    for (field, required) in [
+        ("analyses", frame.section.is_some()),
+        ("build_analyses", frame.visible_layers.is_some()),
+    ] {
+        if required
+            && !records[field]
+                .as_array()
+                .ok_or("analysis records missing")?
+                .iter()
+                .any(|r| r["key"] == json!(frame.key))
+        {
+            return Err("accepted frame requires durable keyed analysis".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_analysis_records(report: &Value, plan: &FramePlan) -> Result<()> {
     let mut sections = std::collections::BTreeSet::new();
     let mut builds = std::collections::BTreeSet::new();
     for (field, keys) in [("analyses", &mut sections), ("build_analyses", &mut builds)] {
@@ -396,14 +476,6 @@ fn validate_report(report: &Value, plan: &FramePlan) -> Result<()> {
             } else {
                 BuildAnalysis::from_legacy(record["legacy"].clone())?;
             }
-        }
-    }
-    for frame in &plan.frames {
-        if frame.section.is_some() && !sections.contains(&frame.key) {
-            return Err("renderer omitted section analysis".into());
-        }
-        if frame.visible_layers.is_some() && !builds.contains(&frame.key) {
-            return Err("renderer omitted build analysis".into());
         }
     }
     Ok(())

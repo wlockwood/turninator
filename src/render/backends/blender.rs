@@ -321,6 +321,23 @@ impl RenderBackend for BlenderBackend {
                     {
                         return Err("Blender frame path outside owned scratch".into());
                     }
+                    let section = event["payload"]
+                        .get("section_analysis")
+                        .filter(|a| !a.is_null())
+                        .map(|a| SectionAnalysis::from_legacy(a.clone(), a["closed_input"] == true))
+                        .transpose()?;
+                    let build = event["payload"]
+                        .get("build_analysis")
+                        .filter(|a| !a.is_null())
+                        .map(|a| BuildAnalysis::from_legacy(a.clone()))
+                        .transpose()?;
+                    if section.is_some() || build.is_some() {
+                        emit(FrameArtifact::Metadata {
+                            key: frame.key,
+                            section,
+                            build,
+                        })?;
+                    }
                     emit(FrameArtifact::Png {
                         key: frame.key,
                         path,
