@@ -103,6 +103,30 @@ def file_inventory(directory):
     return result
 
 
+def render_native_notices(manifest, root):
+    """Reproduce complete per-component text, including aggregate notices."""
+    root = Path(root).resolve()
+    parts = ["\n# Native renderer notices\n", f"Package variant: `{manifest['package_variant']}`.\n"]
+    files = {entry["path"]: entry for entry in manifest["files"]}
+    for component in manifest["components"]:
+        parts.append(f"\n## {component['id']} {component['version']}\n\nDeclared license: `{component['license']}`.\n")
+        source = component.get("corresponding_source")
+        if source:
+            parts.append(f"\nCorresponding source: {source['url']}\n\nSHA-256: `{source['sha256']}`.\n\n{source['instructions']}\n")
+        for name in component["notices"]:
+            path = (root / name).resolve()
+            if not path.is_relative_to(root):
+                raise ValueError("native notice path escapes package")
+            data = path.read_bytes()
+            entry = files[name]
+            if entry["role"] != "notice" or len(data) != entry["size_bytes"] or digest(data) != entry["sha256"]:
+                raise ValueError(f"native notice identity mismatch: {name}")
+            text = data.decode("utf-8-sig")
+            fence = "~" * max(4, max((len(match[0]) + 1 for match in re.finditer(r"~+", text)), default=4))
+            parts.append(f"\n### {name}\n\nSHA-256: `{entry['sha256']}`.\n\n{fence}text\n{text.rstrip()}\n{fence}\n")
+    return "\n".join(line.rstrip() for line in "\n".join(parts).splitlines()) + "\n"
+
+
 def command_output(args, cwd):
     result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=True,
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -114,12 +138,14 @@ def write_manifest(package_dir, source_root, metadata, profile, tools, prebuilt=
     root = Path(source_root).resolve()
     app = next(p for p in metadata["packages"] if p["id"] == metadata["resolve"]["root"])
     sources = {}
-    for directory in ("src", "renderer", "tools"):
+    for directory in ("src", "renderer", "tools", "native", "assets/render"):
         for path in sorted((root / directory).rglob("*")):
-            if path.is_file() and path.suffix in (".rs", ".wgsl", ".py", ".ps1", ".json"):
+            if path.is_file() and path.suffix in (".rs", ".wgsl", ".py", ".ps1", ".json", ".cpp", ".h", ".hpp", ".mat", ".txt", ".patch", ".cmake"):
                 sources[path.relative_to(root).as_posix()] = digest(path.read_bytes())
     for name in ("Cargo.toml", "Cargo.lock", "README.md", "docs/runtime-support.md", "THIRD-PARTY-NOTICES.md"):
         sources[name] = digest((root / name).read_bytes())
+    if (root / "build.rs").is_file():
+        sources["build.rs"] = digest((root / "build.rs").read_bytes())
     tool_identities = []
     for value in tools:
         path = Path(value).resolve()
@@ -151,10 +177,18 @@ def main():
     parser.add_argument("--profile", default="release")
     parser.add_argument("--tool", action="append", default=[])
     parser.add_argument("--prebuilt", action="store_true")
+    parser.add_argument("--native-manifest", type=Path)
+    parser.add_argument("--native-root", type=Path)
     args = parser.parse_args()
     metadata = json.loads(args.metadata.read_text(encoding="utf-8-sig"))
     supplements = json.loads(args.supplements.read_text(encoding="utf-8")) if args.supplements.exists() else {}
-    args.output.write_text(render_notices(metadata, supplements), encoding="utf-8", newline="\n")
+    text = render_notices(metadata, supplements)
+    if bool(args.native_manifest) != bool(args.native_root):
+        parser.error("--native-manifest and --native-root must be supplied together")
+    if args.native_manifest:
+        native = json.loads(args.native_manifest.read_text(encoding="utf-8-sig"))
+        text += render_native_notices(native, args.native_root)
+    args.output.write_text(text, encoding="utf-8", newline="\n")
     if args.package:
         write_manifest(args.package, args.source_root, metadata, args.profile, args.tool, args.prebuilt)
     print(f"Notices: {len(resolved_packages(metadata))} exact resolved third-party packages -> {args.output}")

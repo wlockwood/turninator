@@ -1,5 +1,10 @@
 # Runtime support and pinned identities
 
+The selectable-renderer rollout has a separate [native package qualification
+matrix](renderers/qualification-matrix.md). Its staged full/core packaging and
+runtime gates are explicit; the existing Blender evidence below does not certify
+the complete five-engine portable package.
+
 Verified on 2026-10-14. Turninator uses explicitly configured local executables. It does not download, replace or automatically update Blender or FFmpeg. A newer version is a compatibility candidate until the same application/runtime checks have passed against its actual binaries.
 
 ## Tested configuration

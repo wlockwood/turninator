@@ -4,6 +4,9 @@ param(
     [switch]$SkipBuild,
     [string]$ExecutablePath = '',
     [string]$PackageName = '',
+    [ValidateSet('full', 'core')][string]$Variant = 'full',
+    [string]$NativeSdkManifest = '',
+    [string]$NativeRuntimeDirectory = '',
     [string]$Python = 'python',
     [string]$Blender = 'C:/Program Files/Blender Foundation/Blender 4.5/blender.exe',
     [string]$FFmpeg = 'C:/Program Files/ffmpeg/bin/ffmpeg.exe',
@@ -17,6 +20,19 @@ if ($ExecutablePath -and -not $SkipBuild) {
 if ($PackageName -and $PackageName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$') {
     throw 'PackageName must be a single safe directory name.'
 }
+if ($Variant -eq 'full' -and (-not $NativeSdkManifest -or -not $NativeRuntimeDirectory)) {
+    throw 'Full packaging requires -NativeSdkManifest and -NativeRuntimeDirectory from a reviewed native build.'
+}
+if ($Variant -eq 'core' -and ($NativeSdkManifest -or $NativeRuntimeDirectory)) {
+    throw 'Core packaging must not accept optional native SDK inputs.'
+}
+$nativeArgs = @((Join-Path $PSScriptRoot 'native_package.py'), '--variant', $Variant)
+if ($Variant -eq 'full') {
+    $nativeArgs += @('--manifest', [IO.Path]::GetFullPath($NativeSdkManifest), '--runtime', [IO.Path]::GetFullPath($NativeRuntimeDirectory))
+}
+# Validate the closed native inventory before Cargo, build work or package writes.
+& $Python @nativeArgs
+if ($LASTEXITCODE -ne 0) { throw 'Native SDK inventory validation failed.' }
 function Assert-WorkspacePath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if (-not $full.StartsWith($workspace + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
@@ -46,7 +62,7 @@ try {
     $metadata = $metadataRaw | ConvertFrom-Json
     $application = $metadata.packages | Where-Object id -EQ $metadata.resolve.root
     if (-not $PackageName) {
-        $PackageName = 'turninator-' + $application.version + '-windows-x64-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $PackageName = 'turninator-' + $application.version + '-windows-x64-' + $Variant + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     }
     $releaseRoot = Assert-WorkspacePath (Join-Path $workspace 'artifacts/releases')
     $package = Assert-WorkspacePath (Join-Path $releaseRoot $PackageName)
@@ -60,25 +76,27 @@ try {
         & cargo @buildArgs
         if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
     }
-    $executable = if ($ExecutablePath) { [IO.Path]::GetFullPath($ExecutablePath) } else { Join-Path $workspace "target/$Profile/turninator.exe" }
+    $executable = if ($ExecutablePath) { [IO.Path]::GetFullPath($ExecutablePath) } else { Join-Path $metadata.target_directory "$Profile/turninator.exe" }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Missing executable: $executable" }
-    foreach ($resource in @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'README.md', 'docs/runtime-support.md')) {
+    $resources = @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'docs/runtime-support.md', 'docs/renderers/qualification-matrix.md')
+    foreach ($resource in ($resources + @('README.md'))) {
         if (-not (Test-Path -LiteralPath (Join-Path $workspace $resource) -PathType Leaf)) { throw "Missing runtime resource: $resource" }
     }
     New-Item -ItemType Directory -Path $package | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $package 'renderer'), (Join-Path $package 'docs') | Out-Null
+    & $Python @nativeArgs --output $package
+    if ($LASTEXITCODE -ne 0) { throw 'Native SDK staging failed; incomplete directory is not a release.' }
+    New-Item -ItemType Directory -Path (Join-Path $package 'renderer'), (Join-Path $package 'docs'), (Join-Path $package 'docs/renderers') | Out-Null
     Copy-Item -LiteralPath $executable -Destination (Join-Path $package 'turninator.exe')
-    foreach ($resource in @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'docs/runtime-support.md')) {
+    foreach ($resource in $resources) {
         Copy-Item -LiteralPath (Join-Path $workspace $resource) -Destination (Join-Path $package $resource)
     }
     Copy-Item -LiteralPath (Join-Path $workspace 'README.md') -Destination (Join-Path $package 'docs/source-readme.md')
     $metadataPath = Join-Path $package 'cargo-metadata.json'
     # Metadata is temporary: published inventory must not reveal local Cargo-cache paths.
     [IO.File]::WriteAllText($metadataPath, ($metadataRaw -join "`n"), [Text.UTF8Encoding]::new($false))
-    $noticesPath = Join-Path $workspace 'THIRD-PARTY-NOTICES.md'
-    & $Python (Join-Path $PSScriptRoot 'generate-notices.py') --metadata $metadataPath --output $noticesPath
+    $noticesPath = Join-Path $package 'THIRD-PARTY-NOTICES.md'
+    & $Python (Join-Path $PSScriptRoot 'generate-notices.py') --metadata $metadataPath --output $noticesPath --native-manifest (Join-Path $package 'native-sdk-manifest.json') --native-root $package
     if ($LASTEXITCODE -ne 0) { throw 'Dependency/font notice generation failed.' }
-    Copy-Item -LiteralPath $noticesPath -Destination (Join-Path $package 'THIRD-PARTY-NOTICES.md')
     $readme = @'
 # Turninator portable Windows build
 
@@ -86,12 +104,14 @@ Extract the entire folder, then double-click turninator.exe. Keep the renderer
 folder beside it. The application can be launched from another working directory.
 Native STL/G-code inspection works without Blender, FFmpeg, Python or Rust installed.
 
-Rendering and export use separately installed Blender, FFmpeg and ffprobe. Open
-Tools / storage in the app, enter each executable's full path, and Save settings.
-See docs/runtime-support.md for exact tested versions, hashes and GPU requirements.
-Cycles currently requires a supported NVIDIA OptiX GPU. EEVEE is the other explicit
-render choice. Missing tools produce an actionable error; they are not downloaded.
-No external executable is included in this package.
+Native wgpu rendering is embedded. Full packages also carry Filament and LuxCore
+under renderers; core development packages omit these optional SDKs and report
+them unavailable. native-sdk-manifest.json identifies the actual package variant
+and native payload. Native SDK presence does not promise support on every GPU.
+Blender EEVEE/Cycles use a separate Blender installation. GIF/MP4 encoding needs
+separately installed FFmpeg/ffprobe. Configure full executable paths in Tools /
+storage. Missing tools are reported and are not downloaded. See the runtime
+documentation for device qualification, approximations and output requirements.
 
 By default settings and retained jobs live in %LOCALAPPDATA%/Turninator. A fresh,
 self-contained data location can be selected from PowerShell:
@@ -105,7 +125,8 @@ docs/source-readme.md contains the source checkout's usage and limitations.
 version-manifest.json records package file hashes, source hashes, the resolved
 dependency versions, compiler identity, and external binaries observed on the build
 machine. Those tools are not bundled. THIRD-PARTY-NOTICES.md contains the dependency
-and embedded-font notices. This package does not assign a new license to Turninator
+and embedded-font notices, plus native component notices and source availability.
+This package does not assign a new license to Turninator
 or to imported models. The manifest excludes itself and the ZIP archive.
 '@
     [IO.File]::WriteAllText((Join-Path $package 'README.md'), $readme, [Text.UTF8Encoding]::new($false))
@@ -116,6 +137,7 @@ or to imported models. The manifest excludes itself and the ZIP archive.
     $manifestArgs = @((Join-Path $PSScriptRoot 'generate-notices.py'), '--metadata', $temporaryMetadata,
         '--output', (Join-Path $package 'THIRD-PARTY-NOTICES.md'), '--package', $package,
         '--source-root', $workspace, '--profile', $Profile, '--tool', $Blender, '--tool', $FFmpeg, '--tool', $FFprobe)
+    $manifestArgs += @('--native-manifest', (Join-Path $package 'native-sdk-manifest.json'), '--native-root', $package)
     if ($SkipBuild) { $manifestArgs += '--prebuilt' }
     & $Python @manifestArgs
     if ($LASTEXITCODE -ne 0) { throw 'Version manifest generation failed.' }
