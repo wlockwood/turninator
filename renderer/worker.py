@@ -152,10 +152,24 @@ def load_frame_states(request, count):
     return None if states is None else validate_frame_states(states,count)
 
 
-def completion_event(payload, details_path):
+def with_analysis_warnings(payload):
+    """Keep frame-specific cut limitations visible in the export job result."""
     result=dict(payload)
+    warnings=list(dict.fromkeys(result.get("warnings",[])))
+    for field in ("frame_build_analysis","frame_analysis"):
+        for analysis in result.get(field,[]):
+            if analysis is not None:
+                for warning in analysis.get("warnings",[]):
+                    if warning not in warnings:
+                        warnings.append(warning)
+    result["warnings"]=warnings
+    return result
+
+
+def completion_event(payload, details_path):
+    result=with_analysis_warnings(payload)
     if len(json.dumps(result,allow_nan=False).encode())>900000:
-        for field in ("paths","frame_seconds","frame_analysis","build_layers"):
+        for field in ("paths","frame_seconds","frame_analysis","frame_build_analysis","build_layers"):
             result.pop(field,None)
         result["details_path"]=str(details_path)
         if len(json.dumps(result,allow_nan=False).encode())>900000:
@@ -235,9 +249,11 @@ def render(request):
     visible_layers = ([layer_for_count(info["build_layers"],stage["visible_layers"])]*len(angles) if stage is not None
                       else [layer_for_fraction(info["build_layers"],state["buildup_fraction"]) for state in states] if states is not None and building
                       else buildup_schedule(info["build_layers"],len(angles)) if building else [None]*len(angles))
-    source_mesh=obj.data.copy() if building and spec.get("section") is not None else None
+    source_mesh=obj.data.copy() if building and (spec["geometry_kind"] == "original" or spec.get("section") is not None) else None
     sources = identical_frame_sources(angles, states, visible_layers)
     frame_analysis=[]
+    frame_build_analysis=[]
+    prepared_layer=None
     completed = []
     durations = []
     rendered_count = 0
@@ -252,20 +268,27 @@ def render(request):
             else:
                 verified_count += 1
             frame_analysis.append(frame_analysis[sources[index]])
+            frame_build_analysis.append(frame_build_analysis[sources[index]])
             elapsed = time.perf_counter() - frame_start
             durations.append(elapsed)
             completed.append(str(output_path))
             emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
                                     "elapsed_seconds": elapsed, "size": size, "reused": True,
                                     "reuse_kind": "identical", "source_index": sources[index],
-                                    "visible_layer": visible_layers[index], "section_analysis": frame_analysis[-1]})
+                                    "visible_layer": visible_layers[index], "section_analysis": frame_analysis[-1],
+                                    "build_analysis":frame_build_analysis[-1]})
             continue
         if visible_layers[index] is not None:
             if source_mesh is not None:
-                info["section_analysis"]=prepare_buildup_section(obj,source_mesh,spec,info["bounds_m"],visible_layers[index])
+                if prepared_layer != visible_layers[index]:
+                    build_analysis={} if spec["geometry_kind"] == "original" else None
+                    info["section_analysis"]=prepare_buildup_section(obj,source_mesh,spec,info["bounds_m"],visible_layers[index],build_analysis)
+                    info["build_analysis"]=build_analysis
+                    prepared_layer=visible_layers[index]
             else:
                 set_visible_layer(obj,visible_layers[index])
         frame_analysis.append(info.get("section_analysis"))
+        frame_build_analysis.append(info.get("build_analysis"))
         if states is not None:
             set_camera_spec(bpy.context.scene.camera,states[index]["camera"])
             if spec.get("layer_appearance",False) and spec.get("layer_filtering",True):
@@ -277,7 +300,7 @@ def render(request):
             durations.append(elapsed)
             completed.append(str(output_path))
             emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                    "elapsed_seconds": elapsed, "size": size, "reused": True,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis")})
+                                    "elapsed_seconds": elapsed, "size": size, "reused": True,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis"),"build_analysis":info.get("build_analysis")})
             continue
         obj.rotation_euler.z = math.radians(angle)
         temporary = output_path.with_name(output_path.stem + ".partial.png")
@@ -295,7 +318,7 @@ def render(request):
         durations.append(elapsed)
         completed.append(str(output_path))
         emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                "elapsed_seconds": elapsed, "size": size, "reused": False,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis")})
+                                "elapsed_seconds": elapsed, "size": size, "reused": False,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis"),"build_analysis":info.get("build_analysis")})
     analysis_path=output_dir/"frame-analysis.json"
     analysis_temporary=analysis_path.with_suffix(".partial.json")
     analysis_temporary.write_text(json.dumps(frame_analysis,allow_nan=False),encoding="utf-8")
@@ -305,8 +328,9 @@ def render(request):
              "unique_frame_count": len(set(sources)), "rendered_frame_count": rendered_count,
              "copied_frame_count": copied_count, "verified_frame_count": verified_count,
              "prepare_seconds": prepare_seconds, "frame_seconds": durations,
-             "total_seconds": time.perf_counter() - started,"frame_analysis":frame_analysis,
+             "total_seconds": time.perf_counter() - started,"frame_analysis":frame_analysis,"frame_build_analysis":frame_build_analysis,
              "frame_analysis_path":str(analysis_path),**info}
+    payload=with_analysis_warnings(payload)
     details_path=output_dir/"render-result.json"
     details_temporary=details_path.with_suffix(".partial.json")
     details_temporary.write_text(json.dumps(payload,allow_nan=False),encoding="utf-8")

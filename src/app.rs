@@ -392,7 +392,7 @@ impl Studio {
             } else {
                 None
             },
-            buildup_height_mm: if self.buildup && beads {
+            buildup_height_mm: if self.buildup {
                 Some(self.model.as_ref().map_or(self.buildup_height, |model| {
                     crate::presentation::visible_layer_height(model, self.buildup_height as f64)
                         as f32
@@ -459,10 +459,18 @@ impl Studio {
         self.timeline_angle = 0.;
         self.fit();
         self.changed();
-        self.status = format!(
-            "Face {} now points down. Print layers retain their build orientation.",
-            hit.triangle_index + 1
-        );
+        self.status = if self
+            .model
+            .as_ref()
+            .is_some_and(|model| hit.triangle_index >= model.mesh.triangles.len())
+        {
+            "Build-up cut face now points down. Print layers retain their build orientation.".into()
+        } else {
+            format!(
+                "Face {} now points down. Print layers retain their build orientation.",
+                hit.triangle_index + 1
+            )
+        };
         Ok(())
     }
     fn settle_pointer(
@@ -493,7 +501,7 @@ impl Studio {
                 self.timeline_angle = sample.turntable_degrees as f32;
                 if let Some(fraction) = sample.buildup_fraction
                     && let Some(model) = &self.model
-                    && !model.groups.is_empty()
+                    && !model.layer_tops_mm.is_empty()
                 {
                     let count = ((fraction * model.layer_tops_mm.len() as f64).floor() as usize
                         + 1)
@@ -662,7 +670,7 @@ impl Studio {
             if self.buildup
                 && !progressive
                 && let Some(model) = &self.model
-                && !model.groups.is_empty()
+                && !model.layer_tops_mm.is_empty()
             {
                 request.build_stage = Some(crate::export::BuildStage {
                     visible_layers: crate::presentation::visible_layer_count(
@@ -948,7 +956,7 @@ impl Studio {
                                     if self
                                         .model
                                         .as_ref()
-                                        .is_none_or(|model| model.groups.is_empty())
+                                        .is_none_or(|model| model.layer_tops_mm.is_empty())
                                     {
                                         self.export_buildup = false;
                                         self.timeline.buildup = false;
@@ -1264,7 +1272,7 @@ impl Studio {
             build_stage: self
                 .model
                 .as_ref()
-                .filter(|m| self.buildup && !m.groups.is_empty())
+                .filter(|m| self.buildup && !m.layer_tops_mm.is_empty())
                 .map(|model| crate::export::BuildStage {
                     visible_layers: crate::presentation::visible_layer_count(
                         model,
@@ -1288,7 +1296,7 @@ impl Studio {
             ui.add(egui::DragValue::new(&mut self.timeline.duration_seconds).range(0.05..=500.).speed(0.1).suffix(" seconds")).help("Total camera-animation duration in seconds. Export uses 20 fps, rounded to the nearest frame. All key times must fit within this duration.");
             ui.checkbox(&mut self.timeline.looping, "Close camera path into a loop").help("Return the camera to its first recorded view before the clip repeats. Leave time after the last key for a closing transition, or finish with a matching camera; incompatible endpoints are rejected.");
             ui.checkbox(&mut self.timeline.turntable, "Rotate the model too").help("Add one full model rotation over the camera timeline while lights stay fixed. Camera motion and deposited-layer build-up can run at the same time.");
-            let deposited = self.model.as_ref().is_some_and(|m| !m.groups.is_empty());
+            let deposited = self.model.as_ref().is_some_and(|m| !m.layer_tops_mm.is_empty());
             ui.small("20 fps. Set a time, orbit/pan to compose a view, then record it. Transition settings belong to the segment leaving each key.");
             let scrub = ui.add(egui::Slider::new(&mut self.timeline_time, 0.0..=self.timeline.duration_seconds).text("Time (s)")).help("Scrub this camera path in seconds to preview the camera and deposited stage in native inspection. Scrubbing pauses playback; it does not change clip length or key times.");
             let mut sample = scrub.changed();
@@ -1356,12 +1364,16 @@ impl Studio {
             if let Err(error)=self.timeline.validate() { ui.colored_label(egui::Color32::YELLOW,error.to_string()); }
             else if let Ok(frames)=self.timeline.frame_count() { ui.small(format!("{frames} frames • {:.2} s",self.timeline.duration_seconds)); }
             if sample { self.sample_timeline(); }
-            if deposited && (self.timeline.buildup || self.export_buildup) { ui.small("Build-up reveals complete deposited layers; it does not reproduce machine time, nozzle motion, or material flow."); }
+            if deposited && (self.timeline.buildup || self.export_buildup) { ui.small("Build-up reveals whole print layers. STL cuts show the modeled solid; G-code retains deposited paths and gaps. This does not reproduce printer time or nozzle travel."); }
         }).help("Record camera views at chosen times and define the motion between them. Enable the timeline to replace basic turntable timing for GIF or MP4.");
     }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let preview_options_before = (self.preview_engine().to_owned(), self.transparent);
         let has_model = self.model.is_some();
+        let buildable = self
+            .model
+            .as_ref()
+            .is_some_and(|model| !model.layer_tops_mm.is_empty());
         let beads = self
             .model
             .as_ref()
@@ -1381,6 +1393,8 @@ impl Studio {
                     model.segment_count,
                     model.layer_tops_mm.len()
                 ));
+            } else if !model.layer_tops_mm.is_empty() {
+                ui.small(format!("{} solid print layers", model.layer_tops_mm.len()));
             }
             ui.collapsing("Source assumptions and features", |ui| {
                 for warning in &model.warnings {
@@ -1524,9 +1538,10 @@ impl Studio {
                 if let Some(home) = &mut self.scene.import.homing_position_mm {ui.horizontal(|ui|{for (axis,value) in ["X","Y","Z"].into_iter().zip(home) {ui.add(egui::DragValue::new(value).prefix(format!("{axis} ")).speed(0.1)).help(format!("Known {axis}-axis home coordinate in millimetres, used when the G-code issues G28. Enter the machine position explicitly rather than assuming an unknown home."));}});}
             }).help("Choose the supported dialect and explicitly enable optional path features. This is a bounded geometry preview, not a printer firmware or macro emulator.");
             }
-            if beads || self.scene.import.stepped_envelope {
+            if beads || self.scene.import.stepped_envelope || !self.scene.layer_appearance || sheet {
             if beads && self.scene.import.layer_boundaries_mm.is_empty() { ui.small("Slicer heights are read or estimated from the file; defaults cover other supported G-code. See import warnings for assumptions."); }
             controls::layer_settings(ui, &mut self.scene, false);
+            if beads || self.scene.import.stepped_envelope {
             ui.collapsing("Explicit adaptive layer boundaries",|ui| {
                 ui.label("G-code / stepped STL: mm boundaries, starting at 0");
                 ui.text_edit_multiline(&mut self.adaptive_text).help("Comma-separated physical layer boundaries in millimetres, starting at 0. Editing this text alone does not rebuild; choose Apply boundaries when ready.");
@@ -1543,6 +1558,7 @@ impl Studio {
                 if ui.button("Use uniform layers / file metadata").help("Clear the explicit adaptive schedule and return to the layer-height defaults or supported G-code HEIGHT metadata.").clicked() {self.scene.import.layer_boundaries_mm.clear();self.adaptive_text.clear();}
                 ui.small(format!("{} explicit boundaries",self.scene.import.layer_boundaries_mm.len()));
             }).help("Define exact layer heights instead of uniform defaults. Enter boundary heights in millimetres, starting with 0 and increasing, for example: 0, 0.2, 0.45, 0.65.");
+            }
             }
         }).help("Settings that change imported geometry or how physical dimensions are interpreted. Editing these rebuilds the model while leaving the source file unchanged.");
             if !sheet {
@@ -1634,9 +1650,9 @@ impl Studio {
                     egui::Slider::new(&mut self.opacity, 0.02..=0.95).text("Inspection opacity"),
                 ).help("Set how much of the native model shows through in Ghost or Xray mode. This is an inspection aid; rendered material transparency uses Resin settings.");
             }
-            if beads {
+            if buildable {
                 if ui
-                    .checkbox(&mut self.buildup, "Show printed build-up").help("Inspect only the G-code layers deposited up to the chosen height. Exports can use this as a fixed stage; progressive build-up instead reveals layers during the clip.")
+                    .checkbox(&mut self.buildup, "Show printed build-up").help("Reveal the part up to the selected print height. Closed STL surfaces are cut as a solid, with a filled top and real holes preserved; G-code reveals complete deposited beads. Preview, PNG, sheets and ordinary turntables retain this fixed stage. Export build-up animation grows the part over the clip.")
                     .changed()
                 {
                     self.changed();
@@ -1650,13 +1666,16 @@ impl Studio {
                         .add(
                             egui::Slider::new(&mut self.buildup_height, 0.0..=top)
                                 .text("Printed height (mm)"),
-                        ).help("Reveal complete deposited layers up to this physical height in millimetres. The slider snaps visibility to actual layer tops; zero shows an empty build.")
+                        ).help("Printed height in millimetres, snapped to whole layer tops. STL uses the configured first/later layer heights with the last layer at the model top; G-code uses its depositing heights. Zero shows an empty build, and the maximum shows the complete model.")
                         .changed()
                     {
                         self.timeline_playing = false;
                         self.changed();
                     }
-                    ui.checkbox(&mut self.buildup_playing, "Play build-up").help("Cycle deposited height in native inspection to see how the part grows. Export build-up animation creates a file and has its own timing.");
+                    ui.checkbox(&mut self.buildup_playing, "Play build-up").help("Cycle printed height in native inspection to see how the part grows. Export build-up animation creates a GIF or MP4 and has its own timing.");
+                    if let Some(warning) = self.viewport.buildup_cap_warning() {
+                        ui.colored_label(egui::Color32::YELLOW, warning);
+                    }
                 }
             }
             ui.small("Drag to orbit • right-drag to pan • wheel to zoom");
@@ -1683,7 +1702,7 @@ impl Studio {
         let animated = self.output_format.animated();
         if has_model && animated {
             self.timeline_controls(ui);
-            if beads {
+            if buildable {
                 controls::build_up_checkbox(
                     ui,
                     &mut self.export_buildup,
@@ -1691,7 +1710,7 @@ impl Studio {
                 );
             }
         }
-        if has_model && animated && !self.timeline_enabled && !(beads && self.export_buildup) {
+        if has_model && animated && !self.timeline_enabled && !(buildable && self.export_buildup) {
             ui.group(|ui| {
                 ui.label("Basic turntable");
                 ui.horizontal(|ui| {
@@ -1848,11 +1867,37 @@ impl Studio {
         }
         if self.smoke_stage == 0 && self.model.is_some() && !self.importing {
             let _ = fs::create_dir_all(&directory);
+            let solid_stage = self
+                .model
+                .as_ref()
+                .filter(|model| model.geometry_kind == "original" && model.layer_tops_mm.len() >= 2)
+                .map(|model| {
+                    let count = model.layer_tops_mm.len() / 2;
+                    (count, model.layer_tops_mm[count - 1])
+                });
+            if let Some((_, height)) = solid_stage {
+                self.buildup = true;
+                self.buildup_height = height as f32;
+                self.changed();
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "native",
             )));
             self.smoke_stage = 1;
             self.start_export(ExportKind::Still, directory.join("stale-preview.png"), true);
+            if let Some((count, _)) = solid_stage {
+                self.smoke_checks["solid_build_stage_reaches_preview"] =
+                    serde_json::json!(self.last_task.as_ref().is_some_and(
+                        |(request, scene, _, _, _)| {
+                            request
+                                .build_stage
+                                .is_some_and(|stage| stage.visible_layers == count as u32)
+                                && scene["solid_layer_tops_mm"]
+                                    .as_array()
+                                    .is_some_and(|tops| tops.len() > count)
+                        }
+                    ));
+            }
             self.scene.import.layer_height_mm = 0.3;
             self.scene.import.first_layer_height_mm = 0.25;
             self.scene.print_settings_edited = true;

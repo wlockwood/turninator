@@ -10,7 +10,9 @@ Running turninator.exe without arguments opens the studio. Drag a model into the
 
 **Presentation pose → Settle on face** lets you click a visible triangle and point its face down. Layers retain their build orientation. This aligns a face; it does not calculate physical stability.
 
-STL Layer Appearance preserves the original silhouette. G-code creates actual rounded bead surfaces, optionally joined at contiguous path corners. Source assumptions, units and tool/feature labels are visible in the sidebar. Ghost/Xray modes use approximate transparency; native sections are uncapped. G-code build-up reveals complete deposited layers, including adaptive heights.
+STL Layer Appearance preserves the original silhouette. G-code creates actual rounded bead surfaces, optionally joined at contiguous path corners. Source assumptions, units and tool/feature labels are visible in the sidebar. Ghost/Xray modes use approximate transparency; native sections are uncapped. G-code build-up reveals complete deposited layers, including adaptive heights, and preserves infill gaps.
+
+**Show printed build-up** reveals either the modeled STL solid or complete G-code layers at the chosen printed height. Closed STL cuts have a filled top surface and preserve modeled holes; the surface mesh describes the boundary of the solid. The selected stage carries into previews, PNGs, sheets and ordinary turntables. **Export build-up animation** instead grows the part through its layers during GIF/MP4 export, ending at the complete model; it can follow camera motion and sections. STL layers use the configured first/later heights, with the final layer at the true model top. Open or ambiguous STL boundaries cannot define a reliable solid cap and show an explanation.
 
 ## Tools and outputs
 

@@ -101,7 +101,8 @@ pub struct SectionSpec {
     pub keep_positive: bool,
     pub cap: bool,
 }
-/// Number of actual deposited layers to retain; zero is an empty build plate.
+/// Number of print layers to retain: STL solid slices or G-code deposited layers.
+/// Zero is an empty build plate; the full count shows the complete source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildStage {
     pub visible_layers: u32,
@@ -818,6 +819,56 @@ pub fn diagram_measurements(
             }
         }
     }
+    let points: Vec<_> = mesh
+        .positions
+        .iter()
+        .zip(referenced)
+        .filter_map(|(point, used)| used.then_some(*point))
+        .collect();
+    diagram_point_measurements(&points, center, cameras)
+}
+
+/// Project the actual clipped solid, including triangle/plane intersections.
+/// Retain the full source origin so labels align with the unchanged framing.
+pub fn diagram_solid_measurements(
+    mesh: &crate::mesh::Mesh,
+    cameras: &[Value; 4],
+    height_mm: f64,
+) -> Result<[Option<DiagramDimension>; 4]> {
+    let bounds = mesh.bounds()?;
+    if !height_mm.is_finite() || height_mm < 0. {
+        return Err("solid build height must be finite and nonnegative".into());
+    }
+    if height_mm <= bounds.min[2] {
+        return Ok([None; 4]);
+    }
+    let mut points = Vec::new();
+    for triangle in &mesh.triangles {
+        for i in 0..3 {
+            let a = mesh.positions[triangle[i] as usize];
+            let b = mesh.positions[triangle[(i + 1) % 3] as usize];
+            if a[2] <= height_mm {
+                points.push(a);
+            }
+            if (a[2] < height_mm && b[2] > height_mm) || (b[2] < height_mm && a[2] > height_mm) {
+                let t = (height_mm - a[2]) / (b[2] - a[2]);
+                points.push([
+                    a[0] + t * (b[0] - a[0]),
+                    a[1] + t * (b[1] - a[1]),
+                    height_mm,
+                ]);
+            }
+        }
+    }
+    let center = std::array::from_fn(|i| (bounds.min[i] + bounds.max[i]) * 0.5);
+    diagram_point_measurements(&points, center, cameras)
+}
+
+fn diagram_point_measurements(
+    points: &[[f64; 3]],
+    center: [f64; 3],
+    cameras: &[Value; 4],
+) -> Result<[Option<DiagramDimension>; 4]> {
     let mut output = [None; 4];
     for (index, camera) in cameras.iter().enumerate() {
         let direction: [f64; 3] = serde_json::from_value(camera["direction"].clone())?;
@@ -833,10 +884,7 @@ pub fn diagram_measurements(
         let up = cross(direction, right);
         let mut min_mm = [f64::INFINITY; 2];
         let mut max_mm = [f64::NEG_INFINITY; 2];
-        for (point, used) in mesh.positions.iter().zip(&referenced) {
-            if !used {
-                continue;
-            }
+        for point in points {
             let offset = std::array::from_fn(|i| point[i] - center[i]);
             for (axis, value) in [dot(offset, right), dot(offset, up)]
                 .into_iter()
@@ -934,8 +982,29 @@ fn render_diagram(
     let bounds = data.bounds()?;
     let dimensions = std::array::from_fn(|i| bounds.max[i] - bounds.min[i]);
     let cameras = diagram_cameras(dimensions, layout.panel_width, layout.panel_height);
-    let visibility = diagram_stage_visibility(&data, scene, request.build_stage)?;
-    let measurements = diagram_measurements(&data, &cameras, visibility.as_deref())?;
+    let measurements = if scene["geometry_kind"] == "original"
+        && let Some(stage) = request.build_stage
+    {
+        let tops = scene["solid_layer_tops_mm"]
+            .as_array()
+            .ok_or("solid build stage requires layer heights")?;
+        let count = stage.visible_layers as usize;
+        if count > tops.len() {
+            return Err("solid build stage exceeds available layers".into());
+        }
+        let height = if count == 0 {
+            0.
+        } else {
+            tops[count - 1]
+                .as_f64()
+                .filter(|height| height.is_finite() && *height > 0.)
+                .ok_or("invalid solid layer top")?
+        };
+        diagram_solid_measurements(&data, &cameras, height)?
+    } else {
+        let visibility = diagram_stage_visibility(&data, scene, request.build_stage)?;
+        diagram_measurements(&data, &cameras, visibility.as_deref())?
+    };
     let mut sheet = image::RgbaImage::from_pixel(
         request.size,
         request.size,

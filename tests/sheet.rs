@@ -51,6 +51,28 @@ fn dimensions_follow_selected_geometry_and_omit_an_empty_build() {
 }
 
 #[test]
+fn solid_stage_dimensions_include_plane_intersections_at_the_full_source_camera_origin() {
+    use turninator::export::jobs::diagram_solid_measurements;
+    let mesh = tetrahedron();
+    let cameras = diagram_cameras([10.; 3], 400, 380);
+    let half = diagram_solid_measurements(&mesh, &cameras, 5.).unwrap();
+    assert_eq!(half[2].unwrap().length_mm, 10.);
+    assert_eq!(half[2].unwrap().min_mm, [-5., -5.]);
+    assert_eq!(half[2].unwrap().max_mm, [5., 0.]);
+    let full = diagram_solid_measurements(&mesh, &cameras, 10.).unwrap();
+    let ordinary = diagram_measurements(&mesh, &cameras, None).unwrap();
+    for i in 0..4 {
+        assert_eq!(full[i].unwrap().length_mm, ordinary[i].unwrap().length_mm);
+    }
+    assert!(
+        diagram_solid_measurements(&mesh, &cameras, 0.)
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+}
+
+#[test]
 #[ignore = "requires Blender/GPU; actual annotated four-view export and retained dimension/camera checks"]
 fn annotated_sheet_renders_requested_quadrants_at_shared_scale() {
     use std::{fs, path::Path, sync::atomic::AtomicBool};

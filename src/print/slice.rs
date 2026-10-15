@@ -1,6 +1,9 @@
 //! Bounded experimental mid-layer stepped envelope, not nozzle toolpath slicing.
 use super::schedule::LayerSchedule;
-use crate::{Result, mesh::Mesh};
+use crate::{
+    Result,
+    mesh::{Bounds, Mesh},
+};
 use i_overlay::{
     core::{fill_rule::FillRule, overlay::ShapeType, overlay_rule::OverlayRule},
     float::overlay::{FloatOverlay, OverlayOptions},
@@ -18,6 +21,73 @@ pub struct SteppedEnvelope {
     pub sample_heights_mm: Vec<f64>,
     pub coordinate_tolerance_mm: f64,
     pub warnings: Vec<String>,
+}
+
+/// A validated source solid reused across build-up frames.
+pub struct BuildUpSolid {
+    mesh: Mesh,
+    bounds: Bounds,
+}
+impl BuildUpSolid {
+    pub fn new(mesh: &Mesh) -> Result<Self> {
+        let bounds = mesh.bounds()?;
+        validate_closed(mesh)?;
+        Ok(Self {
+            mesh: mesh.clone(),
+            bounds,
+        })
+    }
+    /// An upward-facing section of the solid at a height above its build minimum.
+    /// Empty and completed builds need no added face. Exact vertex-plane contacts
+    /// use the section approached from below, without displacing the cut plane.
+    pub fn cap(&self, height_mm: f64) -> Result<Mesh> {
+        if !height_mm.is_finite() || height_mm < 0. {
+            return Err("invalid solid build-up height".into());
+        }
+        if height_mm == 0. || height_mm >= self.bounds.max[2] - self.bounds.min[2] {
+            return Ok(Mesh::default());
+        }
+        let z = self.bounds.min[2] + height_mm;
+        let contours = section(&self.mesh, z)?;
+        let count: usize = contours.iter().map(Vec::len).sum();
+        if count.saturating_mul(count) > WORK_BUDGET {
+            return Err("build-up cap contour intersection work budget exceeded".into());
+        }
+        let tolerance = (self.bounds.max[0] - self.bounds.min[0])
+            .max(self.bounds.max[1] - self.bounds.min[1])
+            * 2f64.powi(-45);
+        validate_contours(&contours, tolerance)?;
+        let mut shapes = group_contours(contours)?;
+        // Existing planar faces at this stage already close their own region.
+        // Overdrawing them would change opacity in Ghost/Xray inspection.
+        let coplanar: Shapes = self
+            .mesh
+            .triangles
+            .iter()
+            .filter_map(|t| {
+                let points = t.map(|i| self.mesh.positions[i as usize]);
+                points
+                    .iter()
+                    .all(|p| p[2] == z)
+                    .then(|| vec![points.iter().map(|p| [p[0], p[1]]).collect()])
+            })
+            .collect();
+        if !coplanar.is_empty() {
+            let adapter = FloatPointAdapter::<Point, i64>::with_coordinate_bits(
+                FloatRect {
+                    min_x: self.bounds.min[0],
+                    max_x: self.bounds.max[0],
+                    min_y: self.bounds.min[1],
+                    max_y: self.bounds.max[1],
+                },
+                48,
+            );
+            shapes = difference(&shapes, &coplanar, &adapter);
+        }
+        let mut builder = Builder::default();
+        cap(&mut builder, &shapes, z, true)?;
+        Ok(builder.mesh)
+    }
 }
 pub fn slice_stepped(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<Mesh> {
     Ok(slice_stepped_with_report(mesh, boundaries_mm)?.mesh)
@@ -161,7 +231,7 @@ fn validate_closed(mesh: &Mesh) -> Result<()> {
         .values()
         .any(|&(count, balance)| count != 2 || balance != 0)
     {
-        return Err("stepped envelope requires a closed consistently oriented manifold; open/nonmanifold edges are not repaired".into());
+        return Err("solid sections require a closed consistently oriented manifold; open/nonmanifold edges are not repaired".into());
     }
     Ok(())
 }
@@ -169,6 +239,7 @@ fn validate_closed(mesh: &Mesh) -> Result<()> {
 fn section(mesh: &Mesh, z: f64) -> Result<Vec<Contour>> {
     let mut points = BTreeMap::<(u32, u32), Point>::new();
     let mut neighbors = BTreeMap::<(u32, u32), Vec<(u32, u32)>>::new();
+    let mut segments = BTreeMap::new();
     for triangle in &mesh.triangles {
         let mut hits = Vec::new();
         for (a, b) in [
@@ -183,19 +254,40 @@ fn section(mesh: &Mesh, z: f64) -> Result<Vec<Contour>> {
                 continue;
             }
             let t = (z - p[2]) / (q[2] - p[2]);
+            // All incident edges meeting the plane at a vertex share one node.
+            let key = if p[2] == z {
+                (key.0, key.0)
+            } else if q[2] == z {
+                (key.1, key.1)
+            } else {
+                key
+            };
             points
                 .entry(key)
                 .or_insert([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]);
             hits.push(key);
         }
-        if hits.is_empty() {
+        hits.sort_unstable();
+        hits.dedup();
+        if hits.len() < 2 {
             continue;
         }
         if hits.len() != 2 {
             return Err("ambiguous triangle-plane intersection".into());
         }
-        neighbors.entry(hits[0]).or_default().push(hits[1]);
-        neighbors.entry(hits[1]).or_default().push(hits[0]);
+        *segments.entry((hits[0], hits[1])).or_insert(0u32) += 1;
+    }
+    for ((a, b), count) in segments {
+        if count > 2 {
+            return Err("ambiguous overlapping triangle-plane segments".into());
+        }
+        // Two retained triangles sharing an edge on the plane only touch it;
+        // that internal edge is not the boundary of the limiting section.
+        if count == 2 {
+            continue;
+        }
+        neighbors.entry(a).or_default().push(b);
+        neighbors.entry(b).or_default().push(a);
     }
     if neighbors.values().any(|n| n.len() != 2) {
         return Err("slice contour is open or branching; no gap closure performed".into());
@@ -475,4 +567,123 @@ fn compact(mesh: &mut Mesh) {
         }
     }
     mesh.positions = positions;
+}
+
+#[cfg(test)]
+mod buildup_tests {
+    use super::*;
+
+    fn square_solid(inner: Option<f64>) -> Mesh {
+        let outer = vec![[-1., -1.], [1., -1.], [1., 1.], [-1., 1.]];
+        let mut shape = vec![outer];
+        if let Some(r) = inner {
+            shape.push(vec![[-r, -r], [-r, r], [r, r], [r, -r]]);
+        }
+        let mut builder = Builder::default();
+        cap(&mut builder, &vec![shape.clone()], 0., false).unwrap();
+        cap(&mut builder, &vec![shape.clone()], 2., true).unwrap();
+        for contour in shape {
+            for i in 0..contour.len() {
+                let a = contour[i];
+                let b = contour[(i + 1) % contour.len()];
+                builder
+                    .triangle([[a[0], a[1], 0.], [b[0], b[1], 0.], [b[0], b[1], 2.]])
+                    .unwrap();
+                builder
+                    .triangle([[a[0], a[1], 0.], [b[0], b[1], 2.], [a[0], a[1], 2.]])
+                    .unwrap();
+            }
+        }
+        builder.mesh
+    }
+    fn area(mesh: &Mesh) -> f64 {
+        mesh.triangles
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|i| mesh.positions[i as usize]);
+                let n = cross3(sub3(b, a), sub3(c, a));
+                assert!(n[2] > 0., "cap normal must face up");
+                n[2] * 0.5
+            })
+            .sum()
+    }
+    #[test]
+    fn buildup_cap_cube_has_full_upward_area_at_build_height() {
+        let mut mesh = square_solid(None);
+        for p in &mut mesh.positions {
+            p[2] += 7.;
+        }
+        let solid = BuildUpSolid::new(&mesh).unwrap();
+        let cap = solid.cap(0.75).unwrap();
+        assert_eq!(area(&cap), 4.);
+        assert!(cap.positions.iter().all(|p| p[2] == 7.75));
+        assert!(solid.cap(0.).unwrap().triangles.is_empty());
+        assert!(solid.cap(2.).unwrap().triangles.is_empty());
+    }
+    #[test]
+    fn buildup_cap_preserves_holes_and_disconnected_nested_islands() {
+        let mut mesh = square_solid(Some(0.5));
+        let mut add = |mut other: Mesh, shift: [f64; 3], scale: f64| {
+            let offset = mesh.positions.len() as u32;
+            for p in &mut other.positions {
+                for axis in 0..3 {
+                    p[axis] = p[axis] * scale + shift[axis];
+                }
+            }
+            mesh.positions.extend(other.positions);
+            mesh.triangles
+                .extend(other.triangles.iter().map(|t| t.map(|i| i + offset)));
+        };
+        add(square_solid(None), [0., 0., 0.], 0.25);
+        add(square_solid(None), [4., 0., 0.], 1.);
+        let cap = BuildUpSolid::new(&mesh).unwrap().cap(0.25).unwrap();
+        assert!((area(&cap) - 7.25).abs() < 1e-12);
+        // A point in the tube bore outside the island must remain uncovered.
+        assert!(cap.triangles.iter().all(|t| {
+            let [a, b, c] = t.map(|i| mesh_point(&cap, i));
+            let p = [0.4, 0.];
+            !(cross(a, b, p) >= 0. && cross(b, c, p) >= 0. && cross(c, a, p) >= 0.)
+        }));
+    }
+    fn mesh_point(mesh: &Mesh, i: u32) -> Point {
+        let p = mesh.positions[i as usize];
+        [p[0], p[1]]
+    }
+    #[test]
+    fn buildup_cap_handles_plane_through_existing_vertices_and_edges() {
+        let mut mesh = square_solid(None);
+        // Sloped top crosses z=1 at two vertices; one top triangle edge lies on the cut.
+        for p in &mut mesh.positions {
+            if p[2] == 2. {
+                p[2] = if p[0] < 0. { 1. } else { 2. };
+            }
+        }
+        let cap = BuildUpSolid::new(&mesh).unwrap().cap(1.).unwrap();
+        assert!((area(&cap) - 4.).abs() < 1e-12);
+    }
+    #[test]
+    fn buildup_cap_rejects_open_sources_without_fabricating_a_solid() {
+        let mut mesh = square_solid(None);
+        mesh.triangles.pop();
+        assert!(BuildUpSolid::new(&mesh).is_err());
+    }
+    #[test]
+    fn buildup_cap_does_not_duplicate_existing_horizontal_surfaces() {
+        let mut mesh = square_solid(None);
+        let mut short = square_solid(None);
+        let offset = mesh.positions.len() as u32;
+        for p in &mut short.positions {
+            p[0] += 4.;
+            p[2] *= 0.5;
+        }
+        mesh.positions.extend(short.positions);
+        mesh.triangles
+            .extend(short.triangles.iter().map(|t| t.map(|i| i + offset)));
+        let cap = BuildUpSolid::new(&mesh).unwrap().cap(1.).unwrap();
+        assert_eq!(
+            area(&cap),
+            4.,
+            "short solid already supplies its own top face"
+        );
+    }
 }

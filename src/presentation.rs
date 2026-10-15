@@ -309,6 +309,26 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
                 mesh = envelope.mesh;
                 warnings.extend(envelope.warnings);
                 warnings.push("Experimental mid-layer stepped solid: this changes the silhouette and does not model nozzle paths, infill or physical print defects.".into());
+            } else {
+                let top = mesh.bounds()?.max[2];
+                match LayerSchedule::uniform(
+                    options.layer_height_mm,
+                    options.first_layer_height_mm,
+                    top,
+                ) {
+                    Ok(schedule) => {
+                        layer_tops_mm = schedule
+                            .boundaries_mm
+                            .into_iter()
+                            .skip(1)
+                            .take_while(|&height| height < top)
+                            .collect();
+                        layer_tops_mm.push(top);
+                    }
+                    Err(error) => warnings.push(format!(
+                        "STL build-up is unavailable with these layer settings: {error}"
+                    )),
+                }
             }
             (mesh, "original", warnings, 0)
         }
@@ -517,6 +537,9 @@ pub fn model_scene(
     }
     if !model.bead_side_face_ranges.is_empty() {
         scene["bead_side_face_ranges"] = serde_json::json!(model.bead_side_face_ranges);
+    }
+    if model.geometry_kind == "original" && !model.layer_tops_mm.is_empty() {
+        scene["solid_layer_tops_mm"] = serde_json::json!(model.layer_tops_mm);
     }
     if settings.import.stepped_envelope {
         scene["layer_appearance"] = serde_json::json!(false);

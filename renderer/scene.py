@@ -67,6 +67,10 @@ def load_scene_spec(path):
         raise ValueError("mesh_path must be absolute")
     if spec.get("geometry_kind") not in ("beads", "original"):
         raise ValueError("unsupported geometry_kind")
+    if "solid_layer_tops_mm" in spec:
+        if spec["geometry_kind"] != "original":
+            raise ValueError("solid_layer_tops_mm requires original geometry")
+        validate_solid_layer_tops(spec["solid_layer_tops_mm"])
     if spec.get("bead_layout") not in (None, "independent_stadium_v1", "joined_stadium_v1", "joined_stadium_v2", "joined_stadium_v3"):
         raise ValueError("unsupported bead_layout")
     if spec.get("bead_layout") == "joined_stadium_v2" and (type(spec.get("bead_ring_vertices")) is not int or spec["bead_ring_vertices"] not in (8,12,16,24)):
@@ -194,6 +198,21 @@ def buildup_schedule(layers,frame_count):
     return [layers[max(0,math.ceil((index+1)*len(layers)/frame_count)-1)] for index in range(frame_count)]
 
 
+def validate_solid_layer_tops(tops, model_top_mm=None):
+    """Physical BUILD-Z planes; stage IDs count the original model's schedule."""
+    if not isinstance(tops,list) or not tops or len(tops)>50000:
+        raise ValueError("solid build-up requires bounded solid_layer_tops_mm")
+    previous = 0
+    for top in tops:
+        _finite_number(top,"solid layer top")
+        if top <= previous:
+            raise ValueError("solid layer tops must be positive and strictly ascending")
+        previous = top
+    if model_top_mm is not None and not math.isclose(tops[-1],model_top_mm,rel_tol=1e-6,abs_tol=1e-5):
+        raise ValueError("solid layer schedule must end at the true model top")
+    return list(range(len(tops)))
+
+
 def apply_face_groups(obj,base_material,groups):
     from array import array
     validate_face_groups(groups,len(obj.data.polygons))
@@ -272,8 +291,8 @@ def layer_for_count(layers,count):
     return -1 if count==0 else layers[count-1]
 
 
-def prepare_buildup_section(obj, source_mesh, spec, envelope, layer):
-    """Reveal complete original faces before cutting; never clip a future bead cap."""
+def prepare_buildup_section(obj, source_mesh, spec, envelope, layer, build_analysis=None):
+    """Restore immutable geometry, reveal in BUILD space, then optionally section."""
     import bpy
     import bmesh
     from mathutils import Euler
@@ -282,6 +301,56 @@ def prepare_buildup_section(obj, source_mesh, spec, envelope, layer):
     if not old.users and old != source_mesh:
         bpy.data.meshes.remove(old)
     obj.rotation_euler.z = 0
+    rotation = Euler(tuple(math.radians(v) for v in spec["display_rotation_degrees"]),"XYZ").to_matrix()
+    extent = max(envelope["radius"]*2,envelope["height"],0.001)
+    if spec["geometry_kind"] == "original":
+        layers = validate_solid_layer_tops(spec.get("solid_layer_tops_mm"))
+        if type(layer) is not int or not -1 <= layer < len(layers):
+            raise ValueError("solid visible layer outside schedule")
+        if layer == -1:
+            bm = bmesh.new()
+            bm.to_mesh(obj.data)
+            bm.free()
+            reveal_analysis = dict(capped=False,closed_input=False,remaining_volume_mm3=0.0,output_triangles=0)
+        elif layer < layers[-1]:
+            # apply_section transforms the BUILD plane with the same display
+            # rotation/centering as the immutable source. Spin is applied later.
+            reveal = dict(axis=2,position_mm=spec["solid_layer_tops_mm"][layer],keep_positive=False,cap=True)
+            reveal_analysis = apply_section(obj,reveal,rotation,envelope["center"][:2],envelope["bottom"],extent,
+                                            "original",cap_material_index=0)
+        else:
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+            bmesh.ops.remove_doubles(bm,verts=list(bm.verts),dist=0.0)
+            closed = bool(bm.faces) and all(e.is_manifold and e.is_contiguous for e in bm.edges)
+            volume = abs(bm.calc_volume(signed=True))*1e9 if closed else None
+            bm.free()
+            obj.data.calc_loop_triangles()
+            reveal_analysis = dict(capped=False,closed_input=closed,remaining_volume_mm3=volume,
+                                   output_triangles=len(obj.data.loop_triangles))
+        if build_analysis is not None:
+            build_analysis.update(reveal_analysis,visible_layer=layer,
+                                  z_top_mm=0.0 if layer == -1 else spec["solid_layer_tops_mm"][layer])
+        analysis = None
+        if spec.get("section") is not None:
+            analysis = apply_section(obj,spec["section"],rotation,envelope["center"][:2],
+                                     envelope["bottom"],extent,"original")
+            analysis["visible_layer"] = layer
+        # Diagram edges must follow the actual stage, including the empty bed.
+        edge_object = bpy.data.objects.get("DesignEdges")
+        if edge_object is not None:
+            bpy.data.objects.remove(edge_object,do_unlink=True)
+        if spec.get("studio_preset") == "diagram" and obj.data.polygons:
+            obj.data.calc_loop_triangles()
+            points = [tuple(v.co) for v in obj.data.vertices]
+            triangles = [tuple(t.vertices) for t in obj.data.loop_triangles]
+            pixel_mm = spec.get("camera",{}).get("ortho_span_mm",extent*1000)/bpy.context.scene.render.resolution_y
+            add_design_edges(points,triangles,points,pixel_mm,bpy.context.scene)
+            bpy.data.objects["DesignEdges"].parent = obj
+        for material in list(bpy.data.materials):
+            if not material.users and material.name.startswith(("SectionCutSurface","DesignEdgeInk")):
+                bpy.data.materials.remove(material)
+        return analysis
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bm.faces.ensure_lookup_table()
@@ -299,7 +368,6 @@ def prepare_buildup_section(obj, source_mesh, spec, envelope, layer):
                 "cross_section_area_mm2":0.0,"original_volume_mm3":0.0,"remaining_volume_mm3":0.0,
                 "visible_layer":layer,"visible_source_triangles":0,"output_triangles":0,
                 "warnings":[],"meaning":"Empty build stage: no deposited geometry is visible."}
-    rotation = Euler(tuple(math.radians(v) for v in spec["display_rotation_degrees"]),"XYZ").to_matrix()
     analysis = apply_section(obj,spec["section"],rotation,envelope["center"][:2],envelope["bottom"],
                              max(envelope["radius"]*2,envelope["height"],0.001),spec["geometry_kind"])
     analysis["visible_layer"] = layer
@@ -329,7 +397,7 @@ def set_camera_spec(camera, chosen):
     camera.data.clip_end=max(distance*100,100.)
 
 
-def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_kind):
+def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_kind, cap_material_index=None):
     """Cut a disposable render mesh; a plane never fills an infill envelope."""
     import bpy
     import bmesh
@@ -387,13 +455,16 @@ def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_ki
         bm.free()
     obj.data.update()
     area = 0.0
-    cap_material = bpy.data.materials.new("SectionCutSurface")
-    cap_material.use_nodes = True
-    cap_bsdf = cap_material.node_tree.nodes.get("Principled BSDF")
-    cap_bsdf.inputs["Base Color"].default_value = (0.5,0.18,0.065,1)
-    cap_bsdf.inputs["Roughness"].default_value = 0.65
-    obj.data.materials.append(cap_material)
-    cap_index = len(obj.data.materials)-1
+    if cap_material_index is None:
+        cap_material = bpy.data.materials.new("SectionCutSurface")
+        cap_material.use_nodes = True
+        cap_bsdf = cap_material.node_tree.nodes.get("Principled BSDF")
+        cap_bsdf.inputs["Base Color"].default_value = (0.5,0.18,0.065,1)
+        cap_bsdf.inputs["Roughness"].default_value = 0.65
+        obj.data.materials.append(cap_material)
+        cap_index = len(obj.data.materials)-1
+    else:
+        cap_index = cap_material_index
     for polygon in obj.data.polygons:
         if abs((polygon.center-plane).dot(normal)) <= tolerance*5 and abs(polygon.normal.dot(normal)) > 0.999:
             area += polygon.area*1e6
@@ -707,8 +778,8 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         validate_face_groups(spec["face_groups"],len(triangles))
     if "layer_face_ranges" in spec:
         validate_layer_ranges(spec["layer_face_ranges"],len(triangles))
-    if spec.get("build_up",False) and spec["geometry_kind"]!="beads":
-        raise ValueError("build-up requires actual bead geometry")
+    if spec["geometry_kind"] == "original" and (spec.get("build_up",False) or "solid_layer_tops_mm" in spec):
+        validate_solid_layer_tops(spec.get("solid_layer_tops_mm"),max(v[2] for v in vertices))
     smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout"), spec.get("bead_side_face_ranges"), spec.get("bead_ring_vertices",32)) if spec["geometry_kind"] == "beads" else None
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
@@ -795,7 +866,10 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         apply_face_groups(obj,material,spec["face_groups"])
     build_layers = None
     if spec.get("build_up",False):
-        build_layers = validate_layer_ranges(spec.get("layer_face_ranges"),len(triangles)) if spec.get("section") is not None else apply_buildup(obj,spec.get("layer_face_ranges"))
+        if spec["geometry_kind"] == "original":
+            build_layers = validate_solid_layer_tops(spec.get("solid_layer_tops_mm"))
+        else:
+            build_layers = validate_layer_ranges(spec.get("layer_face_ranges"),len(triangles)) if spec.get("section") is not None else apply_buildup(obj,spec.get("layer_face_ranges"))
     section_analysis = None
     if spec.get("section") is not None and not spec.get("build_up",False):
         section_analysis = apply_section(obj,spec["section"],rotation,(cx,cy),bottom,
@@ -849,7 +923,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
             apply_layer_filter(layer_material,camera,scene.render.resolution_x,scene.render.resolution_y,
                                min(spec["layer_height_mm"],spec.get("first_layer_height_mm",spec["layer_height_mm"])))
     studio = spec.get("studio_preset", "light")
-    if studio == "diagram" and spec["geometry_kind"] == "original":
+    if studio == "diagram" and spec["geometry_kind"] == "original" and not spec.get("build_up",False):
         pixel_mm = spec.get("camera", {}).get("ortho_span_mm", extent * 1000) / scene.render.resolution_y
         add_design_edges(vertices, triangles, points, pixel_mm, scene)
     if not transparent and studio != "diagram":

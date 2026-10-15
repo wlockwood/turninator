@@ -152,6 +152,19 @@ impl PickingMesh {
         aspect: f64,
         shift: [f32; 3],
     ) -> Option<FaceHit> {
+        self.pick_with_shift_and_triangle_tops(camera, settings, ndc, aspect, shift, &[])
+    }
+    /// Additional per-face visibility thresholds for generated viewport metadata.
+    /// Negative values retain ordinary build-plane clipping for that triangle.
+    pub(crate) fn pick_with_shift_and_triangle_tops(
+        &self,
+        camera: &OrbitCamera,
+        settings: &ViewportSettings,
+        ndc: [f64; 2],
+        aspect: f64,
+        shift: [f32; 3],
+        triangle_tops: &[f32],
+    ) -> Option<FaceHit> {
         if settings.validate().is_err() {
             return None;
         }
@@ -171,7 +184,7 @@ impl PickingMesh {
             std::array::from_fn(|i| unspun[i] + shift[i] as f64),
         );
         ray.direction = apply(inverse, apply(spin_inverse, ray.direction));
-        self.intersect(&ray, settings, &mut 0)
+        self.intersect(&ray, settings, triangle_tops, &mut 0)
     }
     fn build(&mut self, start: usize, end: usize) -> u32 {
         let mut min = [f32::INFINITY; 3];
@@ -224,6 +237,7 @@ impl PickingMesh {
         &self,
         ray: &Ray,
         settings: &ViewportSettings,
+        triangle_tops: &[f32],
         tested: &mut usize,
     ) -> Option<FaceHit> {
         let mut pending = vec![(0u32, ray.near)];
@@ -274,7 +288,15 @@ impl PickingMesh {
                         continue;
                     }
                     if let Some(height) = settings.effective_buildup_height()
-                        && self.layer_tops.get(index).map_or(point[2], |v| *v as f64)
+                        && self
+                            .layer_tops
+                            .get(index)
+                            .copied()
+                            .into_iter()
+                            .chain(triangle_tops.get(index).copied())
+                            .filter(|top| *top >= 0.)
+                            .reduce(f32::max)
+                            .map_or(point[2], f64::from)
                             > height as f64
                     {
                         continue;
@@ -408,7 +430,7 @@ mod tests {
         };
         let mut tested = 0;
         let hit = picker
-            .intersect(&ray, &ViewportSettings::default(), &mut tested)
+            .intersect(&ray, &ViewportSettings::default(), &[], &mut tested)
             .unwrap();
         assert_eq!(hit.triangle_index, (40 * 100 + 60) * 2 + 1);
         assert!(tested < 32, "BVH tested {tested} triangles out of20000");

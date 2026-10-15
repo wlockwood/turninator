@@ -232,6 +232,34 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 scene.validate_layer_ranges(invalid,8)
 
+    def test_solid_build_schedule_requires_ordered_physical_tops_and_complete_model(self):
+        self.assertEqual(scene.validate_solid_layer_tops([0.2, 0.4, 0.45], 0.45), [0, 1, 2])
+        for tops in (None, [], [0], [-0.1], [True], [float('nan')], [float('inf')],
+                     [0.4, 0.2], [0.2, 0.2], [0.2] * 50001):
+            with self.subTest(tops=str(tops)[:60]), self.assertRaises(ValueError):
+                scene.validate_solid_layer_tops(tops)
+        for tops in ([0.2, 0.4], [0.2, 0.5]):
+            with self.assertRaisesRegex(ValueError, 'model top'):
+                scene.validate_solid_layer_tops(tops, 0.45)
+
+    def test_scene_rejects_invalid_solid_schedule_before_rendering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'scene.json'
+            spec = dict(schema_version=1, mesh_path=str(Path(directory)/'mesh.bin'),
+                        geometry_kind='original', layer_height_mm=0.2, color=[0.1]*3,
+                        roughness=0.4, display_rotation_degrees=[0]*3, warnings=[],
+                        solid_layer_tops_mm=[0.2, 0.2])
+            path.write_text(json.dumps(spec))
+            with self.assertRaisesRegex(ValueError, 'solid'):
+                scene.load_scene_spec(path)
+            spec['solid_layer_tops_mm'] = [0.2, 0.4]
+            path.write_text(json.dumps(spec))
+            self.assertEqual(scene.load_scene_spec(path)['solid_layer_tops_mm'], [0.2, 0.4])
+            spec['geometry_kind'] = 'beads'
+            path.write_text(json.dumps(spec))
+            with self.assertRaisesRegex(ValueError, 'original'):
+                scene.load_scene_spec(path)
+
     def test_default_camera_accounts_for_the_narrower_panel_dimension(self):
         square = scene.default_camera_half_angle(128,128)
         wide = scene.default_camera_half_angle(128,96)
@@ -311,6 +339,16 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(bounded["frame_count"],10000)
         self.assertEqual(bounded["details_path"],"C:/job/render-result.json")
         self.assertEqual(len(payload["paths"]),10000)
+
+    def test_completion_surfaces_open_solid_warning_once_across_all_build_frames(self):
+        warning = 'Open or inconsistently wound geometry: section remains uncapped; area/volume unavailable.'
+        payload = dict(warnings=['Source import warning'],
+                       frame_build_analysis=[dict(warnings=[warning]), dict(warnings=[warning]), None],
+                       frame_analysis=[None, dict(warnings=[warning])])
+        result = worker.with_analysis_warnings(payload)
+        self.assertEqual(result['warnings'], ['Source import warning', warning])
+        self.assertEqual(payload['warnings'], ['Source import warning'])
+        self.assertEqual(worker.completion_event(payload, 'details.json')['warnings'],result['warnings'])
 
     def test_reuse_requires_matching_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

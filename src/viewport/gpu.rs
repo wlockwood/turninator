@@ -2,6 +2,7 @@ use super::{OrbitCamera, camera::rotation_rows};
 use crate::{
     Result,
     mesh::{Bounds, Mesh},
+    print::slice::BuildUpSolid,
 };
 use eframe::{
     egui,
@@ -157,15 +158,23 @@ pub struct Viewport {
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     geometry: Option<Geometry>,
+    buildup_cap: Option<Geometry>,
+    buildup_cap_picker: Option<super::PickingMesh>,
+    buildup_cap_height: Option<u32>,
+    buildup_cap_color: [f32; 3],
+    solid_source: Option<std::result::Result<BuildUpSolid, String>>,
+    buildup_cap_warning: Option<String>,
     target: Option<Target>,
     positions: Vec<[f32; 3]>,
     source_triangles: Vec<[u32; 3]>,
+    solid_bottom_tops: Vec<f32>,
     face_colors: Vec<[f32; 3]>,
     face_layer_tops: Vec<f32>,
     has_face_colors: bool,
     revision: Option<u64>,
     geometry_kind: String,
     source_min_z: f32,
+    source_max_z: f32,
     display_pose: Option<[f32; 3]>,
     shift: [f32; 3],
     bounds: Option<Bounds>,
@@ -361,15 +370,23 @@ impl Viewport {
             uniform,
             bind_group,
             geometry: None,
+            buildup_cap: None,
+            buildup_cap_picker: None,
+            buildup_cap_height: None,
+            buildup_cap_color: [0.; 3],
+            solid_source: None,
+            buildup_cap_warning: None,
             target: None,
             positions: Vec::new(),
             source_triangles: Vec::new(),
+            solid_bottom_tops: Vec::new(),
             face_colors: Vec::new(),
             face_layer_tops: Vec::new(),
             has_face_colors: false,
             revision: None,
             geometry_kind: String::new(),
             source_min_z: 0.,
+            source_max_z: 0.,
             display_pose: None,
             shift: [0.; 3],
             bounds: None,
@@ -400,19 +417,52 @@ impl Viewport {
                 return Err("mesh triangle collapses at GPU f32 precision".into());
             }
         }
-        self.geometry = Some(self.upload_geometry(
+        // A downward horizontal face at the cut belongs to material above it.
+        // One f32 ULP delays its visibility until some positive volume is built,
+        // while leaving already printed upward plateau faces at the stage intact.
+        let solid_bottom_tops = if geometry_kind == "original" {
+            mesh.triangles
+                .iter()
+                .map(|triangle| {
+                    let [a, b, c] = triangle.map(|i| positions[i as usize]);
+                    if a[2] >= 0.
+                        && a[2] == b[2]
+                        && a[2] == c[2]
+                        && (b[0] as f64 - a[0] as f64) * (c[1] as f64 - a[1] as f64)
+                            - (b[1] as f64 - a[1] as f64) * (c[0] as f64 - a[0] as f64)
+                            < 0.
+                    {
+                        a[2].next_up()
+                    } else {
+                        -1.
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.geometry = Some(self.upload_face_geometry(
             &positions,
             &mesh.triangles,
-            &vec![[1., 1., 1., -1.]; positions.len()],
+            &[],
+            &[],
+            &solid_bottom_tops,
         )?);
         self.positions = positions;
         self.source_triangles = mesh.triangles.clone();
+        self.solid_bottom_tops = solid_bottom_tops;
         self.face_colors.clear();
         self.face_layer_tops.clear();
         self.has_face_colors = false;
         self.revision = Some(mesh_revision);
         self.geometry_kind = geometry_kind.to_owned();
+        self.buildup_cap = None;
+        self.buildup_cap_picker = None;
+        self.buildup_cap_height = None;
+        self.solid_source = None;
+        self.buildup_cap_warning = None;
         self.source_min_z = bounds.min[2] as f32;
+        self.source_max_z = bounds.max[2] as f32;
         self.display_pose = None;
         self.bounds = None;
         Ok(())
@@ -516,22 +566,42 @@ impl Viewport {
         Ok(())
     }
     fn face_geometry(&self, colors: &[[f32; 3]], tops: &[f32]) -> Result<Geometry> {
-        if colors.is_empty() && tops.is_empty() {
+        self.upload_face_geometry(
+            &self.positions,
+            &self.source_triangles,
+            colors,
+            tops,
+            &self.solid_bottom_tops,
+        )
+    }
+    fn upload_face_geometry(
+        &self,
+        source_positions: &[[f32; 3]],
+        source_triangles: &[[u32; 3]],
+        colors: &[[f32; 3]],
+        tops: &[f32],
+        bottom_tops: &[f32],
+    ) -> Result<Geometry> {
+        if colors.is_empty() && tops.is_empty() && !bottom_tops.iter().any(|top| *top >= 0.) {
             return self.upload_geometry(
-                &self.positions,
-                &self.source_triangles,
-                &vec![[1., 1., 1., -1.]; self.positions.len()],
+                source_positions,
+                source_triangles,
+                &vec![[1., 1., 1., -1.]; source_positions.len()],
             );
         }
         let mut remap = std::collections::HashMap::new();
         let mut positions = Vec::new();
         let mut attributes = Vec::new();
-        let mut triangles = Vec::with_capacity(self.source_triangles.len());
+        let mut triangles = Vec::with_capacity(source_triangles.len());
         let maximum_vertices =
             (self.state.device.limits().max_buffer_size / 16).min(6_000_000) as usize;
-        for (face, triangle) in self.source_triangles.iter().enumerate() {
+        for (face, triangle) in source_triangles.iter().enumerate() {
             let color = colors.get(face).copied().unwrap_or([1.; 3]);
-            let top = tops.get(face).copied().unwrap_or(-1.);
+            let top = tops
+                .get(face)
+                .copied()
+                .unwrap_or(-1.)
+                .max(bottom_tops.get(face).copied().unwrap_or(-1.));
             let mut mapped = [0; 3];
             for (corner, &source) in triangle.iter().enumerate() {
                 let key = [
@@ -550,7 +620,7 @@ impl Viewport {
                         );
                     }
                     let index = positions.len() as u32;
-                    positions.push(self.positions[source as usize]);
+                    positions.push(source_positions[source as usize]);
                     attributes.push([color[0], color[1], color[2], top]);
                     remap.insert(key, index);
                     index
@@ -562,8 +632,14 @@ impl Viewport {
     }
     pub fn clear_mesh(&mut self) {
         self.geometry = None;
+        self.buildup_cap = None;
+        self.buildup_cap_picker = None;
+        self.buildup_cap_height = None;
+        self.solid_source = None;
+        self.buildup_cap_warning = None;
         self.positions = Vec::new();
         self.source_triangles = Vec::new();
+        self.solid_bottom_tops = Vec::new();
         self.face_colors = Vec::new();
         self.face_layer_tops = Vec::new();
         self.has_face_colors = false;
@@ -579,11 +655,19 @@ impl Viewport {
     pub fn texture_size(&self) -> Option<[u32; 2]> {
         self.target.as_ref().map(|t| t.size)
     }
+    /// Why the current original-mesh build-up plane could not be capped.
+    /// Open or ambiguous geometry remains clipped without inventing a solid.
+    pub fn buildup_cap_warning(&self) -> Option<&str> {
+        self.buildup_cap_warning.as_deref()
+    }
     /// Explicit buffer/texture allocation estimate, excluding driver bookkeeping.
     pub fn resource_bytes(&self) -> u64 {
-        let geometry = self.geometry.as_ref().map_or(0, |g| {
-            g.vertices.size() + g.colors.size() + g.indices.size() + g.edges.size()
-        });
+        let geometry: u64 = self
+            .geometry
+            .iter()
+            .chain(self.buildup_cap.iter())
+            .map(|g| g.vertices.size() + g.colors.size() + g.indices.size() + g.edges.size())
+            .sum();
         let target = self.target.as_ref().map_or(0, |t| {
             t.size[0] as u64 * t.size[1] as u64 * (8 + if t.oit.is_some() { 10 } else { 0 })
         });
@@ -619,6 +703,7 @@ impl Viewport {
     }
     /// Pick a retained triangle at a pointer in the response rectangle returned
     /// by `show`. Uses the same cached display center and actual render aspect.
+    /// Generated build-up caps use triangle indices after all source triangles.
     pub fn pick_at(
         &mut self,
         picker: &super::PickingMesh,
@@ -628,11 +713,67 @@ impl Viewport {
         pointer: egui::Pos2,
     ) -> Option<super::FaceHit> {
         self.display_bounds(settings)?;
+        self.update_buildup_cap(settings);
+        if self.geometry_kind == "original"
+            && settings
+                .effective_buildup_height()
+                .is_some_and(|height| height <= self.source_min_z)
+        {
+            return None;
+        }
         let (ndc, logical_aspect) = super::picking::pointer_coordinates(rect, pointer)?;
         let aspect = self.target.as_ref().map_or(logical_aspect, |target| {
             target.size[0] as f64 / target.size[1] as f64
         });
-        picker.pick_with_shift(camera, settings, ndc, aspect, self.shift)
+        let mut source_settings = settings.clone();
+        if self.original_build_complete(settings) {
+            source_settings.buildup_height_mm = None;
+        }
+        let source = picker.pick_with_shift_and_triangle_tops(
+            camera,
+            &source_settings,
+            ndc,
+            aspect,
+            self.shift,
+            &self.solid_bottom_tops,
+        );
+        let cap = self
+            .buildup_cap_picker
+            .as_ref()
+            .and_then(|picker| picker.pick_with_shift(camera, settings, ndc, aspect, self.shift))
+            .map(|mut hit| {
+                hit.triangle_index += self.source_triangles.len();
+                hit
+            });
+        match (source, cap) {
+            (Some(source), Some(cap)) => {
+                let rows = rotation_rows(settings.display_rotation_degrees);
+                let (s, c) = settings.turntable_angle_degrees.to_radians().sin_cos();
+                let back = camera.basis().2;
+                let toward_camera = |point: [f64; 3]| {
+                    let rotated: [f64; 3] = std::array::from_fn(|i| {
+                        (0..3)
+                            .map(|j| f64::from(rows[i][j]) * point[j])
+                            .sum::<f64>()
+                            - f64::from(self.shift[i])
+                    });
+                    let world = [
+                        f64::from(c) * rotated[0] - f64::from(s) * rotated[1],
+                        f64::from(s) * rotated[0] + f64::from(c) * rotated[1],
+                        rotated[2],
+                    ];
+                    (0..3).map(|i| world[i] * back[i]).sum::<f64>()
+                };
+                Some(
+                    if toward_camera(cap.point_mm) >= toward_camera(source.point_mm) {
+                        cap
+                    } else {
+                        source
+                    },
+                )
+            }
+            (source, cap) => source.or(cap),
+        }
     }
     pub fn show(
         &mut self,
@@ -811,7 +952,86 @@ impl Viewport {
             bind_group,
         });
     }
+    fn original_build_complete(&self, settings: &ViewportSettings) -> bool {
+        self.geometry_kind == "original"
+            && settings
+                .effective_buildup_height()
+                .is_some_and(|height| height >= self.source_max_z)
+    }
+    fn update_buildup_cap(&mut self, settings: &ViewportSettings) {
+        let height = settings.effective_buildup_height().filter(|&height| {
+            self.geometry_kind == "original"
+                && height > self.source_min_z
+                && height < self.source_max_z
+        });
+        let Some(height) = height else {
+            self.buildup_cap = None;
+            self.buildup_cap_picker = None;
+            self.buildup_cap_height = None;
+            self.buildup_cap_warning = None;
+            return;
+        };
+        if self.buildup_cap_height == Some(height.to_bits())
+            && self.buildup_cap_color == settings.color
+        {
+            return;
+        }
+        self.buildup_cap = None;
+        self.buildup_cap_picker = None;
+        self.buildup_cap_height = Some(height.to_bits());
+        self.buildup_cap_color = settings.color;
+        self.buildup_cap_warning = None;
+        // Validate once per mesh revision, only when build-up is first used.
+        // Reusing GPU-rounded source coordinates keeps the cut and cap aligned.
+        let source = self.solid_source.get_or_insert_with(|| {
+            BuildUpSolid::new(&Mesh {
+                positions: self.positions.iter().map(|p| p.map(f64::from)).collect(),
+                triangles: self.source_triangles.clone(),
+            })
+            .map_err(|e| e.to_string())
+        });
+        let result = match source {
+            Ok(solid) => solid
+                .cap(f64::from(height) - f64::from(self.source_min_z))
+                .map_err(|e| e.to_string()),
+            Err(error) => Err(error.clone()),
+        };
+        let result = result.and_then(|mesh| {
+            if mesh.triangles.is_empty() {
+                return Ok(None);
+            }
+            let positions: Vec<_> = mesh.positions.iter().map(|p| p.map(|v| v as f32)).collect();
+            let colors = vec![
+                [
+                    settings.color[0],
+                    settings.color[1],
+                    settings.color[2],
+                    height
+                ];
+                positions.len()
+            ];
+            let mut picker = super::PickingMesh::new(&mesh).map_err(|e| e.to_string())?;
+            picker
+                .set_triangle_layer_tops(&vec![height; mesh.triangles.len()])
+                .map_err(|e| e.to_string())?;
+            self.upload_geometry(&positions, &mesh.triangles, &colors)
+                .map(|geometry| Some((geometry, picker)))
+                .map_err(|e| e.to_string())
+        });
+        match result {
+            Ok(geometry) => {
+                if let Some((geometry, picker)) = geometry {
+                    self.buildup_cap = Some(geometry);
+                    self.buildup_cap_picker = Some(picker);
+                }
+            }
+            Err(error) => {
+                self.buildup_cap_warning = Some(format!("Build-up surface unavailable: {error}"))
+            }
+        }
+    }
     fn render(&mut self, camera: &OrbitCamera, settings: &ViewportSettings) {
+        self.update_buildup_cap(settings);
         if settings.inspection_mode != InspectionMode::Opaque {
             self.ensure_oit();
         }
@@ -869,7 +1089,9 @@ impl Viewport {
                 ]
             }),
             inspection: [
-                u32::from(settings.buildup_height_mm.is_some()) as f32,
+                u32::from(
+                    settings.buildup_height_mm.is_some() && !self.original_build_complete(settings),
+                ) as f32,
                 settings.opacity,
                 match settings.inspection_mode {
                     InspectionMode::Opaque => 0.,
@@ -919,7 +1141,7 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(geometry) = &self.geometry {
+            for geometry in self.render_geometry(settings) {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, geometry.vertices.slice(..));
@@ -934,6 +1156,16 @@ impl Viewport {
             }
         }
         self.state.queue.submit([encoder.finish()]);
+    }
+    fn render_geometry(&self, settings: &ViewportSettings) -> impl Iterator<Item = &Geometry> {
+        let empty = self.geometry_kind == "original"
+            && settings
+                .effective_buildup_height()
+                .is_some_and(|height| height <= self.source_min_z);
+        self.geometry
+            .iter()
+            .filter(move |_| !empty)
+            .chain(self.buildup_cap.iter())
     }
     fn render_oit(
         &self,
@@ -975,7 +1207,7 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(geometry) = &self.geometry {
+            for geometry in self.render_geometry(settings) {
                 pass.set_pipeline(&self.oit_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, geometry.vertices.slice(..));
@@ -1021,7 +1253,7 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(geometry) = &self.geometry {
+            for geometry in self.render_geometry(settings) {
                 pass.set_pipeline(&self.edge_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, geometry.vertices.slice(..));
@@ -1049,7 +1281,7 @@ mod tests {
         task::{Context, Poll, Wake, Waker},
     };
 
-    fn block_on<T>(future: impl Future<Output = T>) -> T {
+    pub(super) fn block_on<T>(future: impl Future<Output = T>) -> T {
         struct ThreadWake(std::thread::Thread);
         impl Wake for ThreadWake {
             fn wake(self: Arc<Self>) {
@@ -1066,7 +1298,7 @@ mod tests {
             }
         }
     }
-    fn capture(viewport: &Viewport) -> Vec<u8> {
+    pub(super) fn capture(viewport: &Viewport) -> Vec<u8> {
         let target = viewport.target.as_ref().unwrap();
         let row = (target.size[0] * 4).div_ceil(256) * 256;
         let buffer = viewport
@@ -1722,6 +1954,343 @@ mod tests {
                 milliseconds[28],
                 viewport.resource_bytes() as f64 / 1048576.
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod buildup_gpu_tests {
+    use super::tests::{block_on, capture};
+    use super::*;
+
+    fn cube() -> Mesh {
+        Mesh {
+            positions: vec![
+                [-1., -1., 0.],
+                [1., -1., 0.],
+                [1., 1., 0.],
+                [-1., 1., 0.],
+                [-1., -1., 2.],
+                [1., -1., 2.],
+                [1., 1., 2.],
+                [-1., 1., 2.],
+            ],
+            triangles: vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ],
+        }
+    }
+    #[test]
+    #[ignore = "requires an actual GPU adapter; checks solid build-up cap pixels"]
+    fn gpu_solid_buildup_matches_closed_truncated_cube() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        eprintln!(
+            "solid cap validation adapter: {:?}",
+            state.adapter.get_info()
+        );
+        let scope = state.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut viewport = Viewport::new(&state);
+        let source = cube();
+        viewport.set_mesh(&source, "original", 1).unwrap();
+        let mut settings = ViewportSettings {
+            buildup_height_mm: Some(1.),
+            ..Default::default()
+        };
+        let mut camera = OrbitCamera::default();
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        camera.orthographic = true;
+        viewport.resize([256, 256]);
+        for (rotation, spin, section) in [
+            ([0.; 3], 0., None),
+            (
+                [20., 35., 10.],
+                47.,
+                Some(SectionPlane {
+                    axis: 0,
+                    position_mm: 0.,
+                    keep_positive: true,
+                }),
+            ),
+        ] {
+            settings.display_rotation_degrees = rotation;
+            settings.turntable_angle_degrees = spin;
+            settings.section = section;
+            for mode in [
+                InspectionMode::Opaque,
+                InspectionMode::Ghost,
+                InspectionMode::Xray,
+            ] {
+                settings.inspection_mode = mode;
+                viewport.set_mesh(&source, "original", 1).unwrap();
+                viewport.display_bounds(&settings);
+                let source_shift = viewport.shift;
+                viewport.render(&camera, &settings);
+                let buildup = capture(&viewport);
+                let mut expected = source.clone();
+                for p in &mut expected.positions {
+                    p[2] = p[2].min(1.);
+                }
+                viewport.set_mesh(&expected, "original", 2).unwrap();
+                viewport.display_bounds(&settings);
+                viewport.shift = source_shift;
+                let full = ViewportSettings {
+                    buildup_height_mm: None,
+                    ..settings.clone()
+                };
+                viewport.render(&camera, &full);
+                let closed = capture(&viewport);
+                let different = buildup
+                    .chunks_exact(4)
+                    .zip(closed.chunks_exact(4))
+                    .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 3))
+                    .count();
+                assert!(
+                    different < 150,
+                    "solid cap pixels differ from independently closed solid in {mode:?}: {different}"
+                );
+            }
+        }
+        viewport.set_mesh(&source, "original", 3).unwrap();
+        settings = ViewportSettings {
+            buildup_height_mm: Some(0.),
+            ..Default::default()
+        };
+        camera.canonical(super::super::CanonicalView::Top);
+        viewport.display_bounds(&settings);
+        viewport.render(&camera, &settings);
+        let zero = capture(&viewport);
+        assert!(
+            zero.chunks_exact(4).all(|p| p == &zero[..4]),
+            "zero print layers must be empty"
+        );
+        assert!(block_on(scope.pop()).is_none());
+    }
+
+    #[test]
+    #[ignore = "requires an actual GPU adapter; checks picking rendered build-up caps"]
+    fn gpu_solid_buildup_picks_visible_cap_and_zero_layers_pick_nothing() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        let mut viewport = Viewport::new(&state);
+        let source = cube();
+        let picker = super::super::PickingMesh::new(&source).unwrap();
+        viewport.set_mesh(&source, "original", 1).unwrap();
+        let mut settings = ViewportSettings {
+            buildup_height_mm: Some(1.),
+            ..Default::default()
+        };
+        let mut camera = OrbitCamera::default();
+        camera.canonical(super::super::CanonicalView::Top);
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        camera.orthographic = true;
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256., 256.));
+        // A click can arrive before the next render; its visible cap must still exist.
+        let hit = viewport
+            .pick_at(&picker, &camera, &settings, rect, rect.center())
+            .unwrap();
+        assert!(
+            (hit.point_mm[2] - 1.).abs() < 1e-8,
+            "click selected hidden source bottom: {hit:?}"
+        );
+        assert_eq!(hit.normal_mm, [0., 0., 1.]);
+        assert!(hit.triangle_index >= source.triangles.len());
+        // The visible source bottom wins when viewed from beneath the cap.
+        camera.pitch_degrees = -90.;
+        let bottom = viewport
+            .pick_at(&picker, &camera, &settings, rect, rect.center())
+            .unwrap();
+        assert!(bottom.point_mm[2].abs() < 1e-8);
+        assert_eq!(bottom.normal_mm, [0., 0., -1.]);
+        for orthographic in [false, true] {
+            camera.orthographic = orthographic;
+            settings.display_rotation_degrees = [27., -34., 19.];
+            settings.turntable_angle_degrees = 63.;
+            viewport.display_bounds(&settings);
+            let rows = rotation_rows(settings.display_rotation_degrees);
+            let (s, c) = settings.turntable_angle_degrees.to_radians().sin_cos();
+            let spin = |p: [f64; 3]| {
+                [
+                    f64::from(c) * p[0] - f64::from(s) * p[1],
+                    f64::from(s) * p[0] + f64::from(c) * p[1],
+                    p[2],
+                ]
+            };
+            let center = spin(std::array::from_fn(|i| {
+                f64::from(rows[i][2]) - f64::from(viewport.shift[i])
+            }));
+            let normal = spin([
+                f64::from(rows[0][2]),
+                f64::from(rows[1][2]),
+                f64::from(rows[2][2]),
+            ]);
+            camera.target_mm = center;
+            camera.yaw_degrees = normal[0].atan2(-normal[1]).to_degrees();
+            camera.pitch_degrees = (normal[2] / normal.iter().map(|v| v * v).sum::<f64>().sqrt())
+                .asin()
+                .to_degrees();
+            let hit = viewport
+                .pick_at(&picker, &camera, &settings, rect, rect.center())
+                .unwrap();
+            assert!(
+                (hit.point_mm[2] - 1.).abs() < 1e-8,
+                "posed/spun cap hit wrong surface: {hit:?}"
+            );
+            assert_eq!(hit.normal_mm, [0., 0., 1.]);
+            settings.section = Some(SectionPlane {
+                axis: 0,
+                position_mm: 0.25,
+                keep_positive: true,
+            });
+            assert!(
+                viewport
+                    .pick_at(&picker, &camera, &settings, rect, rect.center())
+                    .is_none(),
+                "section-clipped cap remained pickable"
+            );
+            settings.section = None;
+        }
+        settings.display_rotation_degrees = [0.; 3];
+        settings.turntable_angle_degrees = 0.;
+        camera.canonical(super::super::CanonicalView::Top);
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        settings.buildup_height_mm = Some(0.);
+        assert!(
+            viewport
+                .pick_at(&picker, &camera, &settings, rect, rect.center())
+                .is_none(),
+            "empty build must not pick source bottom"
+        );
+        settings.buildup_height_mm = None;
+        let top = viewport
+            .pick_at(&picker, &camera, &settings, rect, rect.center())
+            .unwrap();
+        assert_eq!(top.point_mm[2], 2.);
+        assert!(top.triangle_index < source.triangles.len());
+    }
+
+    #[test]
+    #[ignore = "requires an actual GPU adapter; checks exact-stage disconnected bottoms"]
+    fn gpu_solid_buildup_omits_future_component_bottom_at_exact_height() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        let mut viewport = Viewport::new(&state);
+        let mut source = cube();
+        let mut future = cube();
+        let offset = source.positions.len() as u32;
+        for p in &mut future.positions {
+            p[0] += 4.;
+            p[2] += 1.;
+        }
+        source.positions.extend(future.positions);
+        source
+            .triangles
+            .extend(future.triangles.iter().map(|t| t.map(|i| i + offset)));
+        let picker = super::super::PickingMesh::new(&source).unwrap();
+        viewport.set_mesh(&source, "original", 1).unwrap();
+        let settings = ViewportSettings {
+            buildup_height_mm: Some(1.),
+            ..Default::default()
+        };
+        let mut camera = OrbitCamera::default();
+        camera.canonical(super::super::CanonicalView::Top);
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        camera.orthographic = true;
+        // Inspect only the future component footprint so the first component cannot occlude it.
+        camera.target_mm[0] = 3.;
+        camera.ortho_span_mm = 3.;
+        viewport.resize([256, 256]);
+        viewport.render(&camera, &settings);
+        let pixels = capture(&viewport);
+        assert!(
+            pixels.chunks_exact(4).all(|p| p == &pixels[..4]),
+            "future component bottom appeared before any positive volume printed"
+        );
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256., 256.));
+        assert!(
+            viewport
+                .pick_at(&picker, &camera, &settings, rect, rect.center())
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an actual GPU adapter; checks completed inward-wound solids"]
+    fn gpu_solid_buildup_complete_inward_source_matches_uncut_pixels_and_picking() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        let mut viewport = Viewport::new(&state);
+        let mut source = cube();
+        for triangle in &mut source.triangles {
+            triangle.swap(1, 2);
+        }
+        let picker = super::super::PickingMesh::new(&source).unwrap();
+        viewport.set_mesh(&source, "original", 1).unwrap();
+        let mut colors = vec![[0.05, 0.05, 0.9]; source.triangles.len()];
+        colors[2] = [0.9, 0.05, 0.05];
+        colors[3] = [0.9, 0.05, 0.05];
+        viewport.set_triangle_colors(&colors).unwrap();
+        let mut camera = OrbitCamera::default();
+        camera.canonical(super::super::CanonicalView::Top);
+        let mut settings = ViewportSettings::default();
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        camera.orthographic = true;
+        viewport.resize([256, 256]);
+        viewport.render(&camera, &settings);
+        let uncut = capture(&viewport);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256., 256.));
+        let full_hit = viewport
+            .pick_at(&picker, &camera, &settings, rect, rect.center())
+            .unwrap();
+        assert_eq!(full_hit.point_mm[2], 2.);
+        for height in [2., 3.] {
+            settings.buildup_height_mm = Some(height);
+            viewport.render(&camera, &settings);
+            assert!(
+                capture(&viewport) == uncut,
+                "completed inward-wound source lost its original top"
+            );
+            let staged_hit = viewport
+                .pick_at(&picker, &camera, &settings, rect, rect.center())
+                .unwrap();
+            assert_eq!(staged_hit.triangle_index, full_hit.triangle_index);
+            assert_eq!(staged_hit.point_mm, full_hit.point_mm);
+            assert_eq!(staged_hit.normal_mm, full_hit.normal_mm);
         }
     }
 }
