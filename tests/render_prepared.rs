@@ -311,6 +311,59 @@ fn generate_blender_prepared_qualification() {
         }
         write_case(&directory, &s, &f, &mut cases);
     }
+    // Review regressions use valid absolute BUILD-Z wire schedules, including
+    // a source crossing Z=0 while all scheduled planes remain positive.
+    for (sign, minimum) in [("positive", 10.), ("negative", -2.)] {
+        for count in [0, 1, 2] {
+            for section in [false, true] {
+                let directory = root.join(format!("review-build-{sign}-{count}-section-{section}"));
+                std::fs::create_dir(&directory).unwrap();
+                let mesh = cube([0., 0., minimum], 10.);
+                mesh.write_binary(&directory.join("source.bin")).unwrap();
+                let mut value = scene(mesh.clone()).legacy_scene;
+                value["mesh_path"] = json!(directory.join("source.bin"));
+                value["solid_layer_tops_mm"] = json!([minimum + 5., minimum + 10.]);
+                let s = snapshot_scene(std::sync::Arc::new(mesh), value).unwrap();
+                let mut f = frame(&s);
+                f.visible_layers = Some(count);
+                f.section = section.then_some(SectionSpec {
+                    axis: 0,
+                    position_mm: 5.,
+                    keep_positive: false,
+                    cap: true,
+                });
+                write_case(&directory, &s, &f, &mut cases);
+            }
+        }
+    }
+    {
+        let directory = root.join("review-rounded-materials");
+        std::fs::create_dir(&directory).unwrap();
+        let mesh = cube([0.; 3], 10.);
+        mesh.write_binary(&directory.join("source.bin")).unwrap();
+        let mut value = scene(mesh.clone()).legacy_scene;
+        value["mesh_path"] = json!(directory.join("source.bin"));
+        value["face_groups"] = json!([
+            {"start_triangle":0,"end_triangle":2,"tool":1,"label":"first","color":[0.1,0.,0.]},
+            {"start_triangle":2,"end_triangle":4,"tool":1,"label":"duplicate","color":[0.100000001,-0.,0.]},
+            {"start_triangle":4,"end_triangle":8,"tool":1,"label":"later","color":[0.,0.7,0.]}
+        ]);
+        let s = snapshot_scene(std::sync::Arc::new(mesh), value).unwrap();
+        let materials = resolve_materials(&s).unwrap();
+        assert_eq!(materials.materials.len(), 4);
+        assert_eq!(
+            &materials.triangle_materials[..8],
+            &[1, 1, 1, 1, 2, 2, 2, 2]
+        );
+        let mut f = frame(&s);
+        f.section = Some(SectionSpec {
+            axis: 0,
+            position_mm: 5.,
+            keep_positive: false,
+            cap: true,
+        });
+        write_case(&directory, &s, &f, &mut cases);
+    }
     fn write_case(
         directory: &std::path::Path,
         s: &RenderSceneSnapshot,
@@ -333,8 +386,15 @@ fn generate_blender_prepared_qualification() {
             serde_json::to_vec_pretty(&spec).unwrap(),
         )
         .unwrap();
-        cases.push(json!({"name":directory.file_name().unwrap().to_string_lossy(),"directory":directory,"material_count":materials.materials.len(),"frame":f,
+        cases.push(json!({"name":directory.file_name().unwrap().to_string_lossy(),"directory":directory,"material_count":materials.materials.len(),"canonical_materials":materials.materials,"frame":f,
             "section":realized.analysis.map(|s|s.legacy),"build":realized.build_analysis.map(|s|s.legacy)}));
+    }
+    if let Ok(prefix) = std::env::var("TN_PREPARED_QUALIFICATION_PREFIX") {
+        cases.retain(|case| case["name"].as_str().unwrap().starts_with(&prefix));
+        assert!(
+            !cases.is_empty(),
+            "qualification prefix selected no fixtures"
+        );
     }
     std::fs::write(
         root.join("cases.json"),

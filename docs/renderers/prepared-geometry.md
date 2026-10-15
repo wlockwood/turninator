@@ -38,6 +38,9 @@ uploads. Empty stages have zero vertices and triangles. Fixed maxima are 2 milli
 vertices, 4 million triangles and 200,000 edges; host/scratch limits also apply.
 Blender's table has at most 258 materials (base, 256 resolved tool/color entries,
 cap); its separate curve object supplies ink.
+Prepared tool colors canonicalize to f32 before deduplication, treating signed
+zeros as equal and retaining first-use names/order, exactly as the host resolver
+does. The actual Blender table count must equal the manifest's canonical count.
 
 Static turntables upload once and retain Blender's native animation batch.
 Changing build stages replace geometry only when the revision changes. Camera or
@@ -46,6 +49,11 @@ normals, triangle material indices and build coordinates; the immutable source
 envelope supplies placement, framing and studio bounds. BuildAnalysis describes
 the pre-section stage; SectionAnalysis describes the final section. The adapter
 emits canonical metadata before each PNG notification.
+Original-solid `solid_layer_tops_mm` entries are absolute BUILD-Z planes. They are
+not offset by the source minimum; the schedule and analytical `position_mm` use
+the same physical coordinates even when the source extends below Z=0.
+Empty original-solid sections retain unavailable area/original-volume values;
+empty layered sections retain their historical zero-valued empty-stage payload.
 
 Cycles accepts an explicit boolean `denoise`; omission still means true. Seed 0
 and disabled animated seed remain unchanged. Denoising is part of quality identity.

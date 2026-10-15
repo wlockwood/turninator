@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import time
 import traceback
+import struct
 import bpy
 import numpy as np
 
@@ -44,9 +45,9 @@ def compare_analysis(expected,actual):
     if expected is None or actual is None:
         assert expected==actual,(expected,actual)
         return
-    for key in ('capped','closed_input','visible_layer'):
-        if key in expected and key in actual:assert expected[key]==actual[key],(key,expected,actual)
-    for key in ('cross_section_area_mm2','original_volume_mm3','remaining_volume_mm3','z_top_mm'):
+    for key in ('axis','capped','closed_input','visible_layer'):
+        if key in expected:assert expected[key]==actual.get(key),(key,expected,actual)
+    for key in ('position_mm','cross_section_area_mm2','original_volume_mm3','remaining_volume_mm3','z_top_mm'):
         if key not in expected:continue
         a,b=expected[key],actual.get(key)
         assert (a is None and b is None) or (a is not None and b is not None and within(a,b)),(key,a,b)
@@ -89,6 +90,17 @@ def main():
             prepared=read_prepared_geometry(directory/'prepared.bin',case['material_count'])
             new=dict(original,camera=camera_spec(frame['camera']))
             obj,info=build_scene(new,'eevee',512,32,True,frame['width'],frame['height'],prepared=prepared)
+            assert len(obj.data.materials)==case['material_count']
+            if case['name']=='review-rounded-materials':
+                result['material_slots']=[]
+                for index,expected in enumerate(case['canonical_materials'][1:],1):
+                    material=obj.data.materials[index]
+                    assert material.name==expected['name'],(index,material.name,expected['name'])
+                    actual=tuple(material.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value[:3])
+                    color=struct.unpack('<3f',struct.pack('<3f',*expected['base_color_linear']))
+                    assert actual==color,(index,actual,color)
+                    result['material_slots'].append(dict(index=index,name=material.name,color=actual))
+                assert set(p.material_index for p in obj.data.polygons)=={0,1,2,3}
             result['prepared_bounds_mm']=bounds(obj)
             if case['name']=='sheet':
                 edge=bpy.data.objects['DesignEdges'];result['prepared_edges']=dict(count=len(edge.data.splines),radius_m=edge.data.bevel_depth)

@@ -51,7 +51,7 @@ def read_prepared_geometry(path, material_count, expected_sha256=None):
         u,v = tuple(b[i]-a[i] for i in range(3)),tuple(c[i]-a[i] for i in range(3))
         if (u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]) == (0,0,0):
             raise ValueError("degenerate prepared triangle")
-    return dict(vertices=vertices,normals=[row[3:6] for row in rows],
+    return dict(material_count=material_count,vertices=vertices,normals=[row[3:6] for row in rows],
                 build_positions=[row[6:] for row in rows],triangles=[face[:3] for face in faces],
                 materials=[face[3] for face in faces],edges=[(e[:3],e[3:]) for e in edges])
 
@@ -984,22 +984,27 @@ def studio_floor_mesh(extent):
     return vertices, faces
 
 
-def apply_prepared_materials(obj, base, spec):
+def apply_prepared_materials(obj, base, spec, material_count):
     """Same stable base/tool/cap slots as shared resolve_materials()."""
     seen = set()
     for group in spec.get('face_groups', []):
-        key = (group['tool'], tuple(group['color']))
+        # GeometryMetadata stores f32 colors. Match resolve_materials' rounded
+        # values, signed-zero equivalence and first-use naming/slot order.
+        color = tuple(0.0 if v == 0.0 else v for v in struct.unpack('<3f',struct.pack('<3f',*group['color'])))
+        key = (group['tool'], color)
         if key in seen:
             continue
         seen.add(key)
         material = base.copy()
         material.name = f"Tool{group['tool']}_{group['label']}"
-        material.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (*group['color'],1)
+        material.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (*color,1)
         for node in material.node_tree.nodes:
             if node.type == 'VOLUME_ABSORPTION':
-                node.inputs['Color'].default_value = (*group['color'],1)
+                node.inputs['Color'].default_value = (*color,1)
         obj.data.materials.append(material)
     section_cap_material(obj)
+    if len(obj.data.materials) != material_count:
+        raise ValueError('prepared material slots differ from canonical manifest table')
 
 
 def apply_prepared_attributes(obj, prepared, rotation, minimum):
@@ -1158,7 +1163,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     if spec.get("face_groups") and prepared is None:
         apply_face_groups(obj,material,spec["face_groups"])
     if prepared is not None:
-        apply_prepared_materials(obj, material, spec)
+        apply_prepared_materials(obj, material, spec, prepared['material_count'])
         apply_prepared_attributes(obj, prepared, rotation, source_minimum)
     build_layers = None
     if spec.get("build_up",False) and prepared is None:

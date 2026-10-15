@@ -66,8 +66,10 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
             .filter(|&n| n > 0 && (n as usize) < scene.metadata.solid_layer_tops_mm.len())
             .map(|n| SectionSpec {
                 axis: 2,
-                position_mm: scene.reference_bounds_mm.min[2]
-                    + scene.metadata.solid_layer_tops_mm[n as usize - 1],
+                // Legacy schedules are absolute BUILD-Z planes, not heights
+                // relative to the source minimum. cap_faces handles any local
+                // BuildUpSolid coordinate conversion at that API boundary.
+                position_mm: scene.metadata.solid_layer_tops_mm[n as usize - 1],
                 keep_positive: false,
                 cap: true,
             })
@@ -217,11 +219,16 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
         if scene.metadata.kind == GeometryKind::Beads {
             warnings.push("Bead source volume is an algebraic mesh-volume estimate; overlaps between paths are not assessed.");
         }
-        if section.cap && !all_closed && !selected.is_empty() {
+        if section.cap
+            && !all_closed
+            && (!selected.is_empty() || scene.metadata.kind == GeometryKind::Original)
+        {
             warnings.push("Open or inconsistently wound geometry: section remains uncapped; area/volume unavailable.");
         }
         let legacy = json!({"axis":section.axis,"position_mm":section.position_mm,"keep_positive":section.keep_positive,"capped":do_cap,"closed_input":all_closed,"cross_section_area_mm2":area,"original_volume_mm3":original_volume,"remaining_volume_mm3":remaining,"volume_basis":if scene.metadata.kind==GeometryKind::Stepped{"Additive volumes of independently closed, nonoverlapping stepped layers."}else{"Original: signed closed-mesh volume magnitude, additive for separate shells. Remaining: closed cut-mesh volume magnitude."},"output_triangles":output.len(),"warnings":warnings,"meaning":"Geometric intersection of the modeled mesh; not strength, mass, or measured print behavior."});
-        let mut legacy = if frame.visible_layers == Some(0) {
+        let mut legacy = if frame.visible_layers == Some(0)
+            && scene.metadata.kind != GeometryKind::Original
+        {
             json!({"axis":section.axis,"position_mm":section.position_mm,"keep_positive":section.keep_positive,"visible_layer":-1,"visible_source_triangles":0,"output_triangles":0,"capped":false,"closed_input":false,"cross_section_area_mm2":0.0,"original_volume_mm3":0.0,"remaining_volume_mm3":0.0,"warnings":[],"meaning":"Empty build stage: no deposited geometry is visible."})
         } else {
             legacy

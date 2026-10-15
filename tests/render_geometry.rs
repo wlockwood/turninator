@@ -198,19 +198,16 @@ fn exact_stl_corner_duplicates_are_welded_without_merging_nearby_shells() {
     );
 }
 #[test]
-fn adaptive_original_build_stages_are_relative_to_source_minimum() {
-    let mut s = scene(cube([-20., -30., -40.], 10.));
-    s.metadata.solid_layer_tops_mm = vec![0.3, 2.7, 10.];
-    for (count, expected) in [
-        (0, None),
-        (1, Some(-39.7)),
-        (2, Some(-37.3)),
-        (3, Some(-30.)),
-    ] {
+fn adaptive_original_build_stages_use_absolute_build_z_schedule() {
+    let mesh = cube([-20., -30., 10.], 10.);
+    let mut value = scene(mesh.clone()).legacy_scene;
+    value["solid_layer_tops_mm"] = serde_json::json!([10.3, 12.7, 20.]);
+    let s = snapshot_scene(std::sync::Arc::new(mesh), value).unwrap();
+    for (count, expected) in [(0, None), (1, Some(10.3)), (2, Some(12.7)), (3, Some(20.))] {
         let mut f = frame(&s);
         f.visible_layers = Some(count);
         let r = realize_frame(&s, &f).unwrap();
-        assert_eq!(r.reference_bounds_mm.min, [-20., -30., -40.]);
+        assert_eq!(r.reference_bounds_mm.min, [-20., -30., 10.]);
         if let Some(top) = expected {
             near(r.mesh.bounds().unwrap().max[2], top);
             near(area_at(&r, 2, top), 100.);
@@ -222,6 +219,52 @@ fn adaptive_original_build_stages_are_relative_to_source_minimum() {
     let mut f = frame(&s);
     f.visible_layers = Some(4);
     assert!(realize_frame(&s, &f).is_err());
+}
+#[test]
+fn nonzero_minimum_build_analysis_precedes_section_at_absolute_schedule_plane() {
+    for minimum in [10., -2.] {
+        let mesh = cube([0., 0., minimum], 10.);
+        let mut value = scene(mesh.clone()).legacy_scene;
+        value["solid_layer_tops_mm"] = serde_json::json!([minimum + 5., minimum + 10.]);
+        let s = snapshot_scene(std::sync::Arc::new(mesh), value).unwrap();
+        for count in [0, 1, 2] {
+            for section in [None, Some(cut(0, 5., false))] {
+                let mut f = frame(&s);
+                f.visible_layers = Some(count);
+                f.section = section;
+                let r = realize_frame(&s, &f).unwrap();
+                let build = &r.build_analysis.as_ref().unwrap().legacy;
+                near(
+                    build["remaining_volume_mm3"].as_f64().unwrap(),
+                    f64::from(count) * 500.,
+                );
+                assert_eq!(build["visible_layer"].as_i64(), Some(i64::from(count) - 1));
+                near(
+                    build["z_top_mm"].as_f64().unwrap(),
+                    if count == 0 {
+                        0.
+                    } else {
+                        minimum + f64::from(count) * 5.
+                    },
+                );
+                if count == 1 {
+                    near(build["position_mm"].as_f64().unwrap(), minimum + 5.);
+                }
+                if count > 0 {
+                    near(
+                        r.mesh.bounds().unwrap().max[2],
+                        minimum + f64::from(count) * 5.,
+                    );
+                }
+                if let Some(section) = &r.analysis {
+                    near(
+                        section.legacy["remaining_volume_mm3"].as_f64().unwrap(),
+                        f64::from(count) * 250.,
+                    );
+                }
+            }
+        }
+    }
 }
 #[test]
 fn section_after_partial_build_preserves_build_cap() {
@@ -447,10 +490,27 @@ fn zero_layers_always_means_empty_and_preserves_legacy_empty_analysis() {
     let r = realize_frame(&s, &f).unwrap();
     assert!(r.mesh.positions.is_empty());
     let a = r.analysis.unwrap();
+    // The original-solid producer still calls apply_section on its empty mesh:
+    // area/original volume are unknown, remaining volume is zero. The layered
+    // producer instead returns its historical special empty payload below.
+    assert!(a.legacy["cross_section_area_mm2"].is_null());
+    assert!(a.legacy["original_volume_mm3"].is_null());
+    assert_eq!(a.legacy["remaining_volume_mm3"], 0.);
+    assert_eq!(a.legacy["visible_layer"], -1);
+    assert!(a.legacy.get("visible_source_triangles").is_none());
+    assert!(a.legacy["volume_basis"].is_string());
+    assert_eq!(a.legacy["warnings"].as_array().unwrap().len(), 1);
+
+    let mesh = cube([0.; 3], 10.);
+    let mut value = scene(mesh.clone()).legacy_scene;
+    value["geometry_kind"] = serde_json::json!("stepped");
+    value["layer_face_ranges"] =
+        serde_json::json!([{"start_triangle":0,"end_triangle":12,"layer_index":0,"z_top_mm":10.}]);
+    let s = snapshot_scene(std::sync::Arc::new(mesh), value).unwrap();
+    let a = realize_frame(&s, &f).unwrap().analysis.unwrap();
     assert_eq!(a.legacy["cross_section_area_mm2"], 0.);
     assert_eq!(a.legacy["original_volume_mm3"], 0.);
     assert_eq!(a.legacy["remaining_volume_mm3"], 0.);
-    assert_eq!(a.legacy["visible_layer"], -1);
     assert_eq!(a.legacy["visible_source_triangles"], 0);
     assert!(a.legacy.get("volume_basis").is_none());
 }
