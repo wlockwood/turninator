@@ -152,3 +152,72 @@ Task 4b must wire these helpers into prepared Blender geometry, disable duplicat
 - test native_section_bead_voids_and_open_input_are_honest ... ignored, requires installed Blender; verifies physical bead gaps and uncapped open input
 - test native_section_cube_has_exact_area_volume_and_matched_panels ... ignored, requires installed Blender; verifies actual capped section metrics and matched panels
 - test native_worker_exports_diagram_and_survives_request_errors ... ignored, requires installed Blender and GPU; writes artifacts/native-backend-probe
+
+## Review fix round 1: I1 closed-source winding
+
+Implementation commit: `12038e1e8ec02a98ee6c563d48d5ef669dfdfc1b` (base `7190b00`). This section supersedes the original report where closed inward-wound source behavior was not covered.
+
+The review identified a real acceptance mismatch: `BuildUpSolid` validates consistent closed edge incidence without requiring positive signed volume. Realization preserved inward source faces while generating outward halfspace caps, and the exact coplanar culling rule assumed outward source faces. A final absolute global signed-volume sum also allowed independently closed stepped layers of opposite orientation to cancel.
+
+The fix normalizes negative signed orientation only in disposable **closed** components before clipping. Source faces and their normals flip together with the disposable topology view. The complete original component, including every cavity shell, flips as one group, preserving outer/cavity winding relationships. Indexed bead components and stepped layers remain independent. Measurement now sums absolute signed contributions per independent realization component, retaining signed cavity subtraction inside the original component. No accepted source mutation, tolerance welding, output type changes, source acceptance changes, broad `Mesh` refactor or renderer integration was introduced.
+
+Five regression groups were added:
+
+- `inward_cube_sections_normalize_disposable_winding_for_all_axes_and_keep_directions`: axis X/Y/Z and both keep directions; analytical 1000/500 mm3 volumes, positive signed output volume, outward cut normals, 100 mm2 cap and matching oriented surface boundaries; source hash unchanged.
+- `inward_cube_exact_boundary_cuts_keep_complete_faces_and_empty_stages`: all axes and keep directions at exact source minima/maxima; complete stages retain all twelve source faces and volume 1000 mm3, empty stages have zero faces/volume.
+- `inward_original_partial_build_caps_remain_consistently_closed_after_sectioning`: a reversed source at five millimeters build height, then all axes/both keep directions, including coincident stage/section planes; analytical 500/250/0 mm3 volumes, oriented boundaries and immutable source hash.
+- `globally_inward_hollow_source_preserves_cavity_winding_relationships`: the entire outer-plus-oppositely-wound cavity source reverses together; all axes/both keep directions retain 936/468 mm3 volumes and 84 mm2 cut area, with source hash unchanged.
+- `independently_closed_stepped_layers_of_mixed_winding_have_additive_volumes`: outward/inward independently closed layers retain additive original volume 16 mm3 and remaining volume 8 mm3 in all axes/both keep directions, with source hash unchanged.
+
+### Exact RED/GREEN commands and results
+
+Every command set `CARGO_TARGET_DIR=D:/code/turninator/target`. Initial test execution encountered shared-target `turninator.exe` replacement failures (Windows access denied), which the coordinator attributed to another worktree's CLI test execution after Cargo released its compile lock. No process was terminated and no target tree was copied. After one retry produced the RED evidence below, the coordinator explicitly serialized the shared CPU slot for the fix and verification.
+
+Before production changes:
+
+```text
+cargo test --offline --test render_geometry inward_
+4 failed, 0 passed, 25 filtered out
+  inward_cube_sections...: 166.66666666666677 != 500
+  inward_cube_exact_boundary...: retained triangle count 2 != 0
+  inward_original_partial_build...: -166.6666666666667 != 500
+  globally_inward_hollow...: 188 != 468
+
+cargo test --offline --test render_geometry independently_closed_stepped
+1 failed, 0 passed, 28 filtered out
+  independently_closed_stepped...: 0.0000000000000013322676295501878 != 16
+```
+
+After the production fix, `cargo test --offline --test render_geometry` initially passed 28 tests and failed one stronger boundary assertion on an already-existing collinear triangulation mismatch described below. The coordinator approved exact subdivision in the **test boundary comparison**, without vertex movement or tolerance. No production repair or test tolerance was added.
+
+Final verification:
+
+```text
+cargo test --offline --test render_geometry
+29 passed; 0 failed; 0 ignored
+
+cargo test --offline --test render_scene_contract --test render_geometry --test render_color
+40 passed total: 29 geometry, 5 material/contract, 6 color; 0 failed; 0 ignored
+
+cargo clippy --offline --all-targets -- -D warnings
+exit 0; Finished dev profile; no warnings
+
+rustfmt --edition 2024 --check src/render/geometry.rs tests/render_geometry.rs
+exit 0
+
+git diff --check
+exit 0
+
+git diff --cached --check
+exit 0
+```
+
+The full CPU suite was not repeated for this focused review round, as explicitly instructed by the coordinator; the original final full-suite result remains 241 passed / 34 opt-in ignored. Local readable transcripts are `task-4a-i1-red.log`, `task-4a-i1-stepped-red.log`, `task-4a-i1-green.log`, `task-4a-i1-focused.log`, and `task-4a-i1-clippy.log` in this report's directory. They are retained local evidence, not committed artifacts.
+
+### Carry-forward: exact collinear boundary subdivisions
+
+Independent clipping of original source faces, the build cap and the section cap can produce different exact collinear subdivisions along the same geometric boundary. For example, the partial cube's source boundary includes a vertex at `[5,0,2.5]` while the independently clipped cap can span that point. This behavior predates the winding fix; the normalized reversed cube is geometrically the same as the existing outward cube. Flat normal splits also mean raw indexed closure is not itself a contract guarantee.
+
+The new test helper canonicalizes only exactly equal coordinates and compares oriented edge incidence after splitting at **existing exactly collinear** vertices. It moves no vertex, uses no tolerance and invents no geometry. Every resulting segment must have exactly two incidences with opposite direction. This checks consistent closed oriented surface coverage across those subdivisions instead of requiring identical triangulation.
+
+Task 4b must still qualify those seams after f32 transport in prepared Blender and native renders. Potential raster cracks must be caught by the existing mask/physical invariants; no mask threshold was relaxed. A production conforming-edge refinement, if required by that evidence, is a separate bounded change. The coordinator was notified to carry this observation forward in the integration ledger. Prepared Blender/image conformance remains unqualified by this CPU fix.
