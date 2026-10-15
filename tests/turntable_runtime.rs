@@ -90,6 +90,9 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
     assert_eq!(first["unique_frame_count"], 4);
     assert_eq!(first["rendered_frame_count"], 4);
     assert_eq!(first["copied_frame_count"], 8);
+    assert_eq!(first["render_strategy"], "animation");
+    assert_eq!(first["frame_pipeline"]["validated_frames"], 4);
+    assert!(first["frame_pipeline"]["workers"].as_u64().unwrap() >= 1);
     for i in 0..12 {
         assert_eq!(
             fs::read(render_dir.join(format!("frames/frame_{i:04}.png"))).unwrap(),
@@ -105,6 +108,21 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
     assert_eq!(retried["rendered_frame_count"], 0);
     assert_eq!(retried["copied_frame_count"], 0);
     assert_eq!(retried["verified_frame_count"], 12);
+    // Retry validates each PNG completely; one corrupt image must be regenerated
+    // without publishing progress out of order or touching its valid siblings.
+    let untouched = fs::read(render_dir.join("frames/frame_0000.png")).unwrap();
+    fs::write(render_dir.join("frames/frame_0001.png"), b"broken PNG").unwrap();
+    request.destination = dir.join("repaired.mp4");
+    run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
+    let repaired = details();
+    assert_eq!(repaired["render_strategy"], "individual_frames");
+    assert_eq!(repaired["rendered_frame_count"], 1);
+    assert_eq!(repaired["verified_frame_count"], 11);
+    assert_eq!(repaired["frame_pipeline"]["validated_frames"], 1);
+    assert_eq!(
+        fs::read(render_dir.join("frames/frame_0000.png")).unwrap(),
+        untouched
+    );
     // A fractional final turn uses the matching prefix of the rendered rotation.
     request.destination = dir.join("partial.gif");
     request.kind = ExportKind::Gif;

@@ -1940,7 +1940,8 @@ impl Studio {
             );
             self.smoke_stage = 2;
         }
-        if self.smoke_stage == 2 && self.busy.is_some() && self.progress.2 == "Rendering" {
+        if self.smoke_stage == 2 && self.busy.is_some() && self.progress.2.starts_with("Rendering")
+        {
             self.render.cancel();
             self.smoke_stage = 3;
         }

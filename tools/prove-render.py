@@ -291,6 +291,8 @@ def encode_only(output, ffmpeg):
                 "transparent": recipe.get("transparent", False),
                 "angles": [recipe.get("start_angle_degrees", 0) + 360.0 * i / recipe["frames"]
                            for i in range(recipe["frames"])]}
+    if "frame_pipeline_sha256" in recipe:
+        expected["frame_pipeline_hash"] = recipe["frame_pipeline_sha256"]
     if any(frame_manifest.get(key) != value for key, value in expected.items()):
         raise ValueError("Frame render manifest differs from proof recipe; cannot reuse these images")
     if "scene_path" in recipe:
@@ -339,6 +341,7 @@ def main():
               "blender": blender_identity,
               "worker_sha256": sha256(ROOT / "renderer" / "worker.py"),
               "scene_script_sha256": sha256(ROOT / "renderer" / "scene.py"),
+              "frame_pipeline_sha256": sha256(ROOT / "renderer" / "frame_pipeline.py"),
               "engine": args.engine, "size": args.size, "frames": args.frames,
               "samples": args.samples, "still_size": args.still_size,
               "start_angle_degrees": 0, "transparent": False}

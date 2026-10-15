@@ -91,18 +91,24 @@ class ProofTests(unittest.TestCase):
             source.write_bytes(b"immutable geometry snapshot")
             recipe = {"size": 24, "frames": 2, "mesh_path": str(source),
                       "mesh_sha256": self.proof.sha256(source), "engine": "eevee", "samples": 1,
-                      "worker_sha256": "worker-A", "scene_script_sha256": "scene-A"}
+                      "worker_sha256": "worker-A", "scene_script_sha256": "scene-A",
+                      "frame_pipeline_sha256": "pipeline-A"}
             manifest = {"recipe": recipe, "stage": "encoding"}
             (root / "proof-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             frame_manifest = {"geometry_hash": recipe["mesh_sha256"], "engine": "eevee", "size": 24,
                               "samples": 1, "angles": [0.0, 180.0], "transparent": False,
-                              "worker_hash": "worker-A", "scene_script_hash": "scene-A"}
+                              "worker_hash": "worker-A", "scene_script_hash": "scene-A",
+                              "frame_pipeline_hash": "pipeline-A"}
             (frames / "render-manifest.json").write_text(json.dumps(frame_manifest), encoding="utf-8")
             result = self.proof.encode_only(root, "C:/Program Files/ffmpeg/bin/ffmpeg.exe")
             self.assertEqual(result["frame_count"], 2)
             self.assertEqual(result["delays_ms"], [50, 50])
             saved = json.loads((root / "proof-manifest.json").read_text())
             self.assertEqual(saved["stage"], "complete")
+            frame_manifest["frame_pipeline_hash"] = "different-pipeline"
+            (frames / "render-manifest.json").write_text(json.dumps(frame_manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "manifest differs"):
+                self.proof.encode_only(root, "unused-ffmpeg")
 
     def test_encode_only_rejects_valid_images_from_a_different_render(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -401,7 +401,7 @@ pub fn run_export(
                 1
             },
     )?;
-    let mut recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"turntable_timing":request.turntable_timing,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
+    let mut recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"turntable_timing":request.turntable_timing,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"frame_pipeline_hash":hash(&crate::render::worker::renderer_script("frame_pipeline.py"))?,"blender_hash":hash(&tools.blender)?});
     if request.kind == ExportKind::Diagram {
         recipe["diagram_recipe"] = json!({"version":2,"views":["TOP","ISO","FRONT","RIGHT"],"dimension":"largest_visible_projected_extent_mm","framing_padding":1.4});
     }
@@ -469,10 +469,17 @@ pub fn run_export(
             callback(JobEvent::Progress {
                 completed: 0,
                 total: count,
-                stage: "Rendering".into(),
+                stage: format!(
+                    "Rendering with {}",
+                    if request.engine == "eevee" {
+                        "Eevee"
+                    } else {
+                        "Cycles / OptiX"
+                    }
+                ),
             });
             let complete=worker.request(json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"seconds_per_turn":request.turntable_timing.map(|timing| timing.seconds_per_turn),"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
-            if event["kind"]=="frame"{let n=event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;callback(JobEvent::Progress{completed:n,total:count,stage:if event["payload"]["reuse_kind"]=="identical"{"Reusing identical frames"}else if event["payload"]["reused"]==true{"Reusing verified frames"}else{"Rendering"}.into()});if let Some(path)=event["payload"]["path"].as_str(){callback(JobEvent::Frame(path.into()));}}
+            if event["kind"]=="frame"{let n=event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;callback(JobEvent::Progress{completed:n,total:count,stage:if event["payload"]["reuse_kind"]=="identical"{"Reusing identical frames"}else if event["payload"]["reused"]==true{"Reusing verified frames"}else{if request.engine == "eevee" { "Rendering with Eevee" } else { "Rendering with Cycles / OptiX" }}.into()});if let Some(path)=event["payload"]["path"].as_str(){callback(JobEvent::Frame(path.into()));}}
             else if event["kind"]=="log" && let Some(line)=event["payload"]["message"].as_str(){callback(JobEvent::Log(line.to_owned()));}
         })?;
             if let Some(warnings) = complete["payload"]["warnings"].as_array() {

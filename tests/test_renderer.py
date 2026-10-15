@@ -5,8 +5,10 @@ import json
 import math
 from pathlib import Path
 import struct
+import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("turninator_scene", Path(__file__).resolve().parents[1] / "renderer" / "scene.py")
@@ -26,6 +28,76 @@ def binary(vertices=None, triangles=None):
 
 
 class MeshTests(unittest.TestCase):
+    def test_event_line_is_written_in_one_call(self):
+        output = mock.Mock()
+        with mock.patch.object(worker.sys, 'stdout', output):
+            worker.emit({'request_id':'one'}, 'frame', {'index':0})
+        output.write.assert_called_once()
+        raw = output.write.call_args.args[0]
+        self.assertTrue(raw.startswith(worker.PREFIX))
+        self.assertTrue(raw.endswith('\n'))
+        self.assertEqual(json.loads(raw[len(worker.PREFIX):])['payload']['index'],0)
+        output.flush.assert_called_once()
+
+    def test_animation_prefix_requires_a_fresh_static_turntable(self):
+        self.assertEqual(worker.animation_prefix('turntable', None, False, False, [0,1,2,0,1,2]),3)
+        self.assertEqual(worker.animation_prefix('turntable', None, False, False, [0,1,2]),3)
+        for mode,states,progressive,reuse,sources in (
+            ('still',None,False,False,[0]), ('buildup',None,True,False,[0,1]),
+            ('turntable',[{}],False,False,[0,1]), ('turntable',None,False,True,[0,1]),
+            ('turntable',None,False,False,[0,0,2]),
+        ):
+            self.assertEqual(worker.animation_prefix(mode,states,progressive,reuse,sources),0)
+
+    def test_animation_batch_publishes_frames_and_removes_handlers_on_failure(self):
+        for fail in (None,'decode','rotation'):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
+                scene_mock=SimpleNamespace(frame_start=1,frame_end=250,frame_current=0,
+                                           render=SimpleNamespace(filepath='old'))
+                handlers=SimpleNamespace(frame_change_pre=[],render_write=[])
+                class Rotation:
+                    angle=0
+                    @property
+                    def z(self): return self.angle
+                    @z.setter
+                    def z(self,value):
+                        if fail=='rotation' and value>1: raise ValueError('rotation update')
+                        self.angle=value
+                obj=SimpleNamespace(rotation_euler=Rotation())
+                written=[]
+                def render(**kwargs):
+                    self.assertEqual(kwargs,dict(animation=True))
+                    for i in range(scene_mock.frame_start,scene_mock.frame_end+1):
+                        scene_mock.frame_current=i
+                        for handler in list(handlers.frame_change_pre):
+                            try: handler(scene_mock)
+                            except Exception: pass  # Blender reports and swallows handler errors.
+                        if fail is None: self.assertAlmostEqual(obj.rotation_euler.z,math.radians(i*90))
+                        Path(scene_mock.render.filepath+f'{i:04d}.png').write_bytes(b'png')
+                        for handler in list(handlers.render_write): handler(scene_mock)
+                    return {'FINISHED'}
+                fake=SimpleNamespace(context=SimpleNamespace(scene=scene_mock),app=SimpleNamespace(handlers=handlers),
+                                     ops=SimpleNamespace(render=SimpleNamespace(render=render)))
+                def checked(path):
+                    if fail=='decode': raise ValueError('corrupt PNG')
+                    self.assertEqual(Path(path).read_bytes(),b'png')
+                    return (16,16)
+                paths=[Path(directory)/f'frame_{i:04d}.png' for i in range(3)]
+                with mock.patch.dict(sys.modules,{'bpy':fake}):
+                    if fail:
+                        with self.assertRaisesRegex(ValueError,'rotation update' if fail=='rotation' else 'corrupt PNG'):
+                            worker.render_animation(obj,[0,90,180],paths,16,16,lambda i,elapsed:written.append(i),checked)
+                    else:
+                        elapsed=worker.render_animation(obj,[0,90,180],paths,16,16,lambda i,elapsed:written.append(i),checked)
+                        self.assertEqual(len(elapsed),3)
+                        self.assertEqual(written,[0,1,2])
+                        self.assertTrue(all(path.read_bytes()==b'png' for path in paths))
+                self.assertFalse(handlers.frame_change_pre)
+                self.assertFalse(handlers.render_write)
+                self.assertEqual(scene_mock.render.filepath,'old')
+                self.assertEqual((scene_mock.frame_start,scene_mock.frame_end),(1,250))
+                self.assertFalse((Path(directory)/'.render-animation').exists())
+
     def read(self, data, **kwargs):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "test.meshbin"

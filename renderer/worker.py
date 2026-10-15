@@ -8,19 +8,27 @@ from pathlib import Path
 import sys
 import time
 import traceback
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scene import (build_scene, load_scene_spec, probe_devices, turntable_angles, buildup_schedule,
                    set_visible_layer, validate_camera, layer_for_fraction, layer_for_count, prepare_buildup_section,
                    set_camera_spec, apply_layer_filter)
 
+from frame_pipeline import FramePipeline, decode_png_size
+
 PREFIX = "TURNINATOR_EVENT "
+_EVENT_LOCK = threading.Lock()
 
 
 def emit(request, kind, payload):
     event = {"protocol_version": 1, "request_id": request.get("request_id"),
              "scene_revision": request.get("scene_revision", 0), "kind": kind, "payload": payload}
-    print(PREFIX + json.dumps(event, allow_nan=False), flush=True)
+    with _EVENT_LOCK:
+        # Keep the text and newline in one write while Blender logs the next
+        # GPU frame; print() would leave a separate text/newline write gap.
+        sys.stdout.write(PREFIX + json.dumps(event, allow_nan=False) + '\n')
+        sys.stdout.flush()
 
 
 def validate_request(request):
@@ -68,21 +76,6 @@ def should_reuse_frame(path, size, reuse, decode_size):
         return False
 
 
-def decode_png_size(path):
-    import bpy
-    # Read signature as well: bpy otherwise accepts arbitrary image formats.
-    with Path(path).open("rb") as stream:
-        if stream.read(8) != b"\x89PNG\r\n\x1a\n":
-            raise ValueError("rendered frame is not PNG")
-    check = bpy.data.images.load(str(path), check_existing=False)
-    try:
-        if not check.pixels or not math.isfinite(check.pixels[0]):
-            raise RuntimeError("rendered PNG pixels are unavailable")
-        return tuple(check.size)
-    finally:
-        bpy.data.images.remove(check)
-
-
 def identical_frame_sources(angles, states, visible_layers):
     """First frame with exactly the same rotation, camera and deposited mesh."""
     first = {}
@@ -92,6 +85,94 @@ def identical_frame_sources(angles, states, visible_layers):
         key = (angle % 360, camera, layer)
         sources.append(first.setdefault(key, index))
     return sources
+
+
+def animation_prefix(mode, states, progressive, reuse, sources):
+    """Batch only a fresh static turntable with a contiguous unique prefix."""
+    if mode != 'turntable' or states is not None or progressive or reuse:
+        return 0
+    count = len(set(sources))
+    if count < 2 or sources[:count] != list(range(count)) or any(i >= count for i in sources[count:]):
+        return 0
+    return count
+
+
+def render_animation(obj, angles, paths, width, height, on_frame, decode_size=decode_png_size, pipeline_stats=None):
+    """Keep Blender rendering while CPU threads validate and publish PNGs.
+
+    Only main-thread handlers touch Blender data. The bounded publication pool
+    uses plain file bytes and reports ordered progress from its CPU threads.
+    """
+    import bpy
+    scene = bpy.context.scene
+    scratch = paths[0].parent / '.render-animation'
+    scratch.mkdir(exist_ok=False)
+    temporary = [scratch / f'frame_{i:04d}.png' for i in range(len(paths))]
+    previous = (scene.frame_start, scene.frame_end, scene.frame_current, scene.render.filepath)
+    rendered = []
+    errors = []
+    last = [time.perf_counter()]
+    def report(index, render_seconds, validation_seconds):
+        on_frame(index, render_seconds + validation_seconds)
+    try:
+        with FramePipeline(width,height,report,workers=min(len(paths),os.cpu_count() or 1,32),decode_size=decode_size) as pipeline:
+            def before_frame(scene, *_):
+                if errors:
+                    return
+                try:
+                    obj.rotation_euler.z = math.radians(angles[scene.frame_current])
+                except Exception as error:
+                    errors.append(error)
+            def after_write(scene, *_):
+                if errors:
+                    return
+                try:
+                    index = scene.frame_current
+                    if index != len(rendered):
+                        raise RuntimeError('animation frames arrived out of order')
+                    now = time.perf_counter()
+                    rendered.append(now-last[0])
+                    last[0] = now
+                    pipeline.submit(index,temporary[index],paths[index],rendered[-1])
+                except Exception as error:
+                    # Blender swallows handler errors; propagate them once its
+                    # operator returns instead of completing with wrong frames.
+                    errors.append(error)
+            bpy.app.handlers.frame_change_pre.append(before_frame)
+            bpy.app.handlers.render_write.append(after_write)
+            try:
+                scene.frame_start = 0
+                scene.frame_end = len(paths) - 1
+                scene.render.filepath = str(scratch / 'frame_')
+                result = bpy.ops.render.render(animation=True)
+                if errors:
+                    raise errors[0]
+                if result != {'FINISHED'} or len(rendered) != len(paths):
+                    raise RuntimeError('animation did not produce every requested frame')
+                drain_started = time.perf_counter()
+                timings = pipeline.finish()
+                if pipeline_stats is not None:
+                    pipeline_stats['validation_drain_seconds'] = time.perf_counter()-drain_started
+                    record_pipeline(pipeline_stats,pipeline,timings)
+                return [t['render_seconds']+t['validation_seconds'] for t in timings]
+            finally:
+                bpy.app.handlers.frame_change_pre.remove(before_frame)
+                bpy.app.handlers.render_write.remove(after_write)
+                scene.frame_start, scene.frame_end, scene.frame_current, scene.render.filepath = previous
+    finally:
+        # Context cleanup has joined the CPU readers before removing leftovers.
+        # Delete only enumerated scratch files, never a recursive directory.
+        for path in temporary:
+            path.unlink(missing_ok=True)
+        scratch.rmdir()
+
+
+def record_pipeline(summary,pipeline,timings):
+    summary['workers'] = max(summary.get('workers',0),pipeline.workers)
+    summary['peak_in_flight'] = max(summary.get('peak_in_flight',0),pipeline.peak_in_flight)
+    summary['producer_backpressure_seconds'] = summary.get('producer_backpressure_seconds',0.) + pipeline.validation_wait_seconds
+    summary['validation_work_seconds'] = summary.get('validation_work_seconds',0.) + sum(t['validation_seconds'] for t in timings)
+    summary['validated_frames'] = summary.get('validated_frames',0) + len(timings)
 
 
 def copy_identical_frame(source, target, width, height, decode_size=decode_png_size):
@@ -230,6 +311,7 @@ def render(request):
     recipe = {"schema_version": 1, "scene": spec,
               "geometry_hash": file_hash(spec["mesh_path"]),
               "worker_hash": file_hash(__file__), "scene_script_hash": file_hash(Path(__file__).with_name("scene.py")),
+              "frame_pipeline_hash": file_hash(Path(__file__).with_name("frame_pipeline.py")),
               "blender_version": bpy.app.version_string, "blender_build_hash": str(bpy.app.build_hash),
               "engine": engine, "size": size, "width": width, "height": height, "samples": samples, "mode": mode,
               "angles": angles, "transparent": transparent,
@@ -251,6 +333,25 @@ def render(request):
                       else buildup_schedule(info["build_layers"],len(angles)) if building else [None]*len(angles))
     source_mesh=obj.data.copy() if building and (spec["geometry_kind"] == "original" or spec.get("section") is not None) else None
     sources = identical_frame_sources(angles, states, visible_layers)
+    batch_count = animation_prefix(mode, states, progressive, reuse, sources)
+    batch_times = []
+    pipeline_stats = {}
+    frame_pipeline = None
+    submitted_frames = []
+    def report_individual(sequence,render_seconds,validation_seconds):
+        index,payload = submitted_frames[sequence]
+        elapsed = render_seconds+validation_seconds
+        durations[index] = elapsed
+        emit(request,"frame",dict(payload,elapsed_seconds=elapsed))
+    def flush_pipeline():
+        nonlocal frame_pipeline
+        if frame_pipeline is not None:
+            drain_started = time.perf_counter()
+            timings = frame_pipeline.finish()
+            pipeline_stats['validation_drain_seconds'] = pipeline_stats.get('validation_drain_seconds',0.)+time.perf_counter()-drain_started
+            record_pipeline(pipeline_stats,frame_pipeline,timings)
+            frame_pipeline = None
+            submitted_frames.clear()
     frame_analysis=[]
     frame_build_analysis=[]
     prepared_layer=None
@@ -259,66 +360,94 @@ def render(request):
     rendered_count = 0
     copied_count = 0
     verified_count = 0
-    for index, (angle, output_path) in enumerate(zip(angles, paths)):
-        frame_start = time.perf_counter()
-        if sources[index] < index:
-            if not should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
-                copy_identical_frame(paths[sources[index]], output_path, width, height)
-                copied_count += 1
-            else:
+    try:
+        for index, (angle, output_path) in enumerate(zip(angles, paths)):
+            frame_start = time.perf_counter()
+            if sources[index] < index:
+                flush_pipeline()
+                if not should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
+                    copy_identical_frame(paths[sources[index]], output_path, width, height)
+                    copied_count += 1
+                else:
+                    verified_count += 1
+                frame_analysis.append(frame_analysis[sources[index]])
+                frame_build_analysis.append(frame_build_analysis[sources[index]])
+                elapsed = time.perf_counter() - frame_start
+                durations.append(elapsed)
+                completed.append(str(output_path))
+                emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
+                                        "elapsed_seconds": elapsed, "size": size, "reused": True,
+                                        "reuse_kind": "identical", "source_index": sources[index],
+                                        "visible_layer": visible_layers[index], "section_analysis": frame_analysis[-1],
+                                        "build_analysis":frame_build_analysis[-1]})
+                continue
+            if visible_layers[index] is not None:
+                if source_mesh is not None:
+                    if prepared_layer != visible_layers[index]:
+                        build_analysis={} if spec["geometry_kind"] == "original" else None
+                        info["section_analysis"]=prepare_buildup_section(obj,source_mesh,spec,info["bounds_m"],visible_layers[index],build_analysis)
+                        info["build_analysis"]=build_analysis
+                        prepared_layer=visible_layers[index]
+                else:
+                    set_visible_layer(obj,visible_layers[index])
+            frame_analysis.append(info.get("section_analysis"))
+            frame_build_analysis.append(info.get("build_analysis"))
+            if states is not None:
+                set_camera_spec(bpy.context.scene.camera,states[index]["camera"])
+                if spec.get("layer_appearance",False) and spec.get("layer_filtering",True):
+                    for material in obj.data.materials:
+                        apply_layer_filter(material,bpy.context.scene.camera,width,height,min(spec["layer_height_mm"],spec.get("first_layer_height_mm",spec["layer_height_mm"])))
+            if index == 0 and batch_count:
+                def report_batch(frame, elapsed):
+                    emit(request, "frame", {"path":str(paths[frame]), "index":frame,
+                         "angle_degrees":angles[frame], "elapsed_seconds":elapsed,"size":size,"reused":False,
+                         "visible_layer":visible_layers[frame],"section_analysis":info.get("section_analysis"),
+                         "build_analysis":info.get("build_analysis")})
+                batch_times = render_animation(obj, angles[:batch_count], paths[:batch_count], width, height, report_batch, pipeline_stats=pipeline_stats)
+            if index < len(batch_times):
+                rendered_count += 1
+                durations.append(batch_times[index])
+                completed.append(str(output_path))
+                continue
+            if should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
+                flush_pipeline()
                 verified_count += 1
-            frame_analysis.append(frame_analysis[sources[index]])
-            frame_build_analysis.append(frame_build_analysis[sources[index]])
-            elapsed = time.perf_counter() - frame_start
-            durations.append(elapsed)
-            completed.append(str(output_path))
-            emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                    "elapsed_seconds": elapsed, "size": size, "reused": True,
-                                    "reuse_kind": "identical", "source_index": sources[index],
-                                    "visible_layer": visible_layers[index], "section_analysis": frame_analysis[-1],
-                                    "build_analysis":frame_build_analysis[-1]})
-            continue
-        if visible_layers[index] is not None:
-            if source_mesh is not None:
-                if prepared_layer != visible_layers[index]:
-                    build_analysis={} if spec["geometry_kind"] == "original" else None
-                    info["section_analysis"]=prepare_buildup_section(obj,source_mesh,spec,info["bounds_m"],visible_layers[index],build_analysis)
-                    info["build_analysis"]=build_analysis
-                    prepared_layer=visible_layers[index]
-            else:
-                set_visible_layer(obj,visible_layers[index])
-        frame_analysis.append(info.get("section_analysis"))
-        frame_build_analysis.append(info.get("build_analysis"))
-        if states is not None:
-            set_camera_spec(bpy.context.scene.camera,states[index]["camera"])
-            if spec.get("layer_appearance",False) and spec.get("layer_filtering",True):
-                for material in obj.data.materials:
-                    apply_layer_filter(material,bpy.context.scene.camera,width,height,min(spec["layer_height_mm"],spec.get("first_layer_height_mm",spec["layer_height_mm"])))
-        if should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
-            verified_count += 1
-            elapsed = time.perf_counter() - frame_start
-            durations.append(elapsed)
-            completed.append(str(output_path))
-            emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                    "elapsed_seconds": elapsed, "size": size, "reused": True,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis"),"build_analysis":info.get("build_analysis")})
-            continue
-        obj.rotation_euler.z = math.radians(angle)
-        temporary = output_path.with_name(output_path.stem + ".partial.png")
-        try:
-            bpy.context.scene.render.filepath = str(temporary)
-            bpy.ops.render.render(write_still=True)
-            rendered_count += 1
-            if decode_png_size(temporary) != (width, height):
-                raise RuntimeError("rendered PNG dimensions did not match request")
-            os.replace(temporary, output_path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-        elapsed = time.perf_counter() - frame_start
-        durations.append(elapsed)
-        completed.append(str(output_path))
-        emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
-                                "elapsed_seconds": elapsed, "size": size, "reused": False,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis"),"build_analysis":info.get("build_analysis")})
+                elapsed = time.perf_counter() - frame_start
+                durations.append(elapsed)
+                completed.append(str(output_path))
+                emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
+                                        "elapsed_seconds": elapsed, "size": size, "reused": True,"visible_layer":visible_layers[index],"section_analysis":info.get("section_analysis"),"build_analysis":info.get("build_analysis")})
+                continue
+            obj.rotation_euler.z = math.radians(angle)
+            temporary = output_path.with_name(output_path.stem + ".partial.png")
+            queued = False
+            try:
+                bpy.context.scene.render.filepath = str(temporary)
+                bpy.ops.render.render(write_still=True)
+                rendered_count += 1
+                elapsed = time.perf_counter() - frame_start
+                durations.append(0.)
+                completed.append(str(output_path))
+                payload=dict(path=str(output_path),index=index,angle_degrees=angle,size=size,reused=False,
+                             visible_layer=visible_layers[index],section_analysis=info.get("section_analysis"),
+                             build_analysis=info.get("build_analysis"))
+                if frame_pipeline is None:
+                    frame_pipeline = FramePipeline(width,height,report_individual,workers=min(len(angles)-index,os.cpu_count() or 1,32))
+                sequence = len(submitted_frames)
+                submitted_frames.append((index,payload))
+                frame_pipeline.submit(sequence,temporary,output_path,elapsed)
+                queued = True
+            finally:
+                if not queued:
+                    temporary.unlink(missing_ok=True)
+        flush_pipeline()
+    except BaseException:
+        if frame_pipeline is not None:
+            try:
+                frame_pipeline.finish()
+            except Exception:
+                pass
+        raise
     analysis_path=output_dir/"frame-analysis.json"
     analysis_temporary=analysis_path.with_suffix(".partial.json")
     analysis_temporary.write_text(json.dumps(frame_analysis,allow_nan=False),encoding="utf-8")
@@ -327,6 +456,8 @@ def render(request):
              "frame_count":len(angles),"build_layer_count":len(info.get("build_layers") or []),
              "unique_frame_count": len(set(sources)), "rendered_frame_count": rendered_count,
              "copied_frame_count": copied_count, "verified_frame_count": verified_count,
+             "render_strategy":"animation" if batch_times else "individual_frames",
+             "frame_pipeline":pipeline_stats,
              "prepare_seconds": prepare_seconds, "frame_seconds": durations,
              "total_seconds": time.perf_counter() - started,"frame_analysis":frame_analysis,"frame_build_analysis":frame_build_analysis,
              "frame_analysis_path":str(analysis_path),**info}

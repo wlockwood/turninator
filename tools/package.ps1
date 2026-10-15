@@ -62,13 +62,13 @@ try {
     }
     $executable = if ($ExecutablePath) { [IO.Path]::GetFullPath($ExecutablePath) } else { Join-Path $workspace "target/$Profile/turninator.exe" }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Missing executable: $executable" }
-    foreach ($resource in @('renderer/worker.py', 'renderer/scene.py', 'README.md', 'docs/runtime-support.md')) {
+    foreach ($resource in @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'README.md', 'docs/runtime-support.md')) {
         if (-not (Test-Path -LiteralPath (Join-Path $workspace $resource) -PathType Leaf)) { throw "Missing runtime resource: $resource" }
     }
     New-Item -ItemType Directory -Path $package | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $package 'renderer'), (Join-Path $package 'docs') | Out-Null
     Copy-Item -LiteralPath $executable -Destination (Join-Path $package 'turninator.exe')
-    foreach ($resource in @('renderer/worker.py', 'renderer/scene.py', 'docs/runtime-support.md')) {
+    foreach ($resource in @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'docs/runtime-support.md')) {
         Copy-Item -LiteralPath (Join-Path $workspace $resource) -Destination (Join-Path $package $resource)
     }
     Copy-Item -LiteralPath (Join-Path $workspace 'README.md') -Destination (Join-Path $package 'docs/source-readme.md')
