@@ -146,6 +146,14 @@ pub fn slice_stepped_with_report(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<S
     }
     let arithmetic_tolerance =
         (bounds.max[0] - bounds.min[0]).max(bounds.max[1] - bounds.min[1]) * 2f64.powi(-45);
+    let renderer_tolerance = bounds
+        .min
+        .into_iter()
+        .chain(bounds.max)
+        .fold(0f64, |a, b| a.max(b.abs()))
+        * f32::EPSILON as f64;
+    let mut resolved_folds = 0usize;
+    let mut max_fold_displacement = 0f64;
     let mut sections = Vec::new();
     let sample_heights_mm: Vec<_> = schedule
         .boundaries_mm
@@ -163,9 +171,15 @@ pub fn slice_stepped_with_report(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<S
             z,
             triangles.iter().map(|&i| &mesh.triangles[i as usize]),
         )?;
-        validate_contours(&contours, arithmetic_tolerance, &mut work)
-            .map_err(|error| format!("slice plane {z}: {error}"))?;
-        let original_depths = contour_depths(&contours, &mut work)?;
+        let (original_depths, count, displacement) = prepare_stepped_contours(
+            &mut contours,
+            arithmetic_tolerance,
+            renderer_tolerance,
+            &mut work,
+        )
+        .map_err(|error| format!("slice plane {z}: {error}"))?;
+        resolved_folds += count;
+        max_fold_displacement = max_fold_displacement.max(displacement);
         for contour in &mut contours {
             for point in contour.iter_mut() {
                 *point = point.map(|v| v as f32 as f64);
@@ -244,8 +258,102 @@ pub fn slice_stepped_with_report(mesh: &Mesh, boundaries_mm: &[f64]) -> Result<S
     compact(&mut output);
     output.bounds()?;
     validate_closed(&output).map_err(|e| format!("stepped output: {e}"))?;
-    Ok(SteppedEnvelope {mesh:output,layer_face_ranges,sample_heights_mm,coordinate_tolerance_mm:bounds.min.into_iter().chain(bounds.max).fold(0f64,|a,b|a.max(b.abs())) * f32::EPSILON as f64,
-        warnings:vec!["Experimental mid-layer stepped envelope; this is a sliced-solid approximation, not deposited nozzle paths. Small features between sample planes may be absent by the selected sampling rule.".into(),"Closed layer slabs retain internal layer interfaces, which may be visible with transparent materials. Coordinates use renderer f32 precision; collapsed holes/gaps are rejected without source repair.".into()]})
+    let mut warnings = vec!["Experimental mid-layer stepped envelope; this is a sliced-solid approximation, not deposited nozzle paths. Small features between sample planes may be absent by the selected sampling rule.".into(),"Closed layer slabs retain internal layer interfaces, which may be visible with transparent materials. Coordinates use renderer f32 precision; collapsed holes/gaps are rejected without source repair.".into()];
+    if resolved_folds > 0 {
+        warnings.push(format!("Resolved {resolved_folds} microscopic self-crossing folds in generated slice outlines; each enclosed loop has zero area at renderer precision. Maximum per-fold outline displacement {max_fold_displacement:.9} mm (limit {:.9} mm). Source STL unchanged.",4.*renderer_tolerance));
+    }
+    Ok(SteppedEnvelope {
+        mesh: output,
+        layer_face_ranges,
+        sample_heights_mm,
+        coordinate_tolerance_mm: renderer_tolerance,
+        warnings,
+    })
+}
+
+/// Only a local, proper crossing across one intervening edge is eligible.
+/// Both radius and exact area at GPU coordinate precision bound the change;
+/// long thin folds, visible small loops and contacts remain errors.
+fn renderer_fold(contour: &[Point], i: usize, tolerance: f64) -> Option<(Point, f64)> {
+    if contour.len() < 5 {
+        return None;
+    }
+    let [a, b, c, d] = std::array::from_fn(|offset| contour[(i + offset) % contour.len()]);
+    if !(cross(a, b, c) * cross(a, b, d) < 0. && cross(c, d, a) * cross(c, d, b) < 0.) {
+        return None;
+    }
+    let r = [b[0] - a[0], b[1] - a[1]];
+    let s = [d[0] - c[0], d[1] - c[1]];
+    let denominator = r[0] * s[1] - r[1] * s[0];
+    let t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / denominator;
+    let intersection = [a[0] + t * r[0], a[1] + t * r[1]];
+    let displacement = [b, c]
+        .into_iter()
+        .map(|p| (p[0] - intersection[0]).hypot(p[1] - intersection[1]))
+        .fold(0f64, f64::max);
+    if !displacement.is_finite() || displacement > 4. * tolerance {
+        return None;
+    }
+    let [p, q, r] = [intersection, b, c].map(|p| p.map(|v| v as f32 as f64));
+    (cross(p, q, r) == 0.).then_some((intersection, displacement))
+}
+
+fn resolve_renderer_folds(
+    contour: &mut Contour,
+    tolerance: f64,
+    work: &mut usize,
+) -> Result<(usize, f64)> {
+    let mut count = 0;
+    let mut displacement = 0f64;
+    let mut i = 0;
+    while i < contour.len() {
+        contour_work(work, 1)?;
+        if let Some((intersection, distance)) = renderer_fold(contour, i, tolerance) {
+            contour_work(work, contour.len())?;
+            contour.rotate_left(i);
+            contour.splice(1..3, [intersection]);
+            count += 1;
+            displacement = displacement.max(distance);
+            i = 0;
+        } else {
+            i += 1;
+        }
+    }
+    Ok((count, displacement))
+}
+
+/// Validate all original conflicts before pruning, and preserve each ring's
+/// nesting identity before the separate GPU-coordinate conversion.
+fn prepare_stepped_contours(
+    contours: &mut [Contour],
+    arithmetic_tolerance: f64,
+    renderer_tolerance: f64,
+    work: &mut usize,
+) -> Result<(Vec<usize>, usize, f64)> {
+    validate_contours_with_folds(
+        contours,
+        arithmetic_tolerance,
+        work,
+        Some(renderer_tolerance),
+    )?;
+    let depths = contour_depths(contours, work)?;
+    let mut count = 0;
+    let mut displacement = 0f64;
+    for contour in contours.iter_mut() {
+        let (resolved, distance) = resolve_renderer_folds(contour, renderer_tolerance, work)?;
+        count += resolved;
+        displacement = displacement.max(distance);
+    }
+    if count > 0 {
+        validate_contours(contours, arithmetic_tolerance, work)?;
+        if contour_depths(contours, work)? != depths {
+            return Err(
+                "microscopic fold resolution would change holes or nesting; no outline accepted"
+                    .into(),
+            );
+        }
+    }
+    Ok((depths, count, displacement))
 }
 
 /// Discard only repeated points and exactly straight intermediate vertices.
@@ -482,6 +590,14 @@ fn point_distance(p: Point, a: Point, b: Point) -> f64 {
     (p[0] - a[0] - t * d[0]).hypot(p[1] - a[1] - t * d[1])
 }
 fn validate_contours(contours: &[Contour], tolerance: f64, work: &mut usize) -> Result<()> {
+    validate_contours_with_folds(contours, tolerance, work, None)
+}
+fn validate_contours_with_folds(
+    contours: &[Contour],
+    tolerance: f64,
+    work: &mut usize,
+    fold_tolerance: Option<f64>,
+) -> Result<()> {
     let mut edges: Vec<_> = contours
         .iter()
         .enumerate()
@@ -517,6 +633,22 @@ fn validate_contours(contours: &[Contour], tolerance: f64, work: &mut usize) -> 
                 .min(point_distance(c, a, b))
                 .min(point_distance(d, a, b));
             if intersects || distance <= tolerance {
+                if intersects
+                    && ca == cb
+                    && let Some(limit) = fold_tolerance
+                {
+                    let n = contours[ca].len();
+                    let start = if (ia + 2) % n == ib {
+                        Some(ia)
+                    } else if (ib + 2) % n == ia {
+                        Some(ib)
+                    } else {
+                        None
+                    };
+                    if start.is_some_and(|i| renderer_fold(&contours[ca], i, limit).is_some()) {
+                        continue;
+                    }
+                }
                 return Err(format!("slice contours intersect, touch or contain features below coordinate resolution; no repair performed (edges {ca}/{ia} {a:?}->{b:?} and {cb}/{ib} {c:?}->{d:?}, distance {distance:e}, tolerance {tolerance:e}, crossing {intersects})").into());
             }
         }
@@ -888,5 +1020,129 @@ mod buildup_tests {
             4.,
             "short solid already supplies its own top face"
         );
+    }
+}
+
+#[cfg(test)]
+mod stepped_fold_tests {
+    use super::*;
+    fn compost_fold() -> Contour {
+        vec![
+            [4.184749097352917, 120.9875149786023],
+            [3.4780534298149552, 121.39552781450395],
+            [3.4780953808470536, 121.39550392318571],
+            [3.471163692757165, 121.38075414530834],
+            [3., 120.],
+        ]
+    }
+    #[test]
+    fn microscopic_local_fold_is_resolved_at_the_actual_intersection() {
+        for shift in 0..5 {
+            let mut c = compost_fold();
+            c.rotate_left(shift);
+            assert!(validate_contours(&[c.clone()], 0., &mut 0).is_err());
+            let mut work = 0;
+            let report =
+                resolve_renderer_folds(&mut c, 170. * f32::EPSILON as f64, &mut work).unwrap();
+            assert_eq!(report.0, 1);
+            assert!(report.1 < 0.0000811);
+            assert_eq!(c.len(), 4);
+            validate_contours(&[c.clone()], 0., &mut work).unwrap();
+            assert!(c.iter().any(|p| (p[0] - 3.4780952591441365).abs() < 1e-12
+                && (p[1] - 121.3955036642169).abs() < 1e-12));
+        }
+    }
+    #[test]
+    fn real_crossings_and_long_thin_folds_are_not_removed() {
+        let examples = vec![
+            vec![[0., 0.], [2., 2.], [0., 2.], [2., 0.], [3., -1.]],
+            vec![
+                [0., 1.],
+                [1., 1. + 1e-9],
+                [0.9, 1. + 1e-9],
+                [0.9, 0.],
+                [0., 0.],
+            ],
+            // Small enough for the radius gate, but still visible at f32.
+            vec![
+                [0., 1.],
+                [1., 1.5],
+                [1. - 4e-7, 1.5],
+                [1. - 4e-7, 0.],
+                [0., 0.],
+            ],
+        ];
+        for mut c in examples {
+            let before = c.clone();
+            assert_eq!(resolve_renderer_folds(&mut c, 1e-6, &mut 0).unwrap().0, 0);
+            assert_eq!(c, before);
+            assert!(validate_contours(&[c], 0., &mut 0).is_err());
+        }
+    }
+    #[test]
+    fn valid_small_holes_and_nearby_boundaries_are_unchanged() {
+        let mut contours = vec![
+            vec![[0., 0.], [2., 0.], [2., 2.], [0., 2.]],
+            vec![[1., 1.], [1., 1.00001], [1.00001, 1.00001], [1.00001, 1.]],
+        ];
+        let before = contours.clone();
+        for c in &mut contours {
+            assert_eq!(resolve_renderer_folds(c, 1e-6, &mut 0).unwrap().0, 0);
+        }
+        assert_eq!(contours, before);
+        validate_contours(&contours, 0., &mut 0).unwrap();
+        assert_eq!(contour_depths(&contours, &mut 0).unwrap(), vec![0, 1]);
+    }
+    #[test]
+    fn fold_resolution_cannot_hide_a_crossing_with_another_contour() {
+        let contour = compost_fold();
+        let (intersection, _) = renderer_fold(&contour, 0, 170. * f32::EPSILON as f64).unwrap();
+        let center = std::array::from_fn::<_, 2, _>(|a| {
+            (intersection[a] + contour[1][a] + contour[2][a]) / 3.
+        });
+        // A second contour crosses this tiny fold. Pruning first would hide it.
+        let other: Contour = [intersection, contour[1], contour[2]]
+            .into_iter()
+            .map(|p| std::array::from_fn(|a| center[a] + 2. * (p[a] - center[a])))
+            .collect();
+        assert!(
+            validate_contours_with_folds(
+                &[contour, other],
+                0.,
+                &mut 0,
+                Some(170. * f32::EPSILON as f64)
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn removing_a_fold_cannot_change_another_rings_nesting() {
+        let contour = compost_fold();
+        let (intersection, _) = renderer_fold(&contour, 0, 170. * f32::EPSILON as f64).unwrap();
+        let center = std::array::from_fn::<_, 2, _>(|a| {
+            (intersection[a] + contour[1][a] + contour[2][a]) / 3.
+        });
+        let inner: Contour = [intersection, contour[1], contour[2]]
+            .into_iter()
+            .map(|p| std::array::from_fn(|a| center[a] + 0.25 * (p[a] - center[a])))
+            .collect();
+        let mut contours = vec![contour, inner];
+        let error = prepare_stepped_contours(&mut contours, 0., 170. * f32::EPSILON as f64, &mut 0)
+            .unwrap_err();
+        assert!(error.to_string().contains("nesting"), "{error}");
+    }
+    #[test]
+    fn fold_mutation_cost_is_reserved_before_modifying_the_contour() {
+        let mut contour = compost_fold();
+        let before = contour.clone();
+        assert!(
+            resolve_renderer_folds(
+                &mut contour,
+                170. * f32::EPSILON as f64,
+                &mut (WORK_BUDGET - 1)
+            )
+            .is_err()
+        );
+        assert_eq!(contour, before);
     }
 }

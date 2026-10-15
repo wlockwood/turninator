@@ -24,6 +24,46 @@ fn check_closed(mesh: &Mesh) {
 }
 
 #[test]
+#[ignore = "requires Compost Booster.stl; TURNINATOR_STEPPED_MODEL can override its path"]
+fn compost_booster_resolves_subprecision_slice_folds_without_changing_source() {
+    let source = std::env::var_os("TURNINATOR_STEPPED_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("D:/Models/Compost Booster.stl"));
+    let before = fs::read(&source).unwrap();
+    let model = load_model(
+        &source,
+        &ImportSettings {
+            stepped_envelope: true,
+            ..ImportSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(fs::read(&source).unwrap(), before);
+    assert_eq!(model.geometry_kind, "stepped");
+    check_closed(&model.mesh);
+    turninator::viewport::PickingMesh::new(&model.mesh).unwrap();
+    let output =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/compost-stepped-diagnosis");
+    fs::create_dir_all(&output).unwrap();
+    model
+        .mesh
+        .write_binary(&output.join("stepped.bin"))
+        .unwrap();
+    let decoded = Mesh::read_binary(&output.join("stepped.bin")).unwrap();
+    check_closed(&decoded);
+    fs::write(
+        output.join("acceptance.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "source_sha256":format!("{:x}",Sha256::digest(&before)),
+            "vertices":decoded.positions.len(),"triangles":decoded.triangles.len(),
+            "warnings":model.warnings,"source_unchanged":true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
 #[ignore = "requires the supplied STL model directory"]
 fn supplied_stls_slice_and_survive_renderer_snapshot_precision() {
     let source = PathBuf::from(
