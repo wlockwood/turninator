@@ -2,6 +2,7 @@
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod abi;
 mod loader;
+pub mod backend;
 use super::{
     contract::{
         BackendIdentity, GeometryKind, PhysicalMaterial, RenderAppearance, RenderCamera,
