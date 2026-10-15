@@ -129,8 +129,19 @@ def portable_metadata(value):
     elif isinstance(value, list):
         for item in value:
             portable_metadata(item)
-    elif isinstance(value, str) and (value.startswith("\\") or (value.startswith("/") and value not in ("/MD", "/MT")) or re.search(r"(?:^|\s)[A-Za-z]:[/\\]", value)):
-        raise ValueError("absolute build-machine paths are forbidden in product metadata")
+    elif isinstance(value, str):
+        # Attached options/key=value strings are still metadata: -ID:/... and
+        # compiler=\\server\share must not leak local build paths. Remove only
+        # HTTP(S) scheme syntax before scanning drives so its final s:/ is not
+        # mistaken for a drive; paths embedded later in a URL remain checked.
+        without_schemes = re.sub(r"(?i)\bhttps?://", "", value)
+        # A URL can legitimately contain // within its path. Slash-form UNC
+        # detection therefore applies outside complete HTTP(S) URL tokens.
+        without_urls = re.sub(r'''(?i)\bhttps?://[^\s"'<>]+''', "", value)
+        if (value.startswith("\\") or (value.startswith("/") and value not in ("/MD", "/MT"))
+                or re.search(r"[A-Za-z]:[/\\]", without_schemes)
+                or "\\\\" in value or "//" in without_urls):
+            raise ValueError("absolute build-machine paths are forbidden in product metadata")
 
 
 def validate_inventory(manifest, runtime, lock_path):

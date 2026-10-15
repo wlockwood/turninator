@@ -120,6 +120,36 @@ class NativePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absolute"):
             self.validate()
 
+    def test_attached_drive_and_unc_paths_cannot_escape_metadata_validation(self):
+        for value in ("-ID:/private/build/include", "compiler=D:/private/toolchain/cl.exe",
+                      '-I"D:/private/build/include"', r"flags=-IC:\private\include",
+                      r"-I\\private-server\build\include", r"compiler=\\private-server\build\cl.exe",
+                      "-I//private-server/build/include", "compiler=//private-server/build/cl.exe",
+                      "-ID://private/build/include", "see https://example.org then -ID:/private/include"):
+            with self.subTest(value=value):
+                self.manifest["backends"]["filament"] = {"compiler_flags": [value]}
+                with self.assertRaisesRegex(ValueError, "absolute"):
+                    self.validate()
+
+    def test_portable_flags_urls_and_relative_paths_remain_accepted(self):
+        for value in ("/MD", "/MT", "MSVC /MD /W4 /WX /EHsc", "-Iinclude", "compiler=tools/cl.exe",
+                      "https://example.org/source/LICENSE", "source=https://example.org/a//b?version=1.0",
+                      "http://example.org/source.tar.gz", "notices/filament.txt"):
+            with self.subTest(value=value):
+                self.manifest["backends"]["filament"] = {"compiler_flags": [value]}
+                self.validate()
+
+    def test_case_varied_notice_reference_survives_inventory_and_notice_generation(self):
+        spec = importlib.util.spec_from_file_location("notices", ROOT / "tools/generate-notices.py")
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        self.manifest["package_variant"] = "full"
+        self.manifest["components"][0]["notices"] = ["NOTICES/FILAMENT.TXT"]
+        validated = self.validate()
+        rendered = notices.render_native_notices(validated, self.root)
+        self.assertIn("Full license attribution", rendered)
+        self.assertIn("### notices/filament.txt", rendered)
+
     def test_native_payload_cannot_overwrite_application_files(self):
         self.add_file("README.md", b"unexpected replacement", "notice")
         with self.assertRaisesRegex(ValueError, "namespace"):

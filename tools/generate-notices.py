@@ -107,18 +107,21 @@ def render_native_notices(manifest, root):
     """Reproduce complete per-component text, including aggregate notices."""
     root = Path(root).resolve()
     parts = ["\n# Native renderer notices\n", f"Package variant: `{manifest['package_variant']}`.\n"]
-    files = {entry["path"]: entry for entry in manifest["files"]}
+    files = {entry["path"].lower(): entry for entry in manifest["files"]}
     for component in manifest["components"]:
         parts.append(f"\n## {component['id']} {component['version']}\n\nDeclared license: `{component['license']}`.\n")
         source = component.get("corresponding_source")
         if source:
             parts.append(f"\nCorresponding source: {source['url']}\n\nSHA-256: `{source['sha256']}`.\n\n{source['instructions']}\n")
-        for name in component["notices"]:
+        for reference in component["notices"]:
+            # Match inventory's Windows case-insensitive reference lookup and
+            # open/display the canonical inventory spelling on every host.
+            entry = files[reference.lower()]
+            name = entry["path"]
             path = (root / name).resolve()
             if not path.is_relative_to(root):
                 raise ValueError("native notice path escapes package")
             data = path.read_bytes()
-            entry = files[name]
             if entry["role"] != "notice" or len(data) != entry["size_bytes"] or digest(data) != entry["sha256"]:
                 raise ValueError(f"native notice identity mismatch: {name}")
             text = data.decode("utf-8-sig")
