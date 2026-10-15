@@ -67,6 +67,8 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
                 preview: false,
                 tools: tools.clone(),
                 cache_budget_bytes: budget,
+                memory: Default::default(),
+                generation: 0,
             })
             .unwrap();
         let mut reused = 0;

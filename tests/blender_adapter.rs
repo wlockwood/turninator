@@ -756,6 +756,11 @@ fn preparation_binds_only_the_probed_configuration_and_rejects_missing_identity(
                 .contains("saved Blender device is unavailable")
         );
         assert_eq!(absent.device.as_deref(), Some("unavailable-saved-device"));
+        assert_eq!(
+            registry.status(backend).availability,
+            BackendAvailability::Available,
+            "a missing explicitly selected device must not poison the installed renderer"
+        );
         let mut missing = probe;
         missing["gpu"]["version"] = json!("");
         assert!(

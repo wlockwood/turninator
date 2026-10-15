@@ -184,6 +184,8 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
                 ffprobe: "absent".into(),
             },
             cache_budget_bytes: 100_000_000,
+            memory: Default::default(),
+            generation: 0,
         }
     };
     service.submit(task(1, true, BackendId::Wgpu)).unwrap();
@@ -199,6 +201,7 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
                 revision: 11,
                 engine: BackendId::Wgpu,
                 message,
+                generation: 0,
             } => {
                 assert!(message.contains("cancelled"));
                 cancelled = true;

@@ -1,8 +1,8 @@
 //! Optional in-process renderer boundary. Loading is lazy and never runs tools.
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod abi;
-mod loader;
 pub mod backend;
+mod loader;
 use super::{
     contract::{
         BackendIdentity, GeometryKind, PhysicalMaterial, RenderAppearance, RenderCamera,

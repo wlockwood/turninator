@@ -9,6 +9,34 @@ use std::{
 
 static WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Application allocation ceilings, independent of installed physical memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderMemoryAllowance {
+    pub host_gib: u32,
+    pub gpu_gib: u32,
+}
+impl Default for RenderMemoryAllowance {
+    fn default() -> Self {
+        Self {
+            host_gib: 8,
+            gpu_gib: 6,
+        }
+    }
+}
+impl RenderMemoryAllowance {
+    pub fn limits(self) -> Result<crate::render::contract::RenderLimits> {
+        if !(1..=64).contains(&self.host_gib) || !(1..=48).contains(&self.gpu_gib) {
+            return Err("Render memory maximum must be 1–64 GiB host and 1–48 GiB GPU".into());
+        }
+        Ok(crate::render::contract::RenderLimits {
+            host_bytes: u64::from(self.host_gib) * 1024 * 1024 * 1024,
+            gpu_bytes: u64::from(self.gpu_gib) * 1024 * 1024 * 1024,
+            ..Default::default()
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -18,6 +46,7 @@ pub struct AppSettings {
     pub cache_budget_bytes: u64,
     pub auto_preview: bool,
     pub renderers: crate::render::RendererPreferences,
+    pub render_memory: RenderMemoryAllowance,
 }
 impl Default for AppSettings {
     fn default() -> Self {
@@ -28,6 +57,7 @@ impl Default for AppSettings {
             cache_budget_bytes: 20 * 1024 * 1024 * 1024,
             auto_preview: false,
             renderers: Default::default(),
+            render_memory: Default::default(),
         }
     }
 }
@@ -44,6 +74,7 @@ impl AppSettings {
             return Err("unsupported settings version".into());
         }
         settings.renderers.validate()?;
+        settings.render_memory.limits()?;
         let recents = std::mem::take(&mut settings.recent_files);
         for path in recents.into_iter().rev() {
             settings.remember(path);
@@ -52,6 +83,7 @@ impl AppSettings {
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         self.renderers.validate()?;
+        self.render_memory.limits()?;
         let bytes = serde_json::to_vec_pretty(self)?;
         if bytes.len() > 1024 * 1024 {
             return Err("settings exceed 1 MiB reload budget".into());

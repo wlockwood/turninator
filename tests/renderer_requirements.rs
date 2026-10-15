@@ -66,7 +66,7 @@ fn registry_status_is_lazy_and_embedded_choices_remain_unavailable() {
         let status = registry.status(backend);
         assert_eq!(status.backend, backend);
         match backend {
-            BackendId::BlenderEevee | BackendId::BlenderCycles => {
+            BackendId::Wgpu | BackendId::BlenderEevee | BackendId::BlenderCycles => {
                 assert_eq!(status.availability, BackendAvailability::NotProbed)
             }
             _ => assert!(matches!(

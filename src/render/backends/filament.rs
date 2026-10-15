@@ -205,6 +205,47 @@ impl FilamentBackend {
     }
 }
 
+impl RenderBackend for FilamentBackend {
+    fn id(&self) -> BackendId {
+        BackendId::Filament
+    }
+    fn assess(&self, scene: &RenderSceneSnapshot, _request: &ExportRequest) -> Vec<FeatureSupport> {
+        if scene.appearance.material_preset == "resin" {
+            vec![FeatureSupport::Approximate {
+                reason: RESIN_APPROXIMATION.into(),
+            }]
+        } else {
+            vec![FeatureSupport::Supported]
+        }
+    }
+    fn identity(&self) -> BackendIdentity {
+        self.studio.identity()
+    }
+    fn configure(&mut self, request: &ExportRequest) -> Result<()> {
+        self.studio.validate_selection(&request.selection)?;
+        self.configured_transparent = Some(request.transparent);
+        Ok(())
+    }
+    fn render_sequence(
+        &mut self,
+        scene: &RenderSceneSnapshot,
+        frames: &FramePlan,
+        context: &RenderContext<'_>,
+        emit: &mut dyn FnMut(FrameArtifact) -> Result<()>,
+    ) -> Result<RenderReport> {
+        // The resolved plan owns panel alpha (sheet panels can be transparent
+        // even when the composed final document is opaque).
+        if self.configured_transparent.is_none() {
+            return Err("configure Filament before rendering an export sequence".into());
+        }
+        let mut report = backend::render_sequence(&mut self.studio, scene, frames, context, emit)?;
+        if scene.appearance.material_preset == "resin" {
+            report.warnings.push(RESIN_APPROXIMATION.into());
+        }
+        Ok(report)
+    }
+}
+
 #[cfg(test)]
 mod package_tests {
     use super::*;
@@ -247,45 +288,5 @@ mod package_tests {
         let mut large = serde_json::to_vec(&receipt()).unwrap();
         large.resize(16385, b' ');
         assert!(PackageReceipt::parse(&large).is_err());
-    }
-}
-impl RenderBackend for FilamentBackend {
-    fn id(&self) -> BackendId {
-        BackendId::Filament
-    }
-    fn assess(&self, scene: &RenderSceneSnapshot, _request: &ExportRequest) -> Vec<FeatureSupport> {
-        if scene.appearance.material_preset == "resin" {
-            vec![FeatureSupport::Approximate {
-                reason: RESIN_APPROXIMATION.into(),
-            }]
-        } else {
-            vec![FeatureSupport::Supported]
-        }
-    }
-    fn identity(&self) -> BackendIdentity {
-        self.studio.identity()
-    }
-    fn configure(&mut self, request: &ExportRequest) -> Result<()> {
-        self.studio.validate_selection(&request.selection)?;
-        self.configured_transparent = Some(request.transparent);
-        Ok(())
-    }
-    fn render_sequence(
-        &mut self,
-        scene: &RenderSceneSnapshot,
-        frames: &FramePlan,
-        context: &RenderContext<'_>,
-        emit: &mut dyn FnMut(FrameArtifact) -> Result<()>,
-    ) -> Result<RenderReport> {
-        // The resolved plan owns panel alpha (sheet panels can be transparent
-        // even when the composed final document is opaque).
-        if self.configured_transparent.is_none() {
-            return Err("configure Filament before rendering an export sequence".into());
-        }
-        let mut report = backend::render_sequence(&mut self.studio, scene, frames, context, emit)?;
-        if scene.appearance.material_preset == "resin" {
-            report.warnings.push(RESIN_APPROXIMATION.into());
-        }
-        Ok(report)
     }
 }

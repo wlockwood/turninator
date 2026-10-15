@@ -1116,6 +1116,8 @@ fn actor_fresh_prepares_changed_runtime_but_recovery_needs_no_renderer() {
             preview: false,
             tools: tools(),
             cache_budget_bytes: 100_000_000,
+            memory: Default::default(),
+            generation: 0,
         };
         let original_request = if recovery {
             let mut bytes = fs::read(request.job_dir.join("request.json")).unwrap();
@@ -1365,6 +1367,8 @@ fn real_blender_24_frame_batch_rebind_and_paired_timeline_build() {
                 preview: false,
                 tools: ToolPaths::default(),
                 cache_budget_bytes: 1_000_000_000,
+                memory: Default::default(),
+                generation: 0,
             })
             .unwrap();
         loop {

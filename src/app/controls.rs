@@ -1,6 +1,10 @@
 use super::help::{self, HelpResponse};
 use crate::export::{OutputFormat, VideoCodec};
-use crate::render::{BackendId, RendererPreferences};
+use crate::render::{
+    BackendQuality, RendererPreferences,
+    capabilities::BackendStatus,
+    selection::{AaQuality, RenderUsage, ShadowQuality},
+};
 use eframe::egui;
 
 pub(super) fn build_up_checkbox(
@@ -106,6 +110,7 @@ pub(super) struct OutputEditor<'a> {
     pub codec: &'a mut VideoCodec,
     pub frame_rate: &'a mut u32,
     pub renderers: &'a mut RendererPreferences,
+    pub statuses: &'a [BackendStatus],
     pub animation_size: &'a mut u32,
     pub still_size: &'a mut u32,
     pub transparent: &'a mut bool,
@@ -159,12 +164,30 @@ impl OutputEditor<'_> {
         let renderer_label = ui.label("Renderer").help(help::RENDERER);
         egui::ComboBox::from_id_salt(("output_renderer", self.format.animated()))
             .width(ui.available_width())
-            .selected_text(match backend { BackendId::BlenderCycles => "Cycles / OptiX", BackendId::BlenderEevee => "EEVEE (fast)", other => other.as_str() })
+            .selected_text(super::renderers::label(backend))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut backend, BackendId::BlenderEevee, "EEVEE (fast)").help("Fast Blender rendering for lighting, color and layer-detail checks. Transmission and fine shadows are approximate.");
-                ui.selectable_value(&mut backend, BackendId::BlenderCycles, "Cycles / OptiX").help("Trace light for more realistic reflections, shadows and resin. Requires a supported NVIDIA OptiX GPU; there is no silent CPU fallback.");
-            }).response.labelled_by(renderer_label.id).help(help::RENDERER);
+                let usage = if still {
+                    RenderUsage::Still
+                } else {
+                    RenderUsage::Animation
+                };
+                for option in super::renderers::renderer_options(self.statuses, usage) {
+                    ui.selectable_value(&mut backend, option.backend, option.label)
+                        .help(option.reason.as_deref().unwrap_or("Ready to render"));
+                }
+            })
+            .response
+            .labelled_by(renderer_label.id)
+            .help(help::RENDERER);
         self.renderers.select_backend(still, backend);
+        if let Some(reason) =
+            super::renderers::renderer_options(self.statuses, RenderUsage::Preview)
+                .into_iter()
+                .find(|o| o.backend == backend)
+                .and_then(|o| o.reason)
+        {
+            ui.small(reason);
+        }
         let size = if still {
             self.still_size
         } else {
@@ -222,6 +245,36 @@ impl OutputEditor<'_> {
             )
             .labelled_by(samples_label.id)
             .help(help::SAMPLES);
+        }
+        match &mut selection.quality {
+            BackendQuality::Wgpu { aa, shadows } | BackendQuality::Filament { aa, shadows } => {
+                ui.label("Anti-aliasing");
+                egui::ComboBox::from_id_salt("renderer_aa")
+                    .width(ui.available_width())
+                    .selected_text(format!("{aa:?}"))
+                    .show_ui(ui, |ui| {
+                        for value in [AaQuality::Low, AaQuality::Medium, AaQuality::High] {
+                            ui.selectable_value(aa, value, format!("{value:?}"));
+                        }
+                    });
+                ui.label("Shadows");
+                egui::ComboBox::from_id_salt("renderer_shadows")
+                    .width(ui.available_width())
+                    .selected_text(format!("{shadows:?}"))
+                    .show_ui(ui, |ui| {
+                        for value in [
+                            ShadowQuality::Low,
+                            ShadowQuality::Medium,
+                            ShadowQuality::High,
+                        ] {
+                            ui.selectable_value(shadows, value, format!("{value:?}"));
+                        }
+                    });
+            }
+            BackendQuality::LuxCore { denoise, .. } | BackendQuality::Cycles { denoise, .. } => {
+                ui.checkbox(denoise, "Denoise");
+            }
+            _ => {}
         }
         if self.format.supports_transparency() {
             ui.checkbox(self.transparent, "Transparent background").help("Save empty background pixels with an alpha channel instead of a studio floor. Useful for placing the PNG over another background. Material transparency is controlled separately by Resin clarity.");
@@ -362,6 +415,7 @@ mod tests {
                         codec: &mut options.video_codec,
                         frame_rate: &mut options.frame_rate,
                         renderers: &mut renderers,
+                        statuses: &[],
                         animation_size: &mut size,
                         still_size: &mut options.still_size,
                         transparent: &mut options.transparent,
@@ -412,7 +466,7 @@ mod tests {
                 ("Encoding", "MP4 video"),
                 ("MP4 codec", "H.264"),
                 ("Framerate (fps)", "20"),
-                ("Renderer", "EEVEE (fast)"),
+                ("Renderer", "Blender Eevee"),
                 ("Output pixels", "960"),
                 ("Samples", "7"),
             ] {
@@ -452,7 +506,7 @@ mod tests {
             for shape in &output.shapes {
                 collect(&shape.shape, &mut boxes);
             }
-            for value in ["MP4 video", "H.264", "EEVEE (fast)"] {
+            for value in ["MP4 video", "H.264", "Blender Eevee"] {
                 let text_rect = texts.iter().find(|(text, _)| text == value).unwrap().1;
                 let control = boxes
                     .iter()
@@ -674,7 +728,9 @@ mod tests {
         ] {
             let texts = rendered_text(format, &mut options);
             assert_eq!(
-                texts.iter().any(|(text, _)| text == "Cycles / OptiX"),
+                texts
+                    .iter()
+                    .any(|(text, _)| text == "Blender Cycles / OptiX"),
                 !format.animated()
             );
             assert_eq!(

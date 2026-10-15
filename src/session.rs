@@ -26,17 +26,20 @@ use std::{
 pub struct RenderTask {
     pub id: u64,
     pub revision: u64,
+    pub generation: u64,
     pub mesh: Arc<Mesh>,
     pub scene: Value,
     pub request: ExportRequest,
     pub preview: bool,
     pub tools: ToolPaths,
     pub cache_budget_bytes: u64,
+    pub memory: crate::settings::RenderMemoryAllowance,
 }
 #[derive(Clone, Debug)]
 pub struct JobTicket {
     pub id: u64,
     pub revision: u64,
+    pub generation: u64,
     pub engine: BackendId,
     pub cancel: Arc<AtomicBool>,
 }
@@ -45,6 +48,7 @@ impl JobTicket {
         Self {
             id,
             revision,
+            generation: 0,
             engine,
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -57,15 +61,25 @@ impl JobTicket {
     }
 }
 pub enum RenderEvent {
+    Prepared {
+        id: u64,
+        revision: u64,
+        generation: u64,
+        engine: BackendId,
+        identity: BackendIdentity,
+        assessment: Vec<crate::render::capabilities::FeatureSupport>,
+    },
     Progress {
         id: u64,
         revision: u64,
+        generation: u64,
         engine: BackendId,
         event: JobEvent,
     },
     Completed {
         id: u64,
         revision: u64,
+        generation: u64,
         engine: BackendId,
         preview: bool,
         result: ExportResult,
@@ -73,6 +87,7 @@ pub enum RenderEvent {
     Failed {
         id: u64,
         revision: u64,
+        generation: u64,
         engine: BackendId,
         message: String,
     },
@@ -82,6 +97,7 @@ struct Queue {
     pending: Option<(RenderTask, JobTicket, bool)>,
     active: Option<(JobTicket, bool)>,
     shutdown: bool,
+    release_idle: bool,
 }
 pub struct RenderService {
     queue: Arc<(Mutex<Queue>, Condvar)>,
@@ -106,8 +122,11 @@ type BackendFactory = dyn FnMut(
     + Send;
 impl RenderService {
     pub fn new() -> Self {
-        Self::with_backend_factory(|selection, scene, request, tools, limits, cancel| {
-            BackendRegistry::default().prepare(selection, scene, request, tools, limits, cancel)
+        let mut registry = None;
+        Self::with_backend_factory(move |selection, scene, request, tools, limits, cancel| {
+            registry
+                .get_or_insert_with(BackendRegistry::default)
+                .prepare(selection, scene, request, tools, limits, cancel)
         })
     }
     /// The factory crosses the thread boundary; its renderer is created and destroyed only on the actor.
@@ -137,6 +156,10 @@ impl RenderService {
                     let (lock, wake) = &*actor_queue;
                     let mut queue = lock.lock().unwrap();
                     while queue.pending.is_none() && !queue.shutdown {
+                        if queue.release_idle {
+                            prepared = None;
+                            queue.release_idle = false;
+                        }
                         queue = wake.wait(queue).unwrap();
                     }
                     if queue.shutdown {
@@ -161,6 +184,7 @@ impl RenderService {
                         let _ = events.send(RenderEvent::Completed {
                             id: ticket.id,
                             revision: ticket.revision,
+                            generation: ticket.generation,
                             engine: ticket.engine,
                             preview: task.preview,
                             result,
@@ -170,6 +194,7 @@ impl RenderService {
                         let _ = events.send(RenderEvent::Failed {
                             id: ticket.id,
                             revision: ticket.revision,
+                            generation: ticket.generation,
                             engine: ticket.engine,
                             message: "cancelled".into(),
                         });
@@ -178,6 +203,7 @@ impl RenderService {
                         let _ = events.send(RenderEvent::Failed {
                             id: ticket.id,
                             revision: ticket.revision,
+                            generation: ticket.generation,
                             engine: ticket.engine,
                             message: error.to_string(),
                         });
@@ -219,7 +245,8 @@ impl RenderService {
         if let Some((_, ticket, _)) = queue.pending.take() {
             ticket.cancel.store(true, Ordering::Release);
         }
-        let ticket = JobTicket::new(task.id, task.revision, task.request.selection.backend);
+        let mut ticket = JobTicket::new(task.id, task.revision, task.request.selection.backend);
+        ticket.generation = task.generation;
         queue.pending = Some((task, ticket, recovery));
         *self.partial.lock().unwrap() = None;
         self.queue.1.notify_one();
@@ -247,6 +274,11 @@ impl RenderService {
         }
         *self.partial.lock().unwrap() = None;
     }
+    pub fn release_idle(&self) {
+        let mut queue = self.queue.0.lock().unwrap();
+        queue.release_idle = true;
+        self.queue.1.notify_one();
+    }
     pub fn take_partial(&self) -> Option<(JobTicket, RgbaFrame)> {
         let mut delivered = self.last_partial_delivery.lock().unwrap();
         if delivered.is_some_and(|time| time.elapsed().as_millis() < 200) {
@@ -264,9 +296,21 @@ impl RenderService {
         frame
     }
 }
-fn runtime_inputs(task: &RenderTask) -> Result<String> {
+pub(crate) fn runtime_inputs(task: &RenderTask) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(&task.request.selection)?);
+    hasher.update(serde_json::to_vec(&task.memory)?);
+    if matches!(
+        task.request.selection.backend,
+        BackendId::Filament | BackendId::LuxCore
+    ) {
+        // Missing/changed packages invalidate reuse, but preparation owns the
+        // actionable failure. Injected factories remain usable without SDKs.
+        let package =
+            crate::render::registry::native_runtime_fingerprint(task.request.selection.backend)
+                .unwrap_or_else(|error| format!("unavailable:{error}"));
+        hasher.update(package.as_bytes());
+    }
     if matches!(
         task.request.selection.backend,
         BackendId::BlenderEevee | BackendId::BlenderCycles
@@ -392,6 +436,7 @@ fn run_task(
             let _ = events.send(RenderEvent::Progress {
                 id: ticket.id,
                 revision: ticket.revision,
+                generation: ticket.generation,
                 engine: ticket.engine,
                 event,
             });
@@ -419,7 +464,7 @@ fn run_task(
     }
     let request = crate::render::sequence::normalized_request(&task.request)?;
     let snapshot = snapshot_scene(task.mesh.clone(), scene)?;
-    let limits = RenderLimits::default();
+    let limits = task.memory.limits()?;
     let inputs = runtime_inputs(task)?;
     if prepared
         .as_ref()
@@ -445,6 +490,14 @@ fn run_task(
         *prepared = Some((inputs, next));
     }
     let prepared = &mut prepared.as_mut().ok_or("renderer unavailable")?.1;
+    let _ = events.send(RenderEvent::Prepared {
+        id: ticket.id,
+        revision: ticket.revision,
+        generation: ticket.generation,
+        engine: ticket.engine,
+        identity: prepared.identity.clone(),
+        assessment: prepared.backend.assess(&snapshot, &request),
+    });
     prepared.backend.configure(&request)?;
     let key = crate::export::identity::pixel_recipe_key(
         &snapshot.legacy_scene,

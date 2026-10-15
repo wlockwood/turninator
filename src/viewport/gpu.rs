@@ -789,30 +789,8 @@ impl Viewport {
         camera: &mut OrbitCamera,
         settings: &ViewportSettings,
     ) -> egui::Response {
-        let size = ui.available_size().max(egui::vec2(1., 1.));
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-        let delta = response.drag_delta();
-        if response.dragged() {
-            if response.dragged_by(egui::PointerButton::Secondary)
-                || response.dragged_by(egui::PointerButton::Middle)
-                || ui.input(|i| i.modifiers.shift)
-            {
-                camera.pan(delta.x as f64, delta.y as f64, rect.height() as f64);
-            } else {
-                camera.orbit(delta.x as f64, delta.y as f64);
-            }
-            ui.ctx().request_repaint();
-        }
-        if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0. {
-                camera.zoom(scroll as f64);
-                ui.ctx().request_repaint();
-            }
-        }
-        if camera.validate().is_err() {
-            *camera = OrbitCamera::default();
-        }
+        let response = viewport_interaction(ui, camera);
+        let rect = response.rect;
         if let Err(error) = settings.validate() {
             ui.painter().text(
                 rect.center(),
@@ -2637,4 +2615,33 @@ mod buildup_gpu_tests {
             assert_eq!(staged_hit.normal_mm, full_hit.normal_mm);
         }
     }
+}
+
+/// Shared canonical camera input for native inspection and image-backed viewports.
+pub fn viewport_interaction(ui: &mut egui::Ui, camera: &mut OrbitCamera) -> egui::Response {
+    let size = ui.available_size().max(egui::vec2(1., 1.));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let delta = response.drag_delta();
+    if response.dragged() {
+        if response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle)
+            || ui.input(|i| i.modifiers.shift)
+        {
+            camera.pan(delta.x as f64, delta.y as f64, rect.height() as f64);
+        } else {
+            camera.orbit(delta.x as f64, delta.y as f64);
+        }
+        ui.ctx().request_repaint();
+    }
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0. {
+            camera.zoom(scroll as f64);
+            ui.ctx().request_repaint();
+        }
+    }
+    if camera.validate().is_err() {
+        *camera = OrbitCamera::default();
+    }
+    response
 }

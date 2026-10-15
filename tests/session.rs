@@ -48,6 +48,8 @@ fn snapshot_bytes_count_toward_quota_before_any_snapshot_write() {
             tools,
             // Old pixel-only reservation was 131072 bytes; mesh alone is 480020.
             cache_budget_bytes: 200_000,
+            memory: Default::default(),
+            generation: 0,
         })
         .unwrap();
     match service.events.recv_timeout(Duration::from_secs(3)).unwrap() {
@@ -89,6 +91,8 @@ fn render_actor_rejects_storage_budget_before_starting_a_worker_or_touching_outp
             preview: false,
             tools: ToolPaths::default(),
             cache_budget_bytes: 1,
+            memory: Default::default(),
+            generation: 0,
         })
         .unwrap();
     match service.events.recv_timeout(Duration::from_secs(2)).unwrap() {

@@ -72,6 +72,15 @@ fn nonempty<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 
 impl BackendRegistry {
     pub fn status(&self, backend: BackendId) -> BackendStatus {
+        if backend == BackendId::Filament && !self.statuses.borrow().contains_key(&backend) {
+            let mut status = super::backends::filament::FilamentBackend::status();
+            if let Err(error) = native_package_files(backend) {
+                status.availability = BackendAvailability::Unavailable {
+                    reason: error.to_string(),
+                };
+            }
+            return status;
+        }
         self.statuses
             .borrow()
             .get(&backend)
@@ -79,7 +88,7 @@ impl BackendRegistry {
             .unwrap_or_else(|| BackendStatus {
                 backend,
                 availability: match backend {
-                    BackendId::BlenderEevee | BackendId::BlenderCycles => {
+                    BackendId::Wgpu | BackendId::BlenderEevee | BackendId::BlenderCycles => {
                         BackendAvailability::NotProbed
                     }
                     _ => BackendAvailability::Unavailable {
@@ -104,6 +113,71 @@ impl BackendRegistry {
     ) -> Result<PreparedBackend> {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
+        }
+        if selection.backend == BackendId::Wgpu {
+            selection.validate()?;
+            validate_requirements(tools, &requirements_for(selection, request.kind, false))?;
+            if request.selection != *selection {
+                return Err("request selection differs from renderer preparation".into());
+            }
+            let started = Instant::now();
+            let mut backend =
+                super::backends::wgpu::WgpuBackend::new(&super::backends::wgpu::WgpuConfig {
+                    device: selection.device.clone(),
+                    quality: selection.quality.clone(),
+                    limits: limits.clone(),
+                })?;
+            backend.configure(request)?;
+            let identity = backend.identity();
+            let assessment = backend.assess(scene, request);
+            let mut effective_selection = selection.clone();
+            effective_selection.device = Some(identity.device.clone());
+            self.statuses.borrow_mut().insert(
+                selection.backend,
+                BackendStatus {
+                    backend: selection.backend,
+                    availability: BackendAvailability::Available,
+                    capabilities: Some(descriptor()),
+                },
+            );
+            return Ok(PreparedBackend {
+                backend: Box::new(backend),
+                effective_selection,
+                identity,
+                assessment,
+                preparation_timings: BTreeMap::from([("total".into(), started.elapsed())]),
+            });
+        }
+        if selection.backend == BackendId::Filament {
+            selection.validate()?;
+            validate_requirements(tools, &requirements_for(selection, request.kind, false))?;
+            if request.selection != *selection {
+                return Err("request selection differs from renderer preparation".into());
+            }
+            let started = Instant::now();
+            let mut backend = super::backends::filament::FilamentBackend::new(
+                &super::embedded::EmbeddedConfig {
+                    selection: selection.clone(),
+                    limits: limits.clone(),
+                    identity: bootstrap_identity(selection.backend),
+                    cache_directory: None,
+                },
+            )?;
+            backend.configure(request)?;
+            let identity = backend.identity();
+            let assessment = backend.assess(scene, request);
+            let mut effective_selection = selection.clone();
+            effective_selection.device = Some(identity.device.clone());
+            let mut status = super::backends::filament::FilamentBackend::status();
+            status.availability = BackendAvailability::Available;
+            self.statuses.borrow_mut().insert(selection.backend, status);
+            return Ok(PreparedBackend {
+                backend: Box::new(backend),
+                effective_selection,
+                identity,
+                assessment,
+                preparation_timings: BTreeMap::from([("total".into(), started.elapsed())]),
+            });
         }
         self.validate(selection, scene, request, tools, limits)?;
         let started = Instant::now();
@@ -260,23 +334,25 @@ impl BackendRegistry {
                 preparation_timings,
             })
         })();
-        self.statuses.borrow_mut().insert(
-            selection.backend,
-            BackendStatus {
-                backend: selection.backend,
-                availability: match &prepared {
-                    Ok(_) => BackendAvailability::Available,
-                    Err(error) => BackendAvailability::Unavailable {
-                        reason: error.to_string(),
+        if prepared.is_ok() {
+            self.statuses.borrow_mut().insert(
+                selection.backend,
+                BackendStatus {
+                    backend: selection.backend,
+                    availability: match &prepared {
+                        Ok(_) => BackendAvailability::Available,
+                        Err(error) => BackendAvailability::Unavailable {
+                            reason: error.to_string(),
+                        },
+                    },
+                    capabilities: if prepared.is_ok() {
+                        Some(descriptor())
+                    } else {
+                        None
                     },
                 },
-                capabilities: if prepared.is_ok() {
-                    Some(descriptor())
-                } else {
-                    None
-                },
-            },
-        );
+            );
+        }
         prepared
     }
     fn validate(
@@ -305,4 +381,69 @@ impl BackendRegistry {
         crate::animation::validate_frame_rate(request.frame_rate)?;
         Ok(())
     }
+}
+
+fn bootstrap_identity(backend: BackendId) -> BackendIdentity {
+    // Required native configuration fields are provisional only. The adapter
+    // replaces every value with attested package/runtime data before returning.
+    BackendIdentity {
+        backend,
+        adapter_recipe_version: 1,
+        runtime_digest: "pending-runtime-attestation".into(),
+        bridge_digest: None,
+        shader_digest: None,
+        material_digest: None,
+        color_digest: "pending-runtime-attestation".into(),
+        denoiser_digest: None,
+        device: "pending-runtime-attestation".into(),
+        api: "pending-runtime-attestation".into(),
+        driver: "pending-runtime-attestation".into(),
+    }
+}
+
+/// Package changes invalidate retained contexts. This describes files only; GPU
+/// initialization and attestation remain inside the backend's owning actor.
+pub(crate) fn native_runtime_fingerprint(backend: BackendId) -> Result<String> {
+    let mut digest = Sha256::new();
+    for file in native_package_files(backend)? {
+        digest.update(file.to_string_lossy().as_bytes());
+        digest.update(hash_file(&file)?.as_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+fn native_package_files(backend: BackendId) -> Result<Vec<std::path::PathBuf>> {
+    let name = match backend {
+        BackendId::Filament => "filament",
+        BackendId::LuxCore => "luxcore",
+        _ => return Ok(Vec::new()),
+    };
+    let exe = std::env::current_exe()?.canonicalize()?;
+    let root = exe
+        .parent()
+        .ok_or("missing executable directory")?
+        .join("renderers")
+        .join(name);
+    let mut files = vec![
+        root.join(format!("{name}-package.json")),
+        root.join(format!("tn_renderer_{name}.dll")),
+    ];
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|s| s.eq_ignore_ascii_case("dll"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    for file in &files {
+        if !file.is_file() {
+            return Err(format!("{} package is missing {}. Install the verified renderer package beside the application, then retry.", backend.as_str(), file.display()).into());
+        }
+    }
+    Ok(files)
 }
