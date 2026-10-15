@@ -20,6 +20,9 @@ struct Trace {
     uploads: Vec<(u64, f32, [f32; 3])>,
     frames: Vec<(u64, bool)>,
     cancel: u32,
+    polls: u32,
+    reads: u32,
+    descriptions: u32,
     drift: bool,
     fail_cancel: bool,
 }
@@ -49,6 +52,7 @@ impl EmbeddedDriver for Mock {
         Ok(())
     }
     fn poll(&mut self) -> Result<EmbeddedPoll> {
+        self.trace.borrow_mut().polls += 1;
         Ok(EmbeddedPoll {
             state: if self.cancelled {
                 EmbeddedState::Cancelled
@@ -62,6 +66,7 @@ impl EmbeddedDriver for Mock {
         })
     }
     fn read(&mut self, p: &mut [u8]) -> Result<(u32, u32)> {
+        self.trace.borrow_mut().reads += 1;
         self.pending = false;
         p.fill(255);
         Ok(self.dimensions)
@@ -76,6 +81,7 @@ impl EmbeddedDriver for Mock {
         Ok(())
     }
     fn runtime_info(&mut self) -> Result<RuntimeInfo> {
+        self.trace.borrow_mut().descriptions += 1;
         let sdk = if self.trace.borrow().drift && !self.trace.borrow().frames.is_empty() {
             "changed"
         } else {
@@ -96,7 +102,7 @@ fn runtime_change_is_typed_rejection_even_when_drain_fails_and_context_is_poison
     }));
     let mut studio = EmbeddedStudio::from_driver(
         Mock {
-            trace,
+            trace: trace.clone(),
             pending: false,
             cancelled: false,
             dimensions: (0, 0),
@@ -122,13 +128,38 @@ fn runtime_change_is_typed_rejection_even_when_drain_fails_and_context_is_poison
         progress: &|_| {},
     };
     let s = scene(cube([0.; 3], 10.));
-    let error = studio
-        .begin_job(&s, &context, false)
-        .unwrap()
-        .render_frame(&frame(&s))
-        .err()
-        .unwrap();
+    let mut job = studio.begin_job(&s, &context, false).unwrap();
+    let error = job.render_frame(&frame(&s)).err().unwrap();
     assert!(error.source().unwrap().is::<RenderReportRejected>());
+    let calls = || {
+        let t = trace.borrow();
+        (
+            t.uploads.len(),
+            t.frames.len(),
+            t.polls,
+            t.reads,
+            t.cancel,
+            t.descriptions,
+        )
+    };
+    let after_failure = calls();
+    // Even apparent driver recovery cannot make an undrained owner reusable.
+    trace.borrow_mut().drift = false;
+    trace.borrow_mut().fail_cancel = false;
+    let second = job.render_frame(&frame(&s));
+    assert_eq!(
+        calls(),
+        after_failure,
+        "poisoned job called its driver again"
+    );
+    assert!(
+        second
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("recreate renderer")
+    );
+    drop(job);
     assert!(studio.begin_job(&s, &context, false).is_err());
 }
 fn identity() -> BackendIdentity {

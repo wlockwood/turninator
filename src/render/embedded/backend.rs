@@ -247,6 +247,9 @@ impl<D: EmbeddedDriver> EmbeddedJob<'_, '_, D> {
         *self.timings.entry(phase.into()).or_default() += start.elapsed();
     }
     pub fn render_frame(&mut self, frame: &FrameSpec) -> Result<StudioFrame> {
+        if self.studio.poisoned {
+            return Err("embedded context failed to drain; recreate renderer".into());
+        }
         self.cancelled()?;
         if self.completed.contains(&frame.key) {
             return Err("duplicate embedded frame key".into());
