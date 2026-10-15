@@ -1,0 +1,23 @@
+{
+  "name": "Turninator",
+  "short_name": "Turninator",
+  "description": "Turntables, stills and four-view sheets of 3D prints, rendered locally on your GPU.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#15171b",
+  "theme_color": "#2f6fd6",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }],
+  "file_handlers": [
+    {
+      "action": "./",
+      "accept": {
+        "model/stl": [".stl"],
+        "text/x-gcode": [".gcode", ".gco", ".g"],
+        "application/x-bgcode": [".bgcode"],
+        "application/vnd.ms-package.3dmanufacturing-3dmodel+xml": [".3mf"]
+      }
+    }
+  ],
+  "launch_handler": { "client_mode": "focus-existing" }
+}

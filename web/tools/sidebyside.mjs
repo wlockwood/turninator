@@ -1,0 +1,24 @@
+// Side-by-side "whole | section" turntable check.
+import { chromium } from 'playwright';
+import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+const file = resolve(process.argv[2] ?? '../test-models/Deck Post Jig.stl');
+const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11'] });
+const page = await browser.newPage({ viewport: { width: 1600, height: 950 } });
+const logs = [];
+page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
+await page.goto('http://localhost:5199/');
+await page.setInputFiles('input[type=file]', file);
+await page.waitForFunction(() => /triangles|beads/.test(document.querySelector('.status')?.textContent ?? ''));
+await page.selectOption('#gsize', '480');
+await page.selectOption('#glayout', 'section-side');
+await page.selectOption('#gelev', '30');
+const t = Date.now();
+await page.click('text=Render turntable');
+await page.waitForFunction(() => !document.querySelector('[role=progressbar]') && (document.querySelector('a[download]') || document.querySelector('.status.error')), null, { timeout: 300000 });
+console.log('side-by-side in', Date.now() - t, 'ms |', await page.textContent('.status'));
+const href = await page.getAttribute('a[download]', 'href');
+const b64 = await page.evaluate(async (h) => { const b = await (await fetch(h)).blob(); return await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(String(fr.result).split(',')[1]); fr.readAsDataURL(b); }); }, href);
+writeFileSync('test-results/sidebyside.gif', Buffer.from(b64, 'base64'));
+console.log(logs.join('\n') || 'no errors');
+await browser.close();
