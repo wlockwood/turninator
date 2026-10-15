@@ -117,6 +117,50 @@ fn legacy_projects_without_timeline_or_output_options_still_load() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn project_preserves_basic_turntable_timing_and_defaults_legacy_files() {
+    let (root, mut value) = fixture();
+    let path = root.join("basic.turninator");
+    value["output_options"]["turntable_timing"] =
+        json!({"seconds_per_turn":2.5,"duration_seconds":7.5});
+    let project: ProjectFile = serde_json::from_value(value.clone()).unwrap();
+    save_project(&path, &project).unwrap();
+    let (restored, _) = load_project(&path).unwrap();
+    assert_eq!(
+        restored.output_options.turntable_timing.seconds_per_turn,
+        2.5
+    );
+    assert_eq!(
+        restored
+            .output_options
+            .turntable_timing
+            .total_turns()
+            .unwrap(),
+        3.
+    );
+    assert!(restored.output_options.timeline.is_none());
+    for key in ["seconds_per_turn", "duration_seconds"] {
+        let mut invalid = project.clone();
+        if key == "seconds_per_turn" {
+            invalid.output_options.turntable_timing.seconds_per_turn = 0.;
+        } else {
+            invalid.output_options.turntable_timing.duration_seconds = 501.;
+        }
+        let previous = fs::read(&path).unwrap();
+        assert!(save_project(&path, &invalid).is_err());
+        assert_eq!(fs::read(&path).unwrap(), previous);
+    }
+    value["output_options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("turntable_timing");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let (legacy, _) = load_project(&path).unwrap();
+    assert_eq!(legacy.output_options.turntable_timing.seconds_per_turn, 4.);
+    assert_eq!(legacy.output_options.turntable_timing.duration_seconds, 4.);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn invalid_timelines() -> Vec<(&'static str, Value)> {
     let mut cases = Vec::new();
     let mut add = |name, pointer, replacement| {

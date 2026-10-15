@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 import struct
+from fractions import Fraction
 
 
 def read_mesh(path, max_vertices=2_000_000, max_triangles=4_000_000):
@@ -409,11 +410,19 @@ def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_ki
             "meaning":"Geometric intersection of the modeled mesh; not strength, mass, or measured print behavior."}
 
 
-def turntable_angles(frame_count, start_degrees):
+def turntable_angles(frame_count, start_degrees, seconds_per_turn=None):
     if isinstance(frame_count, bool) or not isinstance(frame_count, int) or not 1 <= frame_count <= 10000:
         raise ValueError("frame_count outside 1..10000")
     _finite_number(start_degrees, "start_angle_degrees")
-    return [start_degrees + 360.0 * index / frame_count for index in range(frame_count)]
+    if seconds_per_turn is None:
+        period = Fraction(frame_count)
+    else:
+        _finite_number(seconds_per_turn, "seconds_per_turn", 0.05, 500)
+        period = Fraction(str(seconds_per_turn)) * 20
+    # Decimal timing has an exact rational phase. Repeated turns therefore use
+    # identical angles even when a turn spans a non-integral number of frames.
+    return [(start_degrees % 360 + float((Fraction(index) / period) % 1) * 360) % 360
+            for index in range(frame_count)]
 
 
 def rotation_envelope(points):

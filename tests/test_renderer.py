@@ -155,6 +155,22 @@ class SceneTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scene.turntable_angles(0, 0)
 
+    def test_turntable_speed_repeats_exact_phases_and_preserves_partial_turns(self):
+        angles = scene.turntable_angles(240, 17, seconds_per_turn=4)
+        self.assertEqual(angles[:80], angles[80:160])
+        self.assertEqual(angles[:80], angles[160:])
+        partial = scene.turntable_angles(125, -360, seconds_per_turn=2.5)
+        self.assertEqual(partial[:50], partial[50:100])
+        self.assertEqual(partial[:25], partial[100:])
+        self.assertEqual(partial[1], 7.2)
+        # Non-integral frames per turn: the exact phase repeats after five turns.
+        fractional = scene.turntable_angles(506, 0, seconds_per_turn=2.53)
+        self.assertEqual(fractional[:253], fractional[253:])
+        self.assertNotEqual(fractional[0], fractional[50])
+        for speed in (0, True, float('nan'), .049, 501):
+            with self.assertRaises(ValueError):
+                scene.turntable_angles(20, 0, seconds_per_turn=speed)
+
     def test_envelope_includes_every_rotated_corner(self):
         points = [(-5, -1, 0), (5, 1, 20)]
         envelope = scene.rotation_envelope(points)
@@ -164,6 +180,30 @@ class SceneTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_identical_frames_require_exact_camera_angle_and_visible_layers(self):
+        angles = [0, 90, 360, 450, 0.000000000001]
+        self.assertEqual(worker.identical_frame_sources(angles, None, [None]*5), [0, 1, 0, 1, 4])
+        self.assertEqual(worker.identical_frame_sources(angles, None, [0, 0, 1, 1, 1]), list(range(5)))
+        camera = dict(target_mm=[0, 0, 0])
+        states = [dict(camera=camera), dict(camera=camera),
+                  dict(camera=dict(target_mm=[0, 0, 0.001]))]
+        self.assertEqual(worker.identical_frame_sources([0, 360, 720], states, [None]*3), [0, 0, 2])
+        # Repeated fractions may retain the same complete deposited layer.
+        self.assertEqual(worker.identical_frame_sources([0, 360, 720], None, [2, 2, 3]), [0, 0, 2])
+
+    def test_identical_frame_copy_is_atomic_and_preserves_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory)/'source.png', Path(directory)/'target.png'
+            source.write_bytes(b'verified-image')
+            target.write_bytes(b'previous-image')
+            worker.copy_identical_frame(source, target, 64, 32, lambda p: (64, 32))
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+            source.write_bytes(b'corrupted')
+            with self.assertRaises(ValueError):
+                worker.copy_identical_frame(source, target, 64, 32, lambda p: (16, 16))
+            self.assertEqual(target.read_bytes(), b'verified-image')
+            self.assertFalse(target.with_name('target.partial.png').exists())
+
     def test_layer_filter_fades_unresolved_pitch_and_grazing_views(self):
         self.assertEqual(scene.layer_filter_gain(0.2,0.0001,1.0),0.0)
         self.assertEqual(scene.layer_filter_gain(0.2,0.00002,1.0),1.0)

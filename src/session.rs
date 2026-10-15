@@ -79,11 +79,7 @@ impl RenderService {
                         task.request.kind,
                         ExportKind::Gif | ExportKind::Mp4 | ExportKind::SectionTurntable
                     ) {
-                        if let Some(timeline) = &task.request.timeline {
-                            timeline.frame_count()?
-                        } else {
-                            task.request.frame_count
-                        }
+                        task.request.animation_frame_count()?
                     } else {
                         4
                     };

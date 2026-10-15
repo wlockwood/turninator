@@ -1,7 +1,7 @@
 //! Native studio. Import and rendering run independently of the UI thread.
 use crate::{
     Result,
-    animation::{CameraKeyframe, Easing, Timeline, Transition},
+    animation::{CameraKeyframe, Easing, Timeline, Transition, TurntableTiming},
     cache::{CacheStore, JobRecord},
     export::{
         AnimationMode, ExportKind, ExportLayout, ExportRequest, ExportResult, JobEvent,
@@ -227,6 +227,7 @@ pub struct Studio {
     settle_face: bool,
     native_rect: Option<egui::Rect>,
     timeline: Timeline,
+    turntable_timing: TurntableTiming,
     timeline_enabled: bool,
     timeline_playing: bool,
     timeline_time: f64,
@@ -330,6 +331,7 @@ impl Studio {
             settle_face: false,
             native_rect: None,
             timeline: Timeline::default(),
+            turntable_timing: TurntableTiming::default(),
             timeline_enabled: false,
             timeline_playing: false,
             timeline_time: 0.,
@@ -530,11 +532,18 @@ impl Studio {
             } else {
                 None
             };
-            let frames = timeline
-                .as_ref()
-                .map(Timeline::frame_count)
-                .transpose()?
-                .unwrap_or(80);
+            let turntable_timing = (!preview
+                && timeline.is_none()
+                && !self.export_buildup
+                && matches!(kind, ExportKind::Gif | ExportKind::Mp4))
+            .then_some(self.turntable_timing);
+            let frames = if let Some(timeline) = &timeline {
+                timeline.frame_count()?
+            } else if let Some(timing) = turntable_timing {
+                timing.frame_count()?
+            } else {
+                80
+            };
             let reserve = u64::from(render_size).pow(2)
                 * 8
                 * if matches!(kind, ExportKind::Gif | ExportKind::Mp4) {
@@ -571,6 +580,7 @@ impl Studio {
                 self.transparent,
             );
             request.timeline = timeline;
+            request.turntable_timing = turntable_timing;
             request.frame_count = frames;
             if self.section && kind != ExportKind::Diagram {
                 request.section = Some(SectionSpec {
@@ -1131,6 +1141,7 @@ impl Studio {
         self.transparent = options.transparent;
         self.codec = options.video_codec;
         self.export_buildup = options.animation == AnimationMode::BuildUp;
+        self.turntable_timing = options.turntable_timing;
         self.timeline_enabled = options.timeline.is_some();
         self.timeline = options.timeline.unwrap_or_default();
         self.timeline_playing = false;
@@ -1205,6 +1216,7 @@ impl Studio {
                 ExportLayout::Single
             },
             timeline: self.timeline_enabled.then(|| self.timeline.clone()),
+            turntable_timing: self.turntable_timing,
             build_stage: self
                 .model
                 .as_ref()
@@ -1641,6 +1653,31 @@ impl Studio {
             self.model.as_ref().is_some_and(|m| !m.groups.is_empty()),
             egui::Checkbox::new(&mut self.export_buildup, "Export build-up animation"),
         );
+        if !self.timeline_enabled && !self.export_buildup {
+            ui.group(|ui| {
+                ui.label("Basic turntable");
+                ui.horizontal(|ui| {
+                    ui.label("Seconds per turn");
+                    ui.add(egui::DragValue::new(&mut self.turntable_timing.seconds_per_turn)
+                        .range(0.05..=500.).speed(0.05).max_decimals(3));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Animation length (s)");
+                    ui.add(egui::DragValue::new(&mut self.turntable_timing.duration_seconds)
+                        .range(0.05..=500.).speed(0.05).max_decimals(2));
+                });
+                match (self.turntable_timing.total_turns(), self.turntable_timing.frame_count()) {
+                    (Ok(turns), Ok(frames)) => {
+                        ui.label(format!("{turns:.3} total turns"));
+                        ui.small(format!("{frames} frames • {:.2} s at 20 fps", f64::from(frames)/20.));
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        ui.colored_label(egui::Color32::YELLOW, error.to_string());
+                    }
+                }
+                ui.small("Matching frames are rendered once and reused. Length rounds to the nearest frame.");
+            });
+        }
         egui::ComboBox::from_label("MP4 codec")
             .selected_text(if self.codec == VideoCodec::Av1 {
                 "AV1"
@@ -1858,6 +1895,56 @@ impl Studio {
             self.engine = "eevee".into();
             self.fit();
             self.changed();
+            self.size = 128;
+            self.samples = 4;
+            self.turntable_timing = TurntableTiming {
+                seconds_per_turn: 0.2,
+                duration_seconds: 0.6,
+            };
+            self.start_export(
+                ExportKind::Gif,
+                directory.join("basic-three-turns.gif"),
+                false,
+            );
+            self.smoke_stage = 32;
+        }
+        if self.smoke_stage == 32
+            && self.busy.is_none()
+            && self.output.as_ref().is_some_and(|p| p.frames.len() == 12)
+        {
+            self.smoke_checks["basic_turntable_timing_exported"] = serde_json::json!(
+                self.error.is_none()
+                    && self
+                        .turntable_timing
+                        .total_turns()
+                        .is_ok_and(|turns| (turns - 3.).abs() < 1e-12)
+                    && self
+                        .last_task
+                        .as_ref()
+                        .is_some_and(|task| task.0.frame_count == 12
+                            && task.0.turntable_timing == Some(self.turntable_timing)
+                            && task.0.timeline.is_none())
+            );
+            let details = self
+                .last_task
+                .as_ref()
+                .and_then(|task| fs::read_dir(&task.0.job_dir).ok())
+                .and_then(|entries| {
+                    entries.filter_map(|entry| entry.ok()).find_map(|entry| {
+                        fs::read(entry.path().join("frames/render-result.json")).ok()
+                    })
+                })
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            self.smoke_checks["basic_turntable_reuses_two_rotations"] = serde_json::json!(
+                details
+                    .is_some_and(|stats| stats["rendered_frame_count"] == 4
+                        && stats["copied_frame_count"] == 8)
+            );
+            self.turntable_timing = TurntableTiming {
+                seconds_per_turn: 4.,
+                duration_seconds: 12.,
+            };
+            self.show_output = false;
             self.start_export(ExportKind::Still, directory.join("rendered.png"), true);
             self.smoke_stage = 4;
         }
@@ -1967,6 +2054,10 @@ impl Studio {
                     && self.timeline.frame_count().ok() == Some(4)
                     && self.timeline.keyframes.len() == 2
                     && self.timeline.keyframes[0].spiral_turns == 1.
+            );
+            self.smoke_checks["basic_turntable_project_restored"] = serde_json::json!(
+                self.turntable_timing.seconds_per_turn == 4.
+                    && self.turntable_timing.duration_seconds == 12.
             );
             if let Ok((mut project, _)) = load_project(&directory.join("smoke.turninator")) {
                 project.source_path = directory.join("missing-project-source.stl");

@@ -17,12 +17,15 @@ STL Layer Appearance preserves the original silhouette. G-code creates actual ro
 Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leave native inspection available. No tools are installed or updated automatically. Exact tested binaries and maintained Blender LTS qualification are in [docs/runtime-support.md](docs/runtime-support.md).
 
 - GIF defaults: 960 square, 80 frames, 20 fps, four seconds, infinite looping. The studio plays the actual encoded GIF.
+- Basic turntables: with camera timelines and build-up disabled, set **Seconds per turn** and **Animation length (s)** under Export. The studio shows total turns and the actual frame count/duration. For example, 4 seconds per turn over 12 seconds produces 3 turns. Length rounds to the nearest 20 fps frame; fractional turns are supported.
 - PNG defaults: 4096 square, Cycles/OptiX, optional transparent background independent of material transmission.
 - Four-view sheets: TOP / ISO above FRONT / RIGHT at a shared orthographic scale, with design edges and one millimetre dimension per view. Each annotation measures the larger visible projected width or height; selected deposited stages use their visible geometry.
 - MP4: explicit H.264 or AV1, capability checks and verified timing. Unavailable AV1 does not silently become H.264. Matching requests reuse verified frames.
 - Section exports: full model beside a cutaway through the whole turntable; reliable caps/statistics require closed input. G-code cuts retain deposited gaps.
 - Build-up exports: complete deposited layers, including adaptive heights, combined with resin/Cycles, studio lighting, tool/feature colors, camera motion and capped or paired sections. Selected stages also export to PNGs and four-view sheets; zero layers produces an empty build.
 - Camera timelines: record views under **Camera keyframes and motion**, set their times and outgoing orbit/pan or spiral transitions, choose easing and duration, then export GIF/MP4. Spirals add signed whole turns while approaching the next elevation. Optional model rotation and build-up use the same timeline. Projection must stay consistent between keys.
+
+Repeated animation poses render once, then copy the verified PNG into each matching position in the output sequence. A three-turn basic rotation at 4 seconds per turn exports 240 frames from 80 renders. Reuse requires an identical camera, rotation and visible deposited layers, so advancing build-up and moving cameras retain their distinct frames. Non-integral frames per turn reuse only phases that coincide exactly.
 
 Animation and PNG/sheet quality have separate controls. Native lighting approximates Blender; Render preview provides the selected material/studio result. Resin on overlapping beads retains internal interfaces and is an illustration rather than fused-resin physics. Section volume is a mesh estimate, not calibrated deposited material or strength.
 
@@ -32,7 +35,7 @@ To author a motion, set the time slider, compose a view with orbit/pan/zoom or a
 
 ## Projects and recovery
 
-Save .turninator projects to retain physical settings, material/palette, pose, camera, timeline, selected deposited stage and output settings. Sources are relative when possible; missing/changed files require relocation or explicit reimport. Edited pitch survives material changes. Older projects load with the new motion fields disabled.
+Save .turninator projects to retain physical settings, material/palette, pose, camera, timeline, basic turntable speed/duration, selected deposited stage and output settings. Sources are relative when possible; missing/changed files require relocation or explicit reimport. Edited pitch survives material changes. Older projects load with the new motion fields disabled and the original four-second basic rotation.
 
 Exports use immutable snapshots. Cancellation terminates only the owned worker/encoder tree. Failed frames remain available through **Retry retained job** or **Tools / storage → Recover / encode**. Recipes and frames are revalidated; failed encoding preserves existing output. Only marked job storage is removable, and its budget is configurable. Sources remain read-only. Defaults live under %LOCALAPPDATA%/Turninator; gui --data-dir selects another location.
 

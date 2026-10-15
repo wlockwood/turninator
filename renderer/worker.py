@@ -3,6 +3,7 @@ import json
 import hashlib
 import math
 import os
+import shutil
 from pathlib import Path
 import sys
 import time
@@ -80,6 +81,29 @@ def decode_png_size(path):
         return tuple(check.size)
     finally:
         bpy.data.images.remove(check)
+
+
+def identical_frame_sources(angles, states, visible_layers):
+    """First frame with exactly the same rotation, camera and deposited mesh."""
+    first = {}
+    sources = []
+    for index, (angle, layer) in enumerate(zip(angles, visible_layers)):
+        camera = None if states is None else json.dumps(states[index]["camera"], sort_keys=True, allow_nan=False)
+        key = (angle % 360, camera, layer)
+        sources.append(first.setdefault(key, index))
+    return sources
+
+
+def copy_identical_frame(source, target, width, height, decode_size=decode_png_size):
+    temporary = target.with_name(target.stem + ".partial.png")
+    try:
+        shutil.copyfile(source, temporary)
+        if tuple(decode_size(temporary)) != (width, height):
+            raise ValueError("identical source PNG dimensions did not match request")
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def render_spec_for_mode(spec, mode):
@@ -166,8 +190,11 @@ def render(request):
     if not isinstance(raw_directory, str) or not Path(raw_directory).is_absolute():
         raise ValueError("output_dir must be absolute")
     output_dir = Path(raw_directory)
+    seconds_per_turn = request.get("seconds_per_turn")
+    if seconds_per_turn is not None and (mode != "turntable" or request.get("frame_states") is not None or request.get("frame_states_path") is not None):
+        raise ValueError("basic rotation speed requires a turntable without camera frame states")
     angles = turntable_angles(request.get("frame_count", 80) if mode != "still" else 1,
-                              request.get("start_angle_degrees", 0.0))
+                              request.get("start_angle_degrees", 0.0), seconds_per_turn)
     if mode == "buildup":
         angles = [angles[0]]*len(angles)
     states=load_frame_states(request,len(angles))
@@ -192,6 +219,7 @@ def render(request):
               "blender_version": bpy.app.version_string, "blender_build_hash": str(bpy.app.build_hash),
               "engine": engine, "size": size, "width": width, "height": height, "samples": samples, "mode": mode,
               "angles": angles, "transparent": transparent,
+              "seconds_per_turn": seconds_per_turn,
               "frame_states_hash":hashlib.sha256(json.dumps(states,sort_keys=True,allow_nan=False).encode()).hexdigest() if states is not None else None,
               "build_stage":stage}
     prepare_manifest(output_dir, recipe, reuse)
@@ -208,11 +236,30 @@ def render(request):
                       else [layer_for_fraction(info["build_layers"],state["buildup_fraction"]) for state in states] if states is not None and building
                       else buildup_schedule(info["build_layers"],len(angles)) if building else [None]*len(angles))
     source_mesh=obj.data.copy() if building and spec.get("section") is not None else None
+    sources = identical_frame_sources(angles, states, visible_layers)
     frame_analysis=[]
     completed = []
     durations = []
+    rendered_count = 0
+    copied_count = 0
+    verified_count = 0
     for index, (angle, output_path) in enumerate(zip(angles, paths)):
         frame_start = time.perf_counter()
+        if sources[index] < index:
+            if not should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
+                copy_identical_frame(paths[sources[index]], output_path, width, height)
+                copied_count += 1
+            else:
+                verified_count += 1
+            frame_analysis.append(frame_analysis[sources[index]])
+            elapsed = time.perf_counter() - frame_start
+            durations.append(elapsed)
+            completed.append(str(output_path))
+            emit(request, "frame", {"path": str(output_path), "index": index, "angle_degrees": angle,
+                                    "elapsed_seconds": elapsed, "size": size, "reused": True,
+                                    "reuse_kind": "identical", "source_index": sources[index],
+                                    "visible_layer": visible_layers[index], "section_analysis": frame_analysis[-1]})
+            continue
         if visible_layers[index] is not None:
             if source_mesh is not None:
                 info["section_analysis"]=prepare_buildup_section(obj,source_mesh,spec,info["bounds_m"],visible_layers[index])
@@ -225,6 +272,7 @@ def render(request):
                 for material in obj.data.materials:
                     apply_layer_filter(material,bpy.context.scene.camera,width,height,min(spec["layer_height_mm"],spec.get("first_layer_height_mm",spec["layer_height_mm"])))
         if should_reuse_frame(output_path, size, reuse, lambda path: (size, size) if decode_png_size(path) == (width, height) else (0, 0)):
+            verified_count += 1
             elapsed = time.perf_counter() - frame_start
             durations.append(elapsed)
             completed.append(str(output_path))
@@ -236,6 +284,7 @@ def render(request):
         try:
             bpy.context.scene.render.filepath = str(temporary)
             bpy.ops.render.render(write_still=True)
+            rendered_count += 1
             if decode_png_size(temporary) != (width, height):
                 raise RuntimeError("rendered PNG dimensions did not match request")
             os.replace(temporary, output_path)
@@ -253,6 +302,8 @@ def render(request):
     os.replace(analysis_temporary,analysis_path)
     payload={"paths": completed, "engine": engine, "size": size, "samples": samples,
              "frame_count":len(angles),"build_layer_count":len(info.get("build_layers") or []),
+             "unique_frame_count": len(set(sources)), "rendered_frame_count": rendered_count,
+             "copied_frame_count": copied_count, "verified_frame_count": verified_count,
              "prepare_seconds": prepare_seconds, "frame_seconds": durations,
              "total_seconds": time.perf_counter() - started,"frame_analysis":frame_analysis,
              "frame_analysis_path":str(analysis_path),**info}

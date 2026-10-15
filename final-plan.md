@@ -183,6 +183,7 @@ Use meaningful tests before substantive implementation, watch their expected fai
 - [x] Paired full-model/section PNG and turntable outputs with actual deposited gaps, bounded caps and honest geometric metrics.
 - [x] Click a visible triangle to align its normal down through presentation rotation, retaining the physical build frame; validate nearest picking and rotated rendered surfaces.
 - [x] Authored camera keyframes with transition times, orbit/pan, signed whole-turn spirals, easing, duration and loop closure; shared native/export sampling and saved projects.
+- [x] Basic turntable speed and duration controls with total turns, partial rotations, saved preferences and exact-pose frame reuse across repeated turns. Matching camera/rotation/deposited geometry renders once; all ordered frames retain 20 fps GIF/MP4 timing.
 - [x] Complete-layer G-code build-up combined with materials/studios/palettes, resin/Cycles, camera motion, sections and paired layouts. Selected static stages also support PNG/sheets/fixed-stage clips; sampled angles/stages persist in projects.
 
 These items use the same bounded source/import contract as the main plan. Build-up reconstructs deposited layers, not printer elapsed time, nozzle travel or filament dynamics. No printer photographs were supplied; stepped STL remains an explicitly selected experiment after original/stepped/bead comparisons. Physical stability and fused-resin optical behavior are outside the implemented normal-alignment and mesh-illustration contracts.

@@ -1,7 +1,86 @@
 use turninator::{
-    animation::{CameraKeyframe, Easing, Timeline, Transition},
+    animation::{CameraKeyframe, Easing, Timeline, Transition, TurntableTiming},
     viewport::OrbitCamera,
 };
+
+#[test]
+fn basic_turntable_speed_and_duration_are_independent() {
+    let timing = TurntableTiming {
+        seconds_per_turn: 4.,
+        duration_seconds: 12.,
+    };
+    assert_eq!(timing.frame_count().unwrap(), 240);
+    assert_eq!(timing.total_turns().unwrap(), 3.);
+    let partial = TurntableTiming {
+        seconds_per_turn: 2.5,
+        duration_seconds: 6.25,
+    };
+    assert_eq!(partial.frame_count().unwrap(), 125);
+    assert_eq!(partial.total_turns().unwrap(), 2.5);
+    let short = TurntableTiming {
+        seconds_per_turn: 4.,
+        duration_seconds: 1.,
+    };
+    assert_eq!(short.total_turns().unwrap(), 0.25);
+    let rounded = TurntableTiming {
+        seconds_per_turn: 1.,
+        duration_seconds: 1.03,
+    };
+    assert_eq!(rounded.frame_count().unwrap(), 21);
+    assert_eq!(rounded.total_turns().unwrap(), 1.05);
+    assert_eq!(TurntableTiming::default().total_turns().unwrap(), 1.);
+}
+
+#[test]
+fn turntable_rejects_invalid_or_unbounded_timing() {
+    for value in [f64::NAN, f64::INFINITY, -1., 0., 0.049, 500.01] {
+        assert!(
+            TurntableTiming {
+                seconds_per_turn: value,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            TurntableTiming {
+                duration_seconds: value,
+                ..Default::default()
+            }
+            .frame_count()
+            .is_err()
+        );
+    }
+    assert_eq!(
+        TurntableTiming {
+            duration_seconds: 500.,
+            ..Default::default()
+        }
+        .frame_count()
+        .unwrap(),
+        10_000
+    );
+}
+
+#[test]
+fn basic_export_uses_timing_and_keeps_legacy_frame_requests() {
+    use turninator::export::{AnimationMode, ExportRequest};
+    let mut request = ExportRequest {
+        frame_count: 12,
+        ..Default::default()
+    };
+    assert_eq!(request.animation_frame_count().unwrap(), 12);
+    request.turntable_timing = Some(TurntableTiming {
+        seconds_per_turn: 4.,
+        duration_seconds: 12.,
+    });
+    assert_eq!(request.animation_frame_count().unwrap(), 240);
+    request.animation = AnimationMode::BuildUp;
+    assert!(request.animation_frame_count().is_err());
+    request.animation = AnimationMode::Turntable;
+    request.timeline = Some(Timeline::default());
+    assert!(request.animation_frame_count().is_err());
+}
 
 fn key(time: f64, yaw: f64, pitch: f64) -> CameraKeyframe {
     CameraKeyframe {

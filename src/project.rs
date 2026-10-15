@@ -32,6 +32,7 @@ pub struct OutputPreferences {
     pub section: Option<SectionSpec>,
     pub layout: ExportLayout,
     pub timeline: Option<crate::animation::Timeline>,
+    pub turntable_timing: crate::animation::TurntableTiming,
     pub build_stage: Option<crate::export::BuildStage>,
     pub start_angle_degrees: f64,
 }
@@ -48,6 +49,7 @@ impl Default for OutputPreferences {
             section: None,
             layout: ExportLayout::Single,
             timeline: None,
+            turntable_timing: Default::default(),
             build_stage: None,
             start_angle_degrees: 0.,
         }
@@ -125,6 +127,7 @@ fn validate_project(project: &ProjectFile) -> Result<()> {
     project.scene.validate()?;
     project.camera.validate()?;
     let output = &project.output_options;
+    output.turntable_timing.validate()?;
     if let Some(timeline) = &output.timeline {
         timeline.validate()?;
     }

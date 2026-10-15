@@ -2,6 +2,42 @@
 use crate::{Result, viewport::OrbitCamera};
 use serde::{Deserialize, Serialize};
 
+/// Basic turntable timing. Output length is rounded to the nearest 20 fps frame.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurntableTiming {
+    pub seconds_per_turn: f64,
+    pub duration_seconds: f64,
+}
+impl Default for TurntableTiming {
+    fn default() -> Self {
+        Self {
+            seconds_per_turn: 4.,
+            duration_seconds: 4.,
+        }
+    }
+}
+impl TurntableTiming {
+    pub fn validate(&self) -> Result<()> {
+        if [self.seconds_per_turn, self.duration_seconds]
+            .into_iter()
+            .any(|value| !value.is_finite() || !(0.05..=500.).contains(&value))
+        {
+            return Err(
+                "turntable speed and duration must be finite, from 0.05 to 500 seconds".into(),
+            );
+        }
+        Ok(())
+    }
+    pub fn frame_count(&self) -> Result<u32> {
+        self.validate()?;
+        Ok((self.duration_seconds * 20.).round() as u32)
+    }
+    pub fn total_turns(&self) -> Result<f64> {
+        Ok(f64::from(self.frame_count()?) / 20. / self.seconds_per_turn)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transition {
     #[default]

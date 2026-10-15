@@ -92,6 +92,8 @@ pub struct ExportRequest {
     #[serde(default)]
     pub timeline: Option<crate::animation::Timeline>,
     #[serde(default)]
+    pub turntable_timing: Option<crate::animation::TurntableTiming>,
+    #[serde(default)]
     pub build_stage: Option<BuildStage>,
     #[serde(default)]
     pub start_angle_degrees: f64,
@@ -113,8 +115,26 @@ impl Default for ExportRequest {
             section: None,
             animation: AnimationMode::Turntable,
             timeline: None,
+            turntable_timing: None,
             build_stage: None,
             start_angle_degrees: 0.0,
+        }
+    }
+}
+impl ExportRequest {
+    pub fn animation_frame_count(&self) -> Result<u32> {
+        if let Some(timing) = self.turntable_timing {
+            if self.timeline.is_some() || self.animation != AnimationMode::Turntable {
+                return Err(
+                    "basic turntable timing cannot be combined with a camera timeline or build-up"
+                        .into(),
+                );
+            }
+            timing.frame_count()
+        } else if let Some(timeline) = &self.timeline {
+            timeline.frame_count()
+        } else {
+            Ok(self.frame_count)
         }
     }
 }
@@ -202,13 +222,13 @@ pub fn run_export(
         return Err("start angle must be finite and within supported range".into());
     }
     let mut effective_request = request.clone();
-    if let Some(timeline) = &effective_request.timeline {
-        effective_request.frame_count = timeline.frame_count()?;
+    if effective_request.turntable_timing.is_some() || effective_request.timeline.is_some() {
+        effective_request.frame_count = effective_request.animation_frame_count()?;
         if !matches!(
             request.kind,
             ExportKind::Gif | ExportKind::Mp4 | ExportKind::SectionTurntable
         ) {
-            return Err("camera timelines require GIF or MP4 animation output".into());
+            return Err("animation timing requires GIF or MP4 output".into());
         }
     }
     if effective_request.timeline.is_some() || effective_request.kind == ExportKind::Diagram {
@@ -320,7 +340,7 @@ pub fn run_export(
                 1
             },
     )?;
-    let mut recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
+    let mut recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"turntable_timing":request.turntable_timing,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"blender_hash":hash(&tools.blender)?});
     if request.kind == ExportKind::Diagram {
         recipe["diagram_recipe"] = json!({"version":2,"views":["TOP","ISO","FRONT","RIGHT"],"dimension":"largest_visible_projected_extent_mm","framing_padding":1.4});
     }
@@ -390,8 +410,8 @@ pub fn run_export(
                 total: count,
                 stage: "Rendering".into(),
             });
-            let complete=worker.request(json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
-            if event["kind"]=="frame"{let n=event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;callback(JobEvent::Progress{completed:n,total:count,stage:if event["payload"]["reused"]==true{"Reusing verified frames"}else{"Rendering"}.into()});if let Some(path)=event["payload"]["path"].as_str(){callback(JobEvent::Frame(path.into()));}}
+            let complete=worker.request(json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"seconds_per_turn":request.turntable_timing.map(|timing| timing.seconds_per_turn),"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
+            if event["kind"]=="frame"{let n=event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;callback(JobEvent::Progress{completed:n,total:count,stage:if event["payload"]["reuse_kind"]=="identical"{"Reusing identical frames"}else if event["payload"]["reused"]==true{"Reusing verified frames"}else{"Rendering"}.into()});if let Some(path)=event["payload"]["path"].as_str(){callback(JobEvent::Frame(path.into()));}}
             else if event["kind"]=="log" && let Some(line)=event["payload"]["message"].as_str(){callback(JobEvent::Log(line.to_owned()));}
         })?;
             if let Some(warnings) = complete["payload"]["warnings"].as_array() {
@@ -524,10 +544,10 @@ fn render_section(
             .timeline
             .as_ref()
             .map(|_| directory.join("frame-states.json"));
-        let complete=worker.request(json!({"request_id":format!("section-{panel}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":if animated{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"width":request.size,"height":panel_height,"samples":request.samples,"frame_count":count,"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animated,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
+        let complete=worker.request(json!({"request_id":format!("section-{panel}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":if animated{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"width":request.size,"height":panel_height,"samples":request.samples,"frame_count":count,"seconds_per_turn":request.turntable_timing.map(|timing| timing.seconds_per_turn),"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animated,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),cancel,|event|{
             if event["kind"]=="frame"{
                 let completed=panel_index as u32*count+event["payload"]["index"].as_u64().unwrap_or(0) as u32+1;
-                callback(JobEvent::Progress{completed,total:count*panels.len() as u32,stage:format!("Rendering {panel} view")});
+                callback(JobEvent::Progress{completed,total:count*panels.len() as u32,stage:format!("{} {panel} view",if event["payload"]["reuse_kind"]=="identical"{"Reusing identical frames for"}else if event["payload"]["reused"]==true{"Reusing verified frames for"}else{"Rendering"})});
             }else if event["kind"]=="log" && let Some(message)=event["payload"]["message"].as_str(){callback(JobEvent::Log(message.into()));}
         })?;
         if *panel == "section" {
