@@ -261,6 +261,11 @@ fn prove_repeated_turns(frame_rate: u32) {
         for kind in [ExportKind::Still, ExportKind::Diagram] {
             request.animation = turninator::export::AnimationMode::Turntable;
             request.kind = kind;
+            request.size = if kind == ExportKind::Diagram {
+                256
+            } else {
+                128
+            };
             request.destination = dir.join(format!("{kind:?}.png"));
             let first_png = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
             let pixels = fs::read(&first_png.path).unwrap();
