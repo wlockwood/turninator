@@ -1,8 +1,7 @@
-use super::schedule::validate_height;
 use crate::{Result, mesh::Mesh};
 use std::f64::consts::{FRAC_PI_2, PI};
 
-pub const MAX_BEAD_SEGMENTS: usize = 30_000;
+pub const MAX_BEAD_SEGMENTS: usize = 250_000;
 const HALF_ARC_STEPS: usize = 12;
 
 /// Ring size is fixed for joined_stadium_v1. Open paths add two terminal fan centers.
@@ -10,6 +9,8 @@ pub const JOINED_RING_VERTICES: usize = 32;
 
 pub struct JoinedBeadMesh {
     pub mesh: Mesh,
+    pub ring_vertices: usize,
+    pub omitted_collapsed_triangles: usize,
     /// Half-open triangle index ranges for side faces; all other faces are flat caps.
     pub smooth_face_ranges: Vec<[usize; 2]>,
 }
@@ -27,6 +28,35 @@ pub fn build_joined_bead_mesh_with_report(segments: &[BeadSegment]) -> Result<Jo
     for segment in segments {
         validate_segment(segment)?;
     }
+    let paths: Vec<_> = {
+        let mut ranges = Vec::new();
+        let mut begin = 0;
+        while begin < segments.len() {
+            let mut end = begin + 1;
+            while end < segments.len() && compatible(&segments[end - 1], &segments[end]) {
+                end += 1;
+            }
+            ranges.push(begin..end);
+            begin = end;
+        }
+        ranges
+    };
+    let open = paths
+        .iter()
+        .filter(|range| {
+            let path = &segments[(*range).clone()];
+            !(path.len() >= 3 && compatible(path.last().unwrap(), &path[0]))
+        })
+        .count();
+    let ring_vertices = [32, 24, 16, 12, 8]
+        .into_iter()
+        .find(|&ring| {
+            (segments.len() + open) * ring + 2 * open <= crate::mesh::MAX_VERTICES
+                && (segments.len() + open) * ring * 2 <= crate::mesh::MAX_TRIANGLES
+        })
+        .ok_or(
+            "toolpath exceeds mesh budget even at 8 vertices per bead ring; use a smaller toolpath",
+        )?;
     let mut mesh = Mesh::default();
     let mut smooth_face_ranges = Vec::new();
     let mut begin = 0;
@@ -36,19 +66,57 @@ pub fn build_joined_bead_mesh_with_report(segments: &[BeadSegment]) -> Result<Jo
             end += 1;
         }
         let first = mesh.triangles.len();
-        append_joined_path(&mut mesh, &segments[begin..end])?;
-        smooth_face_ranges.push([first, first + (end - begin) * JOINED_RING_VERTICES * 2]);
+        append_joined_path(&mut mesh, &segments[begin..end], ring_vertices)?;
+        smooth_face_ranges.push([first, first + (end - begin) * ring_vertices * 2]);
         begin = end;
+    }
+    // Blender and the native viewport share f32 coordinates. Remove only faces
+    // whose area is exactly zero in that representation, with no tolerance or
+    // path simplification, and remap the explicit side ranges to the kept faces.
+    let original_count = mesh.triangles.len();
+    let mut kept = Vec::with_capacity(original_count + 1);
+    kept.push(0);
+    mesh.triangles.retain(|triangle| {
+        let [a, b, c] = triangle.map(|i| mesh.positions[i as usize].map(|v| v as f32 as f64));
+        let u: [f64; 3] = std::array::from_fn(|i| b[i] - a[i]);
+        let v: [f64; 3] = std::array::from_fn(|i| c[i] - a[i]);
+        let area = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let keep = area.iter().any(|&component| component != 0.);
+        kept.push(kept.last().unwrap() + usize::from(keep));
+        keep
+    });
+    let omitted_collapsed_triangles = original_count - mesh.triangles.len();
+    for range in &mut smooth_face_ranges {
+        *range = [kept[range[0]], kept[range[1]]];
+        if range[0] == range[1] {
+            return Err("a depositing path is too small for GPU precision".into());
+        }
     }
     mesh.bounds()?;
     Ok(JoinedBeadMesh {
         mesh,
+        ring_vertices,
+        omitted_collapsed_triangles,
         smooth_face_ranges,
     })
 }
 
-fn compatible(a: &BeadSegment, b: &BeadSegment) -> bool {
-    a.end == b.start && a.tool == b.tool && a.layer_index == b.layer_index && a.feature == b.feature
+pub fn compatible(a: &BeadSegment, b: &BeadSegment) -> bool {
+    if a.end != b.start
+        || a.tool != b.tool
+        || a.layer_index != b.layer_index
+        || a.feature != b.feature
+    {
+        return false;
+    }
+    let sa = segment_side(a);
+    let sb = segment_side(b);
+    // A reversal has no bounded miter. Start a separately capped path instead.
+    sa[0] * sb[0] + sa[1] * sb[1] > -0.9999
 }
 fn segment_side(segment: &BeadSegment) -> [f64; 2] {
     let dx = segment.end[0] - segment.start[0];
@@ -56,11 +124,11 @@ fn segment_side(segment: &BeadSegment) -> [f64; 2] {
     let length = dx.hypot(dy);
     [-dy / length, dx / length]
 }
-fn append_joined_path(mesh: &mut Mesh, path: &[BeadSegment]) -> Result<()> {
+fn append_joined_path(mesh: &mut Mesh, path: &[BeadSegment], ring_vertices: usize) -> Result<()> {
     let closed = path.len() >= 3 && compatible(path.last().unwrap(), &path[0]);
     let rings = path.len() + usize::from(!closed);
     let base = mesh.positions.len() as u32;
-    let count = JOINED_RING_VERTICES as u32;
+    let count = ring_vertices as u32;
     for i in 0..rings {
         let point = if i < path.len() {
             path[i].start
@@ -100,8 +168,8 @@ fn append_joined_path(mesh: &mut Mesh, path: &[BeadSegment]) -> Result<()> {
         };
         let radius = height * 0.5;
         let offset = (width - height) * 0.5;
-        for sample in 0..JOINED_RING_VERTICES {
-            let angle = -FRAC_PI_2 + 2. * PI * sample as f64 / JOINED_RING_VERTICES as f64;
+        for sample in 0..ring_vertices {
+            let angle = -FRAC_PI_2 + 2. * PI * sample as f64 / ring_vertices as f64;
             let (s, c) = angle.sin_cos();
             // Radial intersection with an exact stadium avoids duplicate vertices
             // when width==height, while retaining exact cardinal dimensions.
@@ -169,6 +237,14 @@ pub fn build_bead_mesh(segments: &[BeadSegment]) -> Result<Mesh> {
     if segments.len() > MAX_BEAD_SEGMENTS {
         return Err(format!("bead budget exceeded: maximum {MAX_BEAD_SEGMENTS} segments").into());
     }
+    if segments.len() * 54 > crate::mesh::MAX_VERTICES
+        || segments.len() * 104 > crate::mesh::MAX_TRIANGLES
+    {
+        return Err(
+            "independent bead mesh exceeds geometry budget; select joined beads for larger files"
+                .into(),
+        );
+    }
     let mut mesh = Mesh {
         positions: Vec::with_capacity(segments.len() * 54),
         triangles: Vec::with_capacity(segments.len() * 104),
@@ -232,7 +308,9 @@ pub fn build_bead_mesh(segments: &[BeadSegment]) -> Result<Mesh> {
 }
 
 pub(crate) fn validate_segment(segment: &BeadSegment) -> Result<()> {
-    validate_height(segment.height_mm)?;
+    if !segment.height_mm.is_finite() || !(0.00001..=2.).contains(&segment.height_mm) {
+        return Err("bead height must be finite and in 0.00001..=2 mm".into());
+    }
     if !segment.width_mm.is_finite()
         || segment.width_mm < segment.height_mm
         || segment.width_mm > 10.

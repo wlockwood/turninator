@@ -214,6 +214,7 @@ pub struct ImportedModel {
     pub warnings: Vec<String>,
     pub segment_count: usize,
     pub bead_layout: Option<String>,
+    pub bead_ring_vertices: Option<usize>,
     pub bead_side_face_ranges: Vec<[usize; 2]>,
     pub groups: Vec<GeometryGroup>,
     pub import_settings: ImportSettings,
@@ -267,6 +268,7 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
         .unwrap_or("")
         .to_ascii_lowercase();
     let mut bead_layout = None;
+    let mut bead_ring_vertices = None;
     let mut bead_side_face_ranges = Vec::new();
     let mut groups = Vec::new();
     let mut layer_tops_mm = Vec::new();
@@ -324,7 +326,7 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
                         .into(),
                 );
             }
-            let parsed = parse_gcode(
+            let mut parsed = parse_gcode(
                 std::str::from_utf8(&source)?,
                 &ParseOptions {
                     layer_height_mm: options.layer_height_mm,
@@ -356,7 +358,23 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
             }
             let mesh = if options.joined_beads {
                 let joined = build_joined_bead_mesh_with_report(&parsed.segments)?;
-                bead_layout = Some("joined_stadium_v1".into());
+                bead_layout = Some(
+                    if joined.omitted_collapsed_triangles > 0 {
+                        "joined_stadium_v3"
+                    } else if joined.ring_vertices == 32 {
+                        "joined_stadium_v1"
+                    } else {
+                        "joined_stadium_v2"
+                    }
+                    .into(),
+                );
+                bead_ring_vertices = Some(joined.ring_vertices);
+                if joined.ring_vertices < 32 {
+                    parsed.warnings.push(format!("Large toolpath: {} vertices per bead ring to stay within the mesh memory budget; every depositing segment is retained.", joined.ring_vertices));
+                }
+                if joined.omitted_collapsed_triangles > 0 {
+                    parsed.warnings.push(format!("Omitted {} generated faces with exactly zero area at GPU precision; depositing paths were retained without tolerance-based simplification.",joined.omitted_collapsed_triangles));
+                }
                 let mut begin = 0;
                 for (i, range) in joined.smooth_face_ranges.iter().enumerate() {
                     let segment = &parsed.segments[begin];
@@ -423,6 +441,7 @@ pub fn load_model(path: &Path, options: &ImportSettings) -> Result<ImportedModel
         warnings,
         segment_count,
         bead_layout,
+        bead_ring_vertices,
         bead_side_face_ranges,
         groups,
         import_settings: options.clone(),
@@ -445,7 +464,7 @@ pub fn visible_layer_count(model: &ImportedModel, requested_mm: f64) -> usize {
         .partition_point(|height| *height as f32 <= requested_mm as f32)
 }
 fn compatible_segments(a: &BeadSegment, b: &BeadSegment) -> bool {
-    a.end == b.start && a.tool == b.tool && a.feature == b.feature && a.layer_index == b.layer_index
+    crate::print::beads::compatible(a, b)
 }
 fn group(segment: &BeadSegment, start_triangle: usize, end_triangle: usize) -> GeometryGroup {
     GeometryGroup {
@@ -492,6 +511,9 @@ pub fn model_scene(
     scene["source_path"] = serde_json::json!(model.path);
     if let Some(layout) = &model.bead_layout {
         scene["bead_layout"] = serde_json::json!(layout);
+    }
+    if let Some(ring) = model.bead_ring_vertices {
+        scene["bead_ring_vertices"] = serde_json::json!(ring);
     }
     if !model.bead_side_face_ranges.is_empty() {
         scene["bead_side_face_ranges"] = serde_json::json!(model.bead_side_face_ranges);

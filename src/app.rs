@@ -1514,7 +1514,7 @@ impl Studio {
                 egui::ComboBox::from_label("Firmware").selected_text(&self.scene.import.firmware).show_ui(ui,|ui|{
                     for mode in ["marlin","klipper"] {ui.selectable_value(&mut self.scene.import.firmware,mode.into(),mode).help(if mode == "klipper" { "Use the supported Klipper interpretation rules. Custom macros and implicit offsets still require preprocessing." } else { "Use the supported Marlin-style interpretation rules. Unsupported motion-affecting commands are rejected." });}
                 }).help("Select the interpretation rules for the supported G-code dialect. Unsupported motion-affecting commands and unresolved printer macros are rejected explicitly.");
-                ui.checkbox(&mut self.scene.import.joined_beads,"Join contiguous bead paths").help("Connect adjacent compatible depositing moves into continuous rounded paths. This reduces end-cap overlaps at joins; separate paths, tools and features remain distinct.");
+                ui.checkbox(&mut self.scene.import.joined_beads,"Join contiguous bead paths").help("Connect compatible depositing moves into continuous rounded paths. Recommended for large files: cross-section detail adjusts to the geometry budget while retaining every depositing segment. Reversals, tools and features remain separate.");
                 ui.checkbox(&mut self.scene.import.allow_arcs,"Allow planar G2/G3 arcs").help("Interpret supported XY-plane circular arcs and approximate them with short bead segments. Other planes and unsupported arc forms still fail explicitly; set approximation precision below.");
                 if self.scene.import.allow_arcs { ui.add(egui::DragValue::new(&mut self.scene.import.chord_error_mm).range(0.001..=1.).speed(0.001).suffix(" mm arc error")).help("Maximum arc approximation error in millimetres. Smaller values follow supported arcs more closely but create more segments and use more memory."); }
                 ui.checkbox(&mut self.scene.import.allow_tool_changes,"Normalized tool changes").help("Allow tool-selection commands that share one XYZ frame and a global extrusion coordinate. Resolve tool offsets and printer macros before import; this does not simulate independent tool kinematics.");
@@ -1525,7 +1525,7 @@ impl Studio {
             }).help("Choose the supported dialect and explicitly enable optional path features. This is a bounded geometry preview, not a printer firmware or macro emulator.");
             }
             if beads || self.scene.import.stepped_envelope {
-            if beads && self.scene.import.layer_boundaries_mm.is_empty() { ui.small("Layer defaults apply where the file omits HEIGHT metadata."); }
+            if beads && self.scene.import.layer_boundaries_mm.is_empty() { ui.small("Slicer heights are read or estimated from the file; defaults cover other supported G-code. See import warnings for assumptions."); }
             controls::layer_settings(ui, &mut self.scene, false);
             ui.collapsing("Explicit adaptive layer boundaries",|ui| {
                 ui.label("G-code / stepped STL: mm boundaries, starting at 0");

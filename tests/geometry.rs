@@ -187,7 +187,7 @@ fn circular_profile_closed_edges_and_resource_budget() {
     }
     assert!(edges.values().all(|&count| count == 2));
     assert!(
-        build_bead_mesh(&vec![s; 30_001])
+        build_bead_mesh(&vec![s; turninator::mesh::MAX_TRIANGLES / 104 + 1])
             .unwrap_err()
             .to_string()
             .contains("budget")

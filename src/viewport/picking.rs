@@ -69,10 +69,13 @@ impl PickingMesh {
         if positions.iter().flatten().any(|v| !v.is_finite()) {
             return Err("picking mesh exceeds f32 precision range".into());
         }
-        for triangle in &mesh.triangles {
+        for (index, triangle) in mesh.triangles.iter().enumerate() {
             let [a, b, c] = triangle.map(|i| positions[i as usize].map(f64::from));
             if normalized(cross(sub(b, a), sub(c, a))).is_none() {
-                return Err("picking triangle collapses at GPU precision".into());
+                return Err(format!(
+                    "picking triangle {index} collapses at GPU precision: {a:?}, {b:?}, {c:?}"
+                )
+                .into());
             }
         }
         let mut result = Self {

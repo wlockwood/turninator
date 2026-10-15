@@ -67,8 +67,12 @@ def load_scene_spec(path):
         raise ValueError("mesh_path must be absolute")
     if spec.get("geometry_kind") not in ("beads", "original"):
         raise ValueError("unsupported geometry_kind")
-    if spec.get("bead_layout") not in (None, "independent_stadium_v1", "joined_stadium_v1"):
+    if spec.get("bead_layout") not in (None, "independent_stadium_v1", "joined_stadium_v1", "joined_stadium_v2", "joined_stadium_v3"):
         raise ValueError("unsupported bead_layout")
+    if spec.get("bead_layout") == "joined_stadium_v2" and (type(spec.get("bead_ring_vertices")) is not int or spec["bead_ring_vertices"] not in (8,12,16,24)):
+        raise ValueError("budgeted joined beads require a supported ring size")
+    if spec.get("bead_layout") == "joined_stadium_v3" and (type(spec.get("bead_ring_vertices")) is not int or spec["bead_ring_vertices"] not in (8,12,16,24,32)):
+        raise ValueError("pruned joined beads require a supported ring size")
     if spec.get("bead_layout") is not None and spec["geometry_kind"] != "beads":
         raise ValueError("bead_layout requires bead geometry")
     _finite_number(spec.get("layer_height_mm"), "layer_height_mm", 0.02, 2.0)
@@ -433,11 +437,25 @@ def rotation_envelope(points):
     return {"center": center, "radius": radius, "height": high[2] - low[2], "bottom": low[2]}
 
 
-def bead_smooth_flags(triangles, layout, side_ranges=None):
+def bead_smooth_flags(triangles, layout, side_ranges=None, ring_vertices=32):
     """Only the explicitly tagged Rust producer promises side/side/start/end quads."""
     if layout is None:
         return [False] * len(triangles)
-    if layout == "joined_stadium_v1":
+    if layout == "joined_stadium_v3":
+        if type(ring_vertices) is not int or ring_vertices not in (8,12,16,24,32) or not isinstance(side_ranges,list) or not side_ranges:
+            raise ValueError("pruned joined beads require explicit side ranges and ring size")
+        flags = [False]*len(triangles)
+        previous_end = 0
+        for item in side_ranges:
+            if (not isinstance(item,list) or len(item) != 2 or any(type(v) is not int for v in item)
+                    or item[0] < previous_end or item[1] <= item[0] or item[1] > len(triangles)):
+                raise ValueError("pruned bead side ranges overlap or exceed the mesh")
+            flags[item[0]:item[1]] = [True]*(item[1]-item[0])
+            previous_end = item[1]
+        return flags
+    if layout in ("joined_stadium_v1", "joined_stadium_v2"):
+        if type(ring_vertices) is not int or (layout == "joined_stadium_v1" and ring_vertices != 32) or ring_vertices not in (8,12,16,24,32):
+            raise ValueError("invalid joined bead ring size")
         if not isinstance(side_ranges,list) or not side_ranges:
             raise ValueError("joined_stadium_v1 requires explicit bead_side_face_ranges")
         flags = [False]*len(triangles)
@@ -447,13 +465,13 @@ def bead_smooth_flags(triangles, layout, side_ranges=None):
                     or any(type(value) is not int for value in face_range)):
                 raise ValueError("joined bead side range must contain two integers")
             start,end = face_range
-            if start < previous_end or start < 0 or end > len(triangles) or end <= start or (end-start)%64:
+            if start < previous_end or start < 0 or end > len(triangles) or end <= start or (end-start)%(ring_vertices*2):
                 raise ValueError("joined bead side ranges overlap or exceed the declared mesh")
             for index in range(start,end,2):
                 a,b,d = triangles[index]
                 aa,dd,c = triangles[index+1]
-                if aa != a or dd != d or len({a,b,c,d}) != 4 or b-a != d-c or b-a not in (1,-31):
-                    raise ValueError("joined side faces do not match the 32-vertex ring contract")
+                if aa != a or dd != d or len({a,b,c,d}) != 4 or b-a != d-c or b-a not in (1,1-ring_vertices):
+                    raise ValueError("joined side faces do not match the declared ring contract")
                 flags[index:index+2] = [True,True]
             previous_end = end
         return flags
@@ -691,7 +709,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         validate_layer_ranges(spec["layer_face_ranges"],len(triangles))
     if spec.get("build_up",False) and spec["geometry_kind"]!="beads":
         raise ValueError("build-up requires actual bead geometry")
-    smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout"), spec.get("bead_side_face_ranges")) if spec["geometry_kind"] == "beads" else None
+    smooth_flags = bead_smooth_flags(triangles, spec.get("bead_layout"), spec.get("bead_side_face_ranges"), spec.get("bead_ring_vertices",32)) if spec["geometry_kind"] == "beads" else None
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     for block in list(bpy.data.meshes):

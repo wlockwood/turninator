@@ -266,6 +266,25 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(buildup["build_up"])
         self.assertEqual(source, {"schema_version": 1, "geometry_kind": "beads"})
 
+    def test_budgeted_joined_rings_keep_checked_side_and_cap_normals(self):
+        for ring in (8,12,16,24):
+            faces = []
+            for i in range(ring):
+                j = (i+1)%ring
+                faces.extend(((i,j,ring+j),(i,ring+j,ring+i)))
+            faces.extend(((ring*2,1,0),(ring*2+1,ring,ring+1)))
+            flags = scene.bead_smooth_flags(faces,"joined_stadium_v2",[[0,ring*2]],ring)
+            self.assertEqual(flags,[True]*(ring*2)+[False]*2)
+            with self.assertRaises(ValueError):
+                scene.bead_smooth_flags(faces,"joined_stadium_v2",[[0,ring*2]],32)
+
+    def test_pruned_joined_sides_use_explicit_ranges(self):
+        faces = [(0,1,2),(1,3,2),(4,1,0)]
+        self.assertEqual(scene.bead_smooth_flags(faces,"joined_stadium_v3",[[0,2]],32), [True,True,False])
+        for ranges in (None,[[0,0]],[[0,4]],[[0,2],[1,3]],[[True,2]]):
+            with self.assertRaises(ValueError):
+                scene.bead_smooth_flags(faces,"joined_stadium_v3",ranges,32)
+
     def test_timeline_frames_require_exact_count_valid_camera_and_monotone_build(self):
         camera = dict(target_mm=[0,0,1],direction=[1,-1,1],up=[0,0,1],projection="perspective",distance_mm=20,vertical_fov_degrees=35,ortho_span_mm=10)
         frames = [dict(camera=camera,angle_degrees=0,buildup_fraction=0),dict(camera=camera,angle_degrees=180,buildup_fraction=1)]

@@ -63,6 +63,40 @@ fn joined_corner_has_one_shared_ring_and_only_terminal_caps() {
     let bounds = mesh.bounds().unwrap();
     assert!(bounds.min[2] >= -1e-12 && bounds.max[2] <= 0.2 + 1e-12);
 }
+
+#[test]
+fn large_joined_toolpaths_fit_mesh_budgets_without_dropping_segments() {
+    use turninator::print::beads::build_joined_bead_mesh_with_report;
+    let segments: Vec<_> = (0..65_000)
+        .map(|i| bead([i as f64 * 0.1, 0., 0.2], [(i + 1) as f64 * 0.1, 0., 0.2]))
+        .collect();
+    let joined = build_joined_bead_mesh_with_report(&segments).unwrap();
+    assert!(joined.mesh.positions.len() <= turninator::mesh::MAX_VERTICES);
+    assert!(joined.mesh.triangles.len() <= turninator::mesh::MAX_TRIANGLES);
+    assert_eq!(joined.mesh.bounds().unwrap().max[0], 6500.);
+    assert_eq!(joined.smooth_face_ranges.len(), 1);
+    assert!(joined.mesh.triangles.len() >= segments.len() * 16);
+}
+
+#[test]
+fn reversing_toolpaths_split_into_closed_paths() {
+    use turninator::print::beads::build_joined_bead_mesh_with_report;
+    let a = bead([0., 0., 0.2], [10., 0., 0.2]);
+    let b = bead(a.end, [0., 0., 0.2]);
+    let joined = build_joined_bead_mesh_with_report(&[a, b]).unwrap();
+    assert_eq!(joined.smooth_face_ranges.len(), 2);
+    closed_outward(&joined.mesh);
+}
+
+#[test]
+fn generated_beads_omit_only_faces_that_collapse_at_snapshot_precision() {
+    use turninator::print::beads::build_joined_bead_mesh_with_report;
+    let mut a = bead([104.18244, 112.84288, 5.3], [104.26651, 112.83281, 5.3]);
+    a.height_mm = 0.00001;
+    a.width_mm = 0.4;
+    let joined = build_joined_bead_mesh_with_report(&[a]).unwrap();
+    turninator::viewport::PickingMesh::new(&joined.mesh).unwrap();
+}
 #[test]
 fn joined_closed_variable_profile_loop_has_no_terminal_caps() {
     let points = [
