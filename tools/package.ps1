@@ -2,6 +2,7 @@
 param(
     [ValidateSet('release', 'debug')][string]$Profile = 'release',
     [switch]$SkipBuild,
+    [string]$ExecutablePath = '',
     [string]$PackageName = '',
     [string]$Python = 'python',
     [string]$Blender = 'C:/Program Files/Blender Foundation/Blender 4.5/blender.exe',
@@ -10,6 +11,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ($ExecutablePath -and -not $SkipBuild) {
+    throw 'ExecutablePath requires -SkipBuild; it packages an explicitly selected prebuilt executable.'
+}
 if ($PackageName -and $PackageName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$') {
     throw 'PackageName must be a single safe directory name.'
 }
@@ -56,7 +60,7 @@ try {
         & cargo @buildArgs
         if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
     }
-    $executable = Join-Path $workspace "target/$Profile/turninator.exe"
+    $executable = if ($ExecutablePath) { [IO.Path]::GetFullPath($ExecutablePath) } else { Join-Path $workspace "target/$Profile/turninator.exe" }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Missing executable: $executable" }
     foreach ($resource in @('renderer/worker.py', 'renderer/scene.py', 'README.md', 'docs/runtime-support.md')) {
         if (-not (Test-Path -LiteralPath (Join-Path $workspace $resource) -PathType Leaf)) { throw "Missing runtime resource: $resource" }

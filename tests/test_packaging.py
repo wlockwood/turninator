@@ -80,6 +80,14 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(len(result["renderer/worker.py"]["sha256"]), 64)
 
     @unittest.skipUnless(os.name == "nt", "Windows packaging uses PowerShell")
+    def test_explicit_binary_requires_skip_build(self):
+        result = subprocess.run(["powershell", "-NoProfile", "-File", str(ROOT / "tools/package.ps1"),
+                                 "-ExecutablePath", str(ROOT / "target/release/deps/turninator.exe")],
+                                capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ExecutablePath requires -SkipBuild", result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows packaging uses PowerShell")
     def test_package_rejects_path_traversal_before_build(self):
         result = subprocess.run(["powershell", "-NoProfile", "-File", str(ROOT / "tools/package.ps1"),
                                  "-SkipBuild", "-PackageName", "../outside"], capture_output=True, text=True,
