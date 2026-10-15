@@ -229,6 +229,15 @@ void exceptions_cleanup() {
     }
 }
 void cache_config_before_factory() {
+    for(const auto& path:{R"(\\?\C:/cache)",R"(\\?\C:\app/cache)",R"(\\?\UNC\server/share/cache)"}) {
+        reset(); control.throw_factory=true;
+        auto document=config_document(); document["cache_directory"]=path;
+        const auto bytes=document.dump();
+        tn_config cfg{sizeof(tn_config),1,reinterpret_cast<const uint8_t*>(bytes.data()),bytes.size(),1048576,1048576,8000,0};
+        tn_context c=nullptr;
+        check(tn_renderer_create(&cfg,&c,&error)==TN_INVALID_ARGUMENT && !c,"verbatim forward slash must fail before factory");
+        check(control.threads.empty(),"verbatim forward slash reached SDK factory");
+    }
     for(const auto& value:std::vector<tn::Json>{nullptr,42,"","relative/cache",R"(C:cache)",R"(\cache)",R"(\\server)",R"(\\.\pipe\cache)",std::string("C:\\bad\0path",11),std::string("C:\\")+std::string(4094,'x')}) {
         reset(); control.throw_factory=true;
         auto document=config_document(); document["cache_directory"]=value;

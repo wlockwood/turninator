@@ -540,3 +540,24 @@ fn canonical_unicode_cache_directory_crosses_native_parser_without_changing_pixe
     std::fs::remove_dir(&child).unwrap();
     std::fs::remove_dir(&root).unwrap();
 }
+
+#[test]
+fn canonical_existing_windows_del_and_c1_cache_directories_cross_native_parser() {
+    let library = EmbeddedLibrary::load_fixture(&fixture("tn_fixture.dll")).unwrap();
+    for codepoint in ['\u{7f}', '\u{80}', '\u{85}', '\u{9f}'] {
+        let root = fixture(&format!("cache-directory-{codepoint}"));
+        std::fs::create_dir(&root).unwrap();
+        let canonical = root.canonicalize().unwrap();
+        assert!(canonical.to_str().unwrap().ends_with(codepoint));
+        let mut cfg = config();
+        cfg.cache_directory = Some(canonical);
+        let context = library.create(&cfg);
+        std::fs::remove_dir(&root).unwrap();
+        assert!(
+            context.is_ok(),
+            "Windows permits U+{:04X}: {:?}",
+            codepoint as u32,
+            context.err()
+        );
+    }
+}

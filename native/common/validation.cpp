@@ -49,10 +49,16 @@ std::string text(const Json& j,size_t max=256) {
     return s;
 }
 void cache_directory(const Json& j) {
-    auto path=text(j,4096);
+    require(j.is_string(),"expected cache directory string");
+    auto path=j.get<std::string>(); // parse() has already enforced valid UTF-8.
+    require(!path.empty()&&path.size()<=4096,"cache directory byte length limit");
+    // Windows forbids U+0000..U+001F in directory names; DEL/C1 are valid.
+    require(std::all_of(path.begin(),path.end(),[](unsigned char b){return b>=32;}),"reserved control character in cache directory");
     const auto separator=[](char c){return c=='\\'||c=='/';};
     // Inspect UTF-8 syntax only. Never open a path or change filesystem/env state.
     // Rust canonicalize emits verbatim drive/UNC paths on Windows.
+    const bool verbatim=path.starts_with(R"(\\?\)");
+    require(!verbatim||path.find('/')==std::string::npos,"forward slash in verbatim cache directory");
     bool verbatim_drive=false;
     if(path.starts_with(R"(\\?\UNC\)")) path=R"(\\)"+path.substr(8);
     else if(path.starts_with(R"(\\?\)")) { path=path.substr(4); verbatim_drive=true; }
