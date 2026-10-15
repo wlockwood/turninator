@@ -1,0 +1,673 @@
+{
+  "recipe": "turninator-agx-v1",
+  "reference": {
+    "sdk": "Filament v1.78.0 Windows x86_64 md Release",
+    "commit": "c1dc4e444784850d6dc891a1fb38747c30b85463",
+    "tone_mapper_sha256": "1e3212b67f2954721a4336c68fef1904204873835896e25c9ba77f9030aa42cd",
+    "color_space_sha256": "0e1b0434f4ebf2358703cab569175e5905b2912553d61925f6fcad817ddc4ad0",
+    "method": "saturate(Rec2020_to_sRGB * AgxToneMapper(NONE)(sRGB_to_Rec2020 * max(scene, 0) * exp2(ev))); OETF_sRGB once"
+  },
+  "absolute_tolerance": 5e-05,
+  "patches": [
+    {
+      "name": "black",
+      "scene_rgba": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        2.52886139e-06,
+        2.529428e-06,
+        2.52949462e-06,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        3.26728878e-05,
+        3.2680211e-05,
+        3.26810696e-05,
+        1.0
+      ]
+    },
+    {
+      "name": "floor",
+      "scene_rgba": [
+        1e-10,
+        1e-10,
+        1e-10,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        2.52886139e-06,
+        2.529428e-06,
+        2.52949462e-06,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        3.26728878e-05,
+        3.2680211e-05,
+        3.26810696e-05,
+        1.0
+      ]
+    },
+    {
+      "name": "toe",
+      "scene_rgba": [
+        0.00018,
+        0.00018,
+        0.00018,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        1.91388835e-06,
+        1.9187944e-06,
+        1.91952017e-06,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        2.47274384e-05,
+        2.47908229e-05,
+        2.48002016e-05,
+        1.0
+      ]
+    },
+    {
+      "name": "dark",
+      "scene_rgba": [
+        0.018,
+        0.018,
+        0.018,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.0151683129,
+        0.0151670016,
+        0.0151667548,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.129208505,
+        0.129201859,
+        0.129200608,
+        1.0
+      ]
+    },
+    {
+      "name": "middle_gray",
+      "scene_rgba": [
+        0.18,
+        0.18,
+        0.18,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.21483463,
+        0.21485056,
+        0.214851528,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.50085634,
+        0.500873506,
+        0.500874579,
+        1.0
+      ]
+    },
+    {
+      "name": "white",
+      "scene_rgba": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.582852006,
+        0.582936883,
+        0.582952082,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.787497044,
+        0.787548184,
+        0.787557304,
+        1.0
+      ]
+    },
+    {
+      "name": "hdr_gray",
+      "scene_rgba": [
+        4,
+        4,
+        4,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.848963916,
+        0.849077642,
+        0.849087596,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.930423617,
+        0.930478573,
+        0.930483401,
+        1.0
+      ]
+    },
+    {
+      "name": "hdr_white",
+      "scene_rgba": [
+        16,
+        16,
+        16,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.960219324,
+        0.960444987,
+        0.960425556,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.982305706,
+        0.982407272,
+        0.98239857,
+        1.0
+      ]
+    },
+    {
+      "name": "extreme_white",
+      "scene_rgba": [
+        65504,
+        65504,
+        65504,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.960784972,
+        0.960999966,
+        0.961025476,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.982560337,
+        0.982657015,
+        0.982668579,
+        1.0
+      ]
+    },
+    {
+      "name": "red",
+      "scene_rgba": [
+        1,
+        0,
+        0,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.716378331,
+        0.107099988,
+        0.0670928806,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.86311084,
+        0.360908747,
+        0.287269056,
+        1.0
+      ]
+    },
+    {
+      "name": "green",
+      "scene_rgba": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.236792639,
+        0.577799201,
+        0.131953239,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.523858607,
+        0.78444612,
+        0.398691684,
+        1.0
+      ]
+    },
+    {
+      "name": "blue",
+      "scene_rgba": [
+        0,
+        0,
+        1,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.0344103388,
+        0.135925427,
+        0.721746862,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.204143018,
+        0.404333085,
+        0.865971386,
+        1.0
+      ]
+    },
+    {
+      "name": "hdr_red",
+      "scene_rgba": [
+        16,
+        0,
+        0,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        1.0,
+        0.706160724,
+        0.600327015,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.99999994,
+        0.857631803,
+        0.797931314,
+        1.0
+      ]
+    },
+    {
+      "name": "hdr_green",
+      "scene_rgba": [
+        0,
+        16,
+        0,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.864014685,
+        0.968940079,
+        0.746855199,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.937665462,
+        0.986220777,
+        0.879188001,
+        1.0
+      ]
+    },
+    {
+      "name": "hdr_blue",
+      "scene_rgba": [
+        0,
+        0,
+        16,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.561868191,
+        0.70812428,
+        1.0,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.774723589,
+        0.858688295,
+        0.99999994,
+        1.0
+      ]
+    },
+    {
+      "name": "yellow",
+      "scene_rgba": [
+        8,
+        8,
+        0,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.937087059,
+        0.918506801,
+        0.680379152,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.97181946,
+        0.963286817,
+        0.84359777,
+        1.0
+      ]
+    },
+    {
+      "name": "cyan",
+      "scene_rgba": [
+        0,
+        8,
+        8,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.762507796,
+        0.93362844,
+        0.9308393,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.887296438,
+        0.970238626,
+        0.968961418,
+        1.0
+      ]
+    },
+    {
+      "name": "magenta",
+      "scene_rgba": [
+        8,
+        0,
+        8,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        1.0,
+        0.68097496,
+        0.955241084,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.99999994,
+        0.843925595,
+        0.980061591,
+        1.0
+      ]
+    },
+    {
+      "name": "extreme_red",
+      "scene_rgba": [
+        65504,
+        0,
+        0,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.960784972,
+        0.960999966,
+        0.961025476,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.982560337,
+        0.982657015,
+        0.982668579,
+        1.0
+      ]
+    },
+    {
+      "name": "asymmetric",
+      "scene_rgba": [
+        0.05,
+        0.7,
+        8,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.459647954,
+        0.674848914,
+        1.0,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.708126128,
+        0.840547204,
+        0.99999994,
+        1.0
+      ]
+    },
+    {
+      "name": "negative",
+      "scene_rgba": [
+        -1,
+        0.18,
+        4,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.254343718,
+        0.462657958,
+        0.986563146,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.541363716,
+        0.710204363,
+        0.994069993,
+        1.0
+      ]
+    },
+    {
+      "name": "negative_black",
+      "scene_rgba": [
+        -4,
+        -2,
+        -1,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        2.52886139e-06,
+        2.529428e-06,
+        2.52949462e-06,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        3.26728878e-05,
+        3.2680211e-05,
+        3.26810696e-05,
+        1.0
+      ]
+    },
+    {
+      "name": "gray_plus_2",
+      "scene_rgba": [
+        0.18,
+        0.18,
+        0.18,
+        1
+      ],
+      "exposure_ev": 2,
+      "display_linear_rgba": [
+        0.506703675,
+        0.506769359,
+        0.506774247,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.739755034,
+        0.739798009,
+        0.739801168,
+        1.0
+      ]
+    },
+    {
+      "name": "gray_minus_2",
+      "scene_rgba": [
+        0.18,
+        0.18,
+        0.18,
+        1
+      ],
+      "exposure_ev": -2,
+      "display_linear_rgba": [
+        0.0537913106,
+        0.0537898019,
+        0.0537893362,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.257163763,
+        0.257160127,
+        0.257158995,
+        1.0
+      ]
+    },
+    {
+      "name": "alpha_half",
+      "scene_rgba": [
+        4,
+        0.18,
+        0.01,
+        0.5
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        1.0,
+        0.431521684,
+        0.29039216,
+        0.5
+      ],
+      "display_srgb_rgba": [
+        0.99999994,
+        0.688310385,
+        0.575225711,
+        0.5
+      ]
+    },
+    {
+      "name": "alpha_zero",
+      "scene_rgba": [
+        4,
+        0.18,
+        0.01,
+        0
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        1.0,
+        0.431521684,
+        0.29039216,
+        0.0
+      ],
+      "display_srgb_rgba": [
+        0.99999994,
+        0.688310385,
+        0.575225711,
+        0.0
+      ]
+    },
+    {
+      "name": "alpha_opaque",
+      "scene_rgba": [
+        4,
+        0.18,
+        0.01,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        1.0,
+        0.431521684,
+        0.29039216,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.99999994,
+        0.688310385,
+        0.575225711,
+        1.0
+      ]
+    },
+    {
+      "name": "exposure_min",
+      "scene_rgba": [
+        1,
+        2,
+        3,
+        0.25
+      ],
+      "exposure_ev": -32,
+      "display_linear_rgba": [
+        2.52886139e-06,
+        2.529428e-06,
+        2.52949462e-06,
+        0.25
+      ],
+      "display_srgb_rgba": [
+        3.26728878e-05,
+        3.2680211e-05,
+        3.26810696e-05,
+        0.25
+      ]
+    },
+    {
+      "name": "exposure_max",
+      "scene_rgba": [
+        1,
+        2,
+        3,
+        0.25
+      ],
+      "exposure_ev": 32,
+      "display_linear_rgba": [
+        0.960784972,
+        0.960999966,
+        0.961025476,
+        0.25
+      ],
+      "display_srgb_rgba": [
+        0.982560337,
+        0.982657015,
+        0.982668579,
+        0.25
+      ]
+    },
+    {
+      "name": "finite_max",
+      "scene_rgba": [
+        3.4028234663852886e+38,
+        3.4028234663852886e+38,
+        3.4028234663852886e+38,
+        1
+      ],
+      "exposure_ev": 0,
+      "display_linear_rgba": [
+        0.960784972,
+        0.960999966,
+        0.961025476,
+        1.0
+      ],
+      "display_srgb_rgba": [
+        0.982560337,
+        0.982657015,
+        0.982668579,
+        1.0
+      ]
+    }
+  ]
+}

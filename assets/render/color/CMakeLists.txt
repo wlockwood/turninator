@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.22)
+project(turninator_color_qualification LANGUAGES CXX)
+add_executable(color_port qualify.cpp)
+target_compile_features(color_port PRIVATE cxx_std_17)
+# Optional qualification against the already pinned SDK; never downloads anything.
+if(FILAMENT_SDK AND FILAMENT_SOURCE_HEADERS)
+    file(SHA256 "${FILAMENT_SDK}/lib/x86_64/md/filament.lib" sdk_hash)
+    file(SHA256 "${FILAMENT_SOURCE_HEADERS}/filament-ColorSpaceUtils.h" colorspace_hash)
+    if(NOT sdk_hash STREQUAL "4fc4790a7daf3f0cba1d06a458f2f771373a53b21051cd5872133ff00408e8c9"
+       OR NOT colorspace_hash STREQUAL "0e1b0434f4ebf2358703cab569175e5905b2912553d61925f6fcad817ddc4ad0")
+        message(FATAL_ERROR "Color chart qualification requires the locked Filament v1.78.0 SDK/header")
+    endif()
+    add_executable(color_reference qualify.cpp)
+    target_compile_features(color_reference PRIVATE cxx_std_17)
+    target_compile_definitions(color_reference PRIVATE TURNINATOR_FILAMENT_REFERENCE NOMINMAX
+        "TURNINATOR_FILAMENT_COLORSPACE_HEADER=\"${FILAMENT_SOURCE_HEADERS}/filament-ColorSpaceUtils.h\"")
+    target_include_directories(color_reference PRIVATE "${FILAMENT_SDK}/include" "${FILAMENT_SOURCE_HEADERS}")
+    target_link_directories(color_reference PRIVATE "${FILAMENT_SDK}/lib/x86_64/md")
+    target_link_libraries(color_reference PRIVATE filament utils)
+endif()

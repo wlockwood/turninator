@@ -1,0 +1,123 @@
+{
+  "version": "turninator-agx-v1",
+  "input": "scene-linear Rec.709 D65 straight RGBA",
+  "linear_output": "display-linear Rec.709 D65 straight RGBA clamped RGB 0..1",
+  "srgb_output": "display-sRGB straight RGBA; IEC 61966-2-1 OETF once on RGB only",
+  "precision": "f32; no required fused multiply-add; chart absolute tolerance 0.00005",
+  "default_exposure_ev": 0,
+  "exposure_ev_range": [
+    -32,
+    32
+  ],
+  "invalid": "reject nonfinite RGBA/EV, alpha outside 0..1, EV outside range, nonfinite exposure-scaled RGB; WGSL requires host validation",
+  "steps": [
+    "validate",
+    "max RGB with zero",
+    "multiply RGB by exp2(exposure_ev)",
+    "cap exposed RGB at 65504 to bound intermediate arithmetic",
+    "Rec.709 to Rec.2020",
+    "AgX inset",
+    "log2(max(channel, 1e-10))",
+    "clamp((log2 - min_ev)/(max_ev - min_ev), 0, 1)",
+    "contrast polynomial in specified power order",
+    "AgX outset",
+    "pow(max(channel, 0), 2.2)",
+    "Rec.2020 to Rec.709",
+    "clamp RGB 0..1",
+    "optional IEC sRGB OETF once",
+    "copy alpha unchanged"
+  ],
+  "look": "NONE",
+  "log_floor": 1e-10,
+  "exposed_rgb_cap": 65504,
+  "min_ev": -12.47393,
+  "max_ev": 4.026069,
+  "linearize_power": 2.2,
+  "polynomial": "-17.86*x6*x + 78.01*x6 - 126.7*x4*x + 92.06*x4 - 28.72*x2*x + 4.361*x2 - 0.1718*x + 0.002857; x2=x*x; x4=x2*x2; x6=x4*x2",
+  "matrix_convention": "row-major arrays; column RGB vectors; (m00*r + m01*g) + m02*b",
+  "matrices": {
+    "rec709_to_rec2020": [
+      [
+        0.627507389,
+        0.329277724,
+        0.0433038622
+      ],
+      [
+        0.0691077262,
+        0.919504464,
+        0.0113590918
+      ],
+      [
+        0.0163964797,
+        0.0880243331,
+        0.895513475
+      ]
+    ],
+    "inset": [
+      [
+        0.856627153315983,
+        0.0951212405381588,
+        0.0482516061458583
+      ],
+      [
+        0.137318972929847,
+        0.761241990602591,
+        0.101439036467562
+      ],
+      [
+        0.11189821299995,
+        0.0767994186031903,
+        0.811302368396859
+      ]
+    ],
+    "outset": [
+      [
+        1.12710059,
+        -0.110606641,
+        -0.0164939389
+      ],
+      [
+        -0.141329765,
+        1.15782368,
+        -0.016493937
+      ],
+      [
+        -0.141329765,
+        -0.110606641,
+        1.25193644
+      ]
+    ],
+    "rec2020_to_rec709": [
+      [
+        1.66021347,
+        -0.58756429,
+        -0.0728275776
+      ],
+      [
+        -0.124552041,
+        1.13294613,
+        -0.00834833086
+      ],
+      [
+        -0.0181550235,
+        -0.100604787,
+        1.11883187
+      ]
+    ]
+  },
+  "srgb": {
+    "linear_break": 0.0031308,
+    "linear_slope": 12.92,
+    "power": 0.4166666666666667,
+    "scale": 1.055,
+    "offset": 0.055
+  },
+  "layer_filter": {
+    "recipe": "projected-layer-filter-v1",
+    "start_pixels": 2,
+    "end_pixels": 4,
+    "footprint_diagonal_factor": 1.4142135623730951,
+    "footprint_floor_mm": 1e-12,
+    "equation": "pixels=pitch_mm*abs(view_cosine)/(sqrt(2)*max(pixel_footprint_mm,1e-12)); t=clamp((pixels-2)/2,0,1); gain=t*t*(3-2*t)"
+  }
+}
