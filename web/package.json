@@ -1,0 +1,37 @@
+{
+  "name": "turninator-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-based Turninator: local STL/G-code print studio rendered on the user's GPU",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "clipper-lib": "6.4.2",
+    "earcut": "3.2.4",
+    "gifenc": "1.0.3",
+    "mediabunny": "1.61.4",
+    "oidn-web": "0.5.0",
+    "three": "0.186.1",
+    "three-gpu-pathtracer": "0.0.27",
+    "three-mesh-bvh": "0.9.16"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@tsconfig/svelte": "5.0.8",
+    "@types/node": "22.20.5",
+    "@types/three": "0.186.0",
+    "playwright": "1.64.1",
+    "svelte": "5.57.2",
+    "svelte-check": "4.7.6",
+    "typescript": "6.0.3",
+    "vite": "8.3.4",
+    "vitest": "5.0.4"
+  }
+}

@@ -1,0 +1,27 @@
+// Path-traced viewport preview check. Usage: node tools/ptpreview.mjs [file] [tag]
+import { chromium } from 'playwright';
+import { resolve } from 'node:path';
+const file = resolve(process.argv[2] ?? '../test-models/spiral egg - A.stl');
+const tag = process.argv[3] ?? 'ptpreview';
+const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11'] });
+const page = await browser.newPage({ viewport: { width: 1600, height: 950 } });
+page.on('console', (m) => { if (m.type() === 'error') console.log('[console]', m.text().slice(0, 300)); });
+page.on('pageerror', (e) => console.log('[pageerror]', e.message));
+await page.goto('http://localhost:5199/');
+await page.setInputFiles('input[type=file]', file);
+await page.waitForFunction(() => /triangles|beads/.test(document.querySelector('.status')?.textContent ?? ''), null, { timeout: 120000 });
+await page.waitForFunction(() => !document.querySelector('button[title^="Progressive"]')?.hasAttribute('disabled'));
+const t = Date.now();
+await page.click('button[title^="Progressive"]');
+await page.waitForFunction(() => { const m = /(\d+) spp/.exec(document.querySelector('.ptbadge')?.textContent ?? ''); return (m && Number(m[1]) >= 64) || /error/.test(document.querySelector('.ptbadge')?.textContent ?? ''); }, null, { timeout: 300000, polling: 500 });
+console.log('64 spp after', Date.now() - t, 'ms |', await page.textContent('.ptbadge'));
+await page.screenshot({ path: `test-results/${tag}-1.png` });
+const box = await page.locator('.stage').boundingBox();
+await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+await page.mouse.down();
+await page.mouse.move(box.x + box.width / 2 + 150, box.y + box.height / 2 - 40, { steps: 10 });
+await page.mouse.up();
+await page.waitForTimeout(3000);
+console.log('after orbit:', await page.textContent('.ptbadge'));
+await page.screenshot({ path: `test-results/${tag}-2.png` });
+await browser.close();

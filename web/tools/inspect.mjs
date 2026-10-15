@@ -1,0 +1,30 @@
+// Captures section-plane and see-through viewport screenshots.
+// Usage: node tools/inspect.mjs [stl]
+import { chromium } from 'playwright';
+import { resolve } from 'node:path';
+const stl = resolve(process.argv[2] ?? '../test-models/Deck Post Jig.stl');
+const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11'] });
+const page = await browser.newPage({ viewport: { width: 1600, height: 950 } });
+const logs = [];
+page.on('console', (m) => { if (m.type() === 'error') logs.push(m.text().slice(0, 300)); });
+page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
+await page.goto('http://localhost:5199/');
+await page.setInputFiles('input[type=file]', stl);
+await page.waitForFunction(() => /triangles|beads/.test(document.querySelector('.status')?.textContent ?? ''));
+console.log(await page.textContent('.status'));
+await page.click('text=Iso');
+await page.waitForTimeout(400);
+const canvas = page.locator('canvas[data-testid=viewport]');
+await canvas.screenshot({ path: 'test-results/inspect-0-plain.png' });
+await page.getByLabel('Section plane').check();
+await page.waitForTimeout(400);
+await canvas.screenshot({ path: 'test-results/inspect-1-section.png' });
+await page.getByLabel('Section plane').uncheck();
+await page.getByLabel('See-through (X-ray)').check();
+await page.waitForTimeout(600);
+await canvas.screenshot({ path: 'test-results/inspect-2-xray.png' });
+await page.getByLabel('Section plane').check();
+await page.waitForTimeout(400);
+await canvas.screenshot({ path: 'test-results/inspect-3-xray-section.png' });
+console.log(logs.filter((l) => !l.includes('404')).join('\n') || 'no errors');
+await browser.close();

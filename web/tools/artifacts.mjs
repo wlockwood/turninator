@@ -1,0 +1,24 @@
+// Reproduce viewport shading artifacts with AO / shadow variants.
+import { chromium } from 'playwright';
+import { resolve } from 'node:path';
+const stl = resolve(process.argv[2] ?? '../test-models/Arctic Nova Pro Cap USB Passthrough.stl');
+const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11'] });
+const page = await browser.newPage({ viewport: { width: 1600, height: 950 } });
+page.on('pageerror', (e) => console.log('[pageerror]', e.message));
+await page.goto('http://localhost:5199/');
+await page.setInputFiles('input[type=file]', stl);
+await page.waitForFunction(() => /triangles/.test(document.querySelector('.status')?.textContent ?? ''));
+await page.click('text=Dark');
+await page.click('button.swatch[title="Translucent PETG"]').catch(() => {});
+await page.getByRole('button', { name: 'Iso', exact: true }).click();
+await page.waitForTimeout(600);
+const canvas = page.locator('canvas[data-testid=viewport]');
+const shot = async (tag) => { await page.waitForTimeout(400); await canvas.screenshot({ path: `test-results/art-${tag}.png` }); };
+await shot('default');
+await page.evaluate(() => { const s = window.__turninator.settings.studio; s.ao = false; });
+await shot('noao');
+await page.evaluate(() => { const s = window.__turninator.settings.studio; s.ao = true; s.shadows = false; });
+await shot('noshadow');
+await page.evaluate(() => { const s = window.__turninator.settings.studio; s.ao = false; s.shadows = false; });
+await shot('neither');
+await browser.close();
