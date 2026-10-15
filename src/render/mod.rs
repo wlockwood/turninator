@@ -14,3 +14,4 @@ pub mod geometry;
 mod ink;
 pub mod materials;
 pub mod prepared;
+pub mod wgpu_studio;
