@@ -8,3 +8,6 @@ pub mod sequence;
 pub mod worker;
 pub use selection::{BackendId, BackendQuality, RenderSelection, RendererPreferences};
 pub use worker::{ToolPaths, WorkerClient};
+pub mod color;
+pub mod materials;
+pub mod geometry;

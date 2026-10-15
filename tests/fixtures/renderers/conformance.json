@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "geometry": {
+    "relative_error_max": 1e-05,
+    "length_absolute_floor_mm": 0.0001,
+    "area_absolute_floor_mm2": 0.0001,
+    "large_coordinates": "Include the explicitly calculated f32 coordinate ULP; never repair topology by tolerance.",
+    "large_coordinate_fixture": {
+      "coordinate_mm": 1000000,
+      "f32_ulp_mm": 0.0625
+    }
+  },
+  "diagnostic_mask": {
+    "width": 512,
+    "height": 512,
+    "boundary_distance_pixels_max": 1,
+    "intersection_over_union_min": 0.995,
+    "lost_hole_allowed": false,
+    "lost_disconnected_strand_allowed": false,
+    "fixtures": [
+      {
+        "name": "cube",
+        "mesh": "cube-10mm.mesh.bin",
+        "expected_mask": "cube-mask-512.png",
+        "foreground_pixels": 102400
+      },
+      {
+        "name": "hollow",
+        "mesh": "hollow-10mm.mesh.bin",
+        "expected_mask": "hollow-mask-512.png",
+        "foreground_pixels": 86016
+      }
+    ],
+    "camera": {
+      "position_mm": [
+        5,
+        -25,
+        5
+      ],
+      "target_mm": [
+        5,
+        5,
+        5
+      ],
+      "up": [
+        0,
+        0,
+        1
+      ],
+      "projection": {
+        "kind": "orthographic",
+        "vertical_span_mm": 16
+      }
+    },
+    "sampling": "Pixel centers; occupied outer square [96,416) x [96,416), hollow void [192,320) x [192,320). White is modeled geometry; black is background. Use unlit opaque geometry with no floor, ink, tone map or AA dilation. Classification uses any nonzero geometry coverage before one-pixel edge comparison."
+  },
+  "cpu_transfer": {
+    "code_value_error_max": 1,
+    "output": "RGBA8 top row first display-encoded sRGB straight alpha",
+    "zero_alpha_rgb": 0
+  },
+  "exact": [
+    "byte_count",
+    "index_coverage",
+    "range_coverage",
+    "frame_count",
+    "whole_layer_count"
+  ],
+  "layer_pitch": {
+    "physical_change_allowed": false,
+    "closeup_crest_spacing_error_pixels_max": 1,
+    "camera": "fixed"
+  }
+}
