@@ -62,6 +62,31 @@ class MeshTests(unittest.TestCase):
 
 
 class SceneTests(unittest.TestCase):
+    def test_studio_floor_retains_backdrop_coverage_without_oversized_faces(self):
+        for extent in (0.001, 0.256, 10):
+            with self.subTest(extent=extent):
+                vertices, faces = scene.studio_floor_mesh(extent)
+                self.assertEqual(min(v[0] for v in vertices), -100 * extent)
+                self.assertEqual(max(v[0] for v in vertices), 100 * extent)
+                self.assertEqual(min(v[1] for v in vertices), -100 * extent)
+                self.assertEqual(max(v[1] for v in vertices), 100 * extent)
+                self.assertTrue(all(v[2] == -0.00001 for v in vertices))
+                area = 0
+                edges = {}
+                for face in faces:
+                    a, b, c, d = [vertices[i] for i in face]
+                    signed_area = (b[0]-a[0]) * (d[1]-a[1]) - (b[1]-a[1]) * (d[0]-a[0])
+                    self.assertGreater(signed_area, 0)
+                    area += signed_area
+                    for start, end in zip(face, face[1:] + face[:1]):
+                        self.assertLessEqual(math.dist(vertices[start], vertices[end]), extent * 16)
+                        key = tuple(sorted((start, end)))
+                        edges[key] = edges.get(key, 0) + 1
+                self.assertAlmostEqual(area, (200 * extent)**2, delta=(200 * extent)**2 * 1e-12)
+                self.assertTrue(all(count in (1, 2) for count in edges.values()))
+                self.assertEqual(sum(count == 1 for count in edges.values()), 64)
+                self.assertLessEqual(len(faces), 512)
+
     def test_section_contract_requires_physical_plane(self):
         valid={"axis":0,"position_mm":2.5,"keep_positive":True,"cap":True}
         scene.validate_section(valid)

@@ -656,6 +656,22 @@ def probe_devices():
             "cycles_backend": "OPTIX" if optix else None, "devices": devices}
 
 
+def studio_floor_mesh(extent):
+    """Retain the broad backdrop without giant EEVEE shadow-receiver faces."""
+    # A single 200-extent quad produces horizontal shadow bands in EEVEE.
+    # Keep its coverage for camera pans, but split it into 12.5-extent cells.
+    cells = 16
+    vertices = [((x / cells * 200 - 100) * extent,
+                 (y / cells * 200 - 100) * extent, -0.00001)
+                for y in range(cells + 1) for x in range(cells + 1)]
+    faces = []
+    for y in range(cells):
+        for x in range(cells):
+            a = y * (cells + 1) + x
+            faces.append((a, a + 1, a + cells + 2, a + cells + 1))
+    return vertices, faces
+
+
 def build_scene(spec, engine, size, samples, transparent, width=None, height=None):
     import bpy
     from mathutils import Euler, Vector, Matrix
@@ -810,9 +826,12 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         pixel_mm = spec.get("camera", {}).get("ortho_span_mm", extent * 1000) / scene.render.resolution_y
         add_design_edges(vertices, triangles, points, pixel_mm, scene)
     if not transparent and studio != "diagram":
-        bpy.ops.mesh.primitive_plane_add(size=extent * 200, location=(0, 0, -0.00001))
-        floor = bpy.context.object
-        floor.name = "StudioFloor"
+        floor_mesh = bpy.data.meshes.new("StudioFloorGeometry")
+        floor_vertices, floor_faces = studio_floor_mesh(extent)
+        floor_mesh.from_pydata(floor_vertices, [], floor_faces)
+        floor_mesh.update()
+        floor = bpy.data.objects.new("StudioFloor", floor_mesh)
+        scene.collection.objects.link(floor)
         mat = bpy.data.materials.new("StudioFloorMaterial")
         mat.use_nodes = True
         mat.node_tree.nodes.get("Principled BSDF").inputs["Base Color"].default_value = (0.025, 0.03, 0.04, 1) if studio == "dark" else (0.18, 0.20, 0.24, 1)
