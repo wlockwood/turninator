@@ -1,3 +1,4 @@
+use super::help::{self, HelpResponse};
 use crate::export::{OutputFormat, VideoCodec};
 use eframe::egui;
 
@@ -7,7 +8,9 @@ pub(super) fn build_up_checkbox(
     mut timeline: Option<&mut crate::animation::Timeline>,
 ) -> egui::Response {
     let mut build = *enabled || timeline.as_ref().is_some_and(|timeline| timeline.buildup);
-    let response = ui.checkbox(&mut build, "Export build-up animation");
+    let response = ui
+        .checkbox(&mut build, "Export build-up animation")
+        .help(help::BUILD_UP);
     if response.changed() {
         *enabled = build;
         if let Some(timeline) = &mut timeline {
@@ -32,6 +35,11 @@ pub(super) fn layer_settings(
                 ui.label(label);
                 edited |= ui
                     .add(egui::DragValue::new(value).speed(0.01).range(0.02..=2.))
+                    .help(if label.starts_with("First") {
+                        help::FIRST_LAYER
+                    } else {
+                        help::LAYER_HEIGHT
+                    })
                     .changed();
             });
         }
@@ -50,10 +58,11 @@ pub(super) fn layer_settings(
                 egui::Slider::new(&mut scene.groove_depth_mm, 0.0..=max_groove)
                     .text("Groove depth (mm)"),
             )
+            .help(help::GROOVE)
             .changed();
     }
     scene.print_settings_edited |= edited;
-    if ui.button("Reset print defaults").clicked() {
+    if ui.button("Reset print defaults").help("Restore this material's default layer heights and groove depth, and clear explicit adaptive boundaries. The source file is unchanged.").clicked() {
         scene.reset_print_settings();
     }
 }
@@ -81,9 +90,11 @@ impl OutputEditor<'_> {
                     OutputFormat::Png,
                     OutputFormat::FourView,
                 ] {
-                    ui.selectable_value(self.format, format, format.label());
+                    ui.selectable_value(self.format, format, format.label())
+                        .help(help::encoding(format));
                 }
-            });
+            })
+            .help(help::ENCODING);
         if *self.format == OutputFormat::Mp4 {
             egui::ComboBox::from_label("MP4 codec")
                 .selected_text(if *self.codec == VideoCodec::Av1 {
@@ -92,9 +103,9 @@ impl OutputEditor<'_> {
                     "H.264"
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(self.codec, VideoCodec::H264, "H.264");
-                    ui.selectable_value(self.codec, VideoCodec::Av1, "AV1");
-                });
+                    ui.selectable_value(self.codec, VideoCodec::H264, "H.264").help("A widely supported video format and a good default for sharing. Uses the configured FFmpeg H.264 encoder.");
+                    ui.selectable_value(self.codec, VideoCodec::Av1, "AV1").help("An alternative video codec that can give smaller files. Encoding can take longer and some players may not support it. Requires AV1 support in your FFmpeg.");
+                }).help("Choose the codec inside the MP4 file. H.264 favors broad compatibility; AV1 can reduce file size but needs a compatible encoder and player. Unavailable codecs produce an error rather than silently switching.");
         }
         let (engine, size, samples) = if self.format.animated() {
             (
@@ -108,9 +119,9 @@ impl OutputEditor<'_> {
         egui::ComboBox::from_label("Renderer")
             .selected_text(engine.as_str())
             .show_ui(ui, |ui| {
-                ui.selectable_value(engine, "eevee".into(), "EEVEE (fast)");
-                ui.selectable_value(engine, "cycles".into(), "Cycles / OptiX");
-            });
+                ui.selectable_value(engine, "eevee".into(), "EEVEE (fast)").help("Fast Blender rendering for lighting, color and layer-detail checks. Transmission and fine shadows are approximate.");
+                ui.selectable_value(engine, "cycles".into(), "Cycles / OptiX").help("Trace light for more realistic reflections, shadows and resin. Requires a supported NVIDIA OptiX GPU; there is no silent CPU fallback.");
+            }).help(help::RENDERER);
         ui.horizontal(|ui| {
             ui.label(if *self.format == OutputFormat::FourView {
                 "Sheet pixels"
@@ -123,14 +134,17 @@ impl OutputEditor<'_> {
                 64
             };
             *size = (*size).clamp(minimum, 8000);
-            ui.add(egui::DragValue::new(size).range(minimum..=8000).speed(64));
+            ui.add(egui::DragValue::new(size).range(minimum..=8000).speed(64)).help(if *self.format == OutputFormat::FourView {
+                "Width and height of the complete sheet, in pixels, from 256 to 8000. More pixels make small labels and edges clearer, but use more render time and storage."
+            } else { "Output height and per-view width, in pixels, from 64 to 8000. Paired sections are twice as wide. Doubling this value creates roughly four times as many pixels, increasing render time and storage." });
         });
         ui.horizontal(|ui| {
             ui.label("Samples");
-            ui.add(egui::DragValue::new(samples).range(1..=4096));
+            ui.add(egui::DragValue::new(samples).range(1..=4096))
+                .help(help::SAMPLES);
         });
         if self.format.supports_transparency() {
-            ui.checkbox(self.transparent, "Transparent background");
+            ui.checkbox(self.transparent, "Transparent background").help("Save empty background pixels with an alpha channel instead of a studio floor. Useful for placing the PNG over another background. Material transparency is controlled separately by Resin clarity.");
         }
         if *self.format == OutputFormat::FourView {
             ui.small("TOP / ISO above FRONT / RIGHT, with fixed views and studio.");

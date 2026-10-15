@@ -1,5 +1,6 @@
 //! Native studio. Import and rendering run independently of the UI thread.
 mod controls;
+mod help;
 use crate::{
     Result,
     animation::{CameraKeyframe, Easing, Timeline, Transition, TurntableTiming},
@@ -20,6 +21,7 @@ use crate::{
     },
 };
 use eframe::egui;
+use help::HelpResponse;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -1274,7 +1276,7 @@ impl Studio {
     }
     fn timeline_controls(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("Camera keyframes and motion", |ui| {
-            if ui.checkbox(&mut self.timeline_enabled, "Use timeline for GIF / MP4").changed() {
+            if ui.checkbox(&mut self.timeline_enabled, "Use timeline for GIF / MP4").help("Animate the camera between recorded views instead of using the basic turntable controls. The timeline sets clip duration and can also rotate the model or reveal deposited layers.").changed() {
                 self.timeline_playing = false;
                 self.timeline_angle = 0.;
                 if self.timeline_enabled && self.timeline.keyframes.len() == 1 {
@@ -1283,16 +1285,16 @@ impl Studio {
                 self.changed();
             }
             if !self.timeline_enabled { return; }
-            ui.add(egui::DragValue::new(&mut self.timeline.duration_seconds).range(0.05..=500.).speed(0.1).suffix(" seconds"));
-            ui.checkbox(&mut self.timeline.looping, "Close camera path into a loop");
-            ui.checkbox(&mut self.timeline.turntable, "Rotate the model too");
+            ui.add(egui::DragValue::new(&mut self.timeline.duration_seconds).range(0.05..=500.).speed(0.1).suffix(" seconds")).help("Total camera-animation duration in seconds. Export uses 20 fps, rounded to the nearest frame. All key times must fit within this duration.");
+            ui.checkbox(&mut self.timeline.looping, "Close camera path into a loop").help("Return the camera to its first recorded view before the clip repeats. Leave time after the last key for a closing transition, or finish with a matching camera; incompatible endpoints are rejected.");
+            ui.checkbox(&mut self.timeline.turntable, "Rotate the model too").help("Add one full model rotation over the camera timeline while lights stay fixed. Camera motion and deposited-layer build-up can run at the same time.");
             let deposited = self.model.as_ref().is_some_and(|m| !m.groups.is_empty());
             ui.small("20 fps. Set a time, orbit/pan to compose a view, then record it. Transition settings belong to the segment leaving each key.");
-            let scrub = ui.add(egui::Slider::new(&mut self.timeline_time, 0.0..=self.timeline.duration_seconds).text("Time (s)"));
+            let scrub = ui.add(egui::Slider::new(&mut self.timeline_time, 0.0..=self.timeline.duration_seconds).text("Time (s)")).help("Scrub this camera path in seconds to preview the camera and deposited stage in native inspection. Scrubbing pauses playback; it does not change clip length or key times.");
             let mut sample = scrub.changed();
             if sample { self.timeline_playing = false; }
             ui.horizontal(|ui| {
-                if ui.button("Record this view").clicked() {
+                if ui.button("Record this view").help("Store the current camera at the selected time, including pan, zoom and projection. Recording at an existing key time replaces that view. Transition and easing belong to the segment leaving a key.").clicked() {
                     let key = CameraKeyframe { time_seconds: self.timeline_time, camera: self.camera.clone(), ..Default::default() };
                     if let Some(existing) = self.timeline.keyframes.iter_mut().find(|k| (k.time_seconds - self.timeline_time).abs() < 1e-6) {
                         existing.camera = key.camera;
@@ -1301,14 +1303,14 @@ impl Studio {
                         self.timeline.keyframes.sort_by(|a,b| a.time_seconds.total_cmp(&b.time_seconds));
                     }
                 }
-                if ui.button(if self.timeline_playing { "Pause" } else { "Play" }).clicked()
+                if ui.button(if self.timeline_playing { "Pause" } else { "Play" }).help("Play or pause this camera path in native inspection. This previews camera motion without rendering a file; exported GIF and MP4 clips use the same sampled path.").clicked()
                     && self.timeline.validate().is_ok() {
                         self.timeline_playing = !self.timeline_playing;
                         self.buildup_playing = false;
                         if self.timeline_time >= self.timeline.duration_seconds { self.timeline_time = 0.; }
                         sample = self.timeline_playing;
                 }
-                if ui.button("Reset motion").clicked() {
+                if ui.button("Reset motion").help("Replace the authored camera path with one key at the current view and the default duration. This removes the existing keys and their transition settings.").clicked() {
                     self.timeline = Timeline { keyframes: vec![CameraKeyframe {camera:self.camera.clone(), ..Default::default()}], ..Default::default() };
                     self.timeline_time = 0.;
                     self.timeline_angle = 0.;
@@ -1322,25 +1324,25 @@ impl Studio {
             for (index,key) in self.timeline.keyframes.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
                     ui.collapsing(format!("View {} • {:.2} s", index+1,key.time_seconds), |ui| {
-                        if index > 0 { ui.add(egui::DragValue::new(&mut key.time_seconds).range(0.001..=self.timeline.duration_seconds).speed(0.05).suffix(" s")); }
+                        if index > 0 { ui.add(egui::DragValue::new(&mut key.time_seconds).range(0.001..=self.timeline.duration_seconds).speed(0.05).suffix(" s")).help("Time when the camera reaches this recorded view, in seconds. Keep key times strictly increasing and within the clip duration. The first key stays at zero; changing this value moves the key, not the total clip length."); }
                         ui.small(format!("Yaw {:.1}° • elevation {:.1}° • target {:.1?}",key.camera.yaw_degrees,key.camera.pitch_degrees,key.camera.target_mm));
                         if index + 1 < key_count || self.timeline.looping && key.time_seconds < self.timeline.duration_seconds {
                         egui::ComboBox::from_label("Outgoing motion").selected_text(format!("{:?}",key.transition)).show_ui(ui,|ui|{
-                            ui.selectable_value(&mut key.transition,Transition::Orbit,"Orbit / pan");
-                            ui.selectable_value(&mut key.transition,Transition::Spiral,"Spiral");
-                        });
-                        if key.transition == Transition::Spiral { ui.add(egui::DragValue::new(&mut key.spiral_turns).range(-100.0..=100.).speed(1.).max_decimals(0).suffix(" whole turns")); }
+                            ui.selectable_value(&mut key.transition,Transition::Orbit,"Orbit / pan").help("Take the shortest yaw path to the next camera while interpolating elevation, pan and zoom. Use Spiral to add complete camera revolutions.");
+                            ui.selectable_value(&mut key.transition,Transition::Spiral,"Spiral").help("Add signed whole camera revolutions while moving toward the next view. The turn count applies to the segment leaving this key and can approach a top or bottom view.");
+                        }).help("Choose how the camera leaves this key for the next one. Orbit/pan takes the shortest yaw path; Spiral adds whole revolutions while changing view.");
+                        if key.transition == Transition::Spiral { ui.add(egui::DragValue::new(&mut key.spiral_turns).range(-100.0..=100.).speed(1.).max_decimals(0).suffix(" whole turns")).help("Extra whole camera revolutions before the next view, from -100 to 100. Positive and negative values reverse the spiral direction. Whole turns let the camera meet its recorded endpoint."); }
                         egui::ComboBox::from_label("Easing").selected_text(format!("{:?}",key.easing)).show_ui(ui,|ui|{
-                            ui.selectable_value(&mut key.easing,Easing::Linear,"Linear");
-                            ui.selectable_value(&mut key.easing,Easing::SmoothStep,"Ease in / out");
-                        });
+                            ui.selectable_value(&mut key.easing,Easing::Linear,"Linear").help("Move at a constant rate through this transition, without slowing at its ends.");
+                            ui.selectable_value(&mut key.easing,Easing::SmoothStep,"Ease in / out").help("Start and finish this transition gently, moving faster through the middle. Duration stays the same.");
+                        }).help("Control how quickly this camera transition starts and ends. Linear has no easing; Ease in/out slows at both ends.");
                         }
                         ui.horizontal(|ui| {
-                            if ui.small_button("Load view").clicked() { recall = Some((key.camera.clone(),key.time_seconds)); }
-                            if ui.small_button("Replace with current view").clicked() { key.camera=self.camera.clone(); }
-                            if index>0 && ui.small_button("Remove").clicked() { remove=Some(index); }
+                            if ui.small_button("Load view").help("Move the native camera to this recorded key and set the time slider to its time. This does not overwrite the stored key.").clicked() { recall = Some((key.camera.clone(),key.time_seconds)); }
+                            if ui.small_button("Replace with current view").help("Overwrite this key with the camera currently shown in native inspection, keeping its time and outgoing motion settings.").clicked() { key.camera=self.camera.clone(); }
+                            if index>0 && ui.small_button("Remove").help("Remove this recorded camera key. The first key stays at time zero and cannot be removed.").clicked() { remove=Some(index); }
                         });
-                    });
+                    }).help("Inspect or edit this recorded camera key. Times must increase, with the first key at zero; outgoing settings affect the transition to the following view.");
                 });
             }
             if let Some(index)=remove { self.timeline.keyframes.remove(index); }
@@ -1355,7 +1357,7 @@ impl Studio {
             else if let Ok(frames)=self.timeline.frame_count() { ui.small(format!("{frames} frames • {:.2} s",self.timeline.duration_seconds)); }
             if sample { self.sample_timeline(); }
             if deposited && (self.timeline.buildup || self.export_buildup) { ui.small("Build-up reveals complete deposited layers; it does not reproduce machine time, nozzle motion, or material flow."); }
-        });
+        }).help("Record camera views at chosen times and define the motion between them. Enable the timeline to replace basic turntable timing for GIF or MP4.");
     }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let preview_options_before = (self.preview_engine().to_owned(), self.transparent);
@@ -1396,7 +1398,7 @@ impl Studio {
                 for feature in features {
                     ui.label(feature);
                 }
-            });
+            }).help("Review import assumptions, unsupported-feature warnings, and the tools/features found in this source file.");
         }
         let before = serde_json::to_string(&self.scene).unwrap_or_default();
         let import_before = serde_json::to_string(&self.scene.import).unwrap_or_default();
@@ -1407,9 +1409,9 @@ impl Studio {
                 .selected_text(material_name(&material))
                 .show_ui(ui, |ui| {
                     for value in ["matte_pla", "silk_pla", "glossy_plastic", "clay", "resin"] {
-                        ui.selectable_value(&mut material, value.into(), material_name(value));
+                        ui.selectable_value(&mut material, value.into(), material_name(value)).help(help::material(value));
                     }
-                });
+                }).help("Choose a surface finish. Explicitly edited layer settings are preserved; choosing Resin selects Cycles for rendering.");
             if material != self.scene.material_preset {
                 self.scene.select_material(&material);
                 if material == "resin" {
@@ -1418,16 +1420,16 @@ impl Studio {
                 }
             }
             if !beads || self.scene.color_mode == "uniform" {
-                ui.color_edit_button_rgb(&mut self.scene.color);
+                ui.color_edit_button_rgb(&mut self.scene.color).help("Choose the base surface color. This applies when color mapping is Uniform; mapped G-code paths use the print palette.");
             }
             if self.model.as_ref().is_some_and(|m| !m.groups.is_empty()) {
                 egui::ComboBox::from_label("Color mapping")
                     .selected_text(&self.scene.color_mode)
                     .show_ui(ui, |ui| {
                         for mode in ["uniform", "tool", "feature"] {
-                            ui.selectable_value(&mut self.scene.color_mode, mode.into(), mode);
+                            ui.selectable_value(&mut self.scene.color_mode, mode.into(), mode).help(match mode { "tool" => "Assign colors by G-code tool number; edit the referenced swatches in Print palette.", "feature" => "Assign colors by feature tags from file comments, such as walls and infill. Features may share a palette entry.", _ => "Use one base color for the whole model." });
                         }
-                    });
+                    }).help("Use one uniform color, map colors by G-code tool number, or map them by feature labels found in file comments. Only referenced palette entries are shown.");
                 if self.scene.color_mode != "uniform" {
                     ui.collapsing("Print palette", |ui| {
                         let mut used = std::collections::BTreeMap::<
@@ -1448,35 +1450,35 @@ impl Studio {
                         for (index, labels) in used {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(labels.into_iter().collect::<Vec<_>>().join(", "));
-                                ui.color_edit_button_rgb(&mut self.scene.tool_colors[index]);
+                                ui.color_edit_button_rgb(&mut self.scene.tool_colors[index]).help("Choose the color shared by the tools or features listed beside this swatch. This changes rendered and native mapped appearance.");
                             });
                         }
-                    });
+                    }).help("Edit only colors referenced by the loaded paths. Labels identify their tools or features; entries that share a palette color change together.");
                 }
             }
             if self.scene.material_preset != "resin" {
-                ui.add(egui::Slider::new(&mut self.scene.roughness, 0.02..=1.).text("Roughness"));
+                ui.add(egui::Slider::new(&mut self.scene.roughness, 0.02..=1.).text("Roughness")).help("How broad and soft surface reflections are. Lower values look polished; higher values look matte. This changes appearance rather than the source geometry.");
             }
             if !beads && !self.scene.import.stepped_envelope {
-                ui.checkbox(&mut self.scene.layer_appearance, "Show layer appearance");
+                ui.checkbox(&mut self.scene.layer_appearance, "Show layer appearance").help("Shade horizontal print-layer seams onto the original STL surface. Layers stay attached through presentation rotation. This preserves the silhouette and does not reconstruct actual slicer paths.");
             }
             if !beads && self.scene.layer_appearance && !self.scene.import.stepped_envelope {
                 controls::layer_settings(ui, &mut self.scene, true);
             }
             if self.scene.material_preset == "resin" {
-                ui.add(egui::Slider::new(&mut self.scene.resin_clarity, 0.0..=1.).text("Clarity"));
+                ui.add(egui::Slider::new(&mut self.scene.resin_clarity, 0.0..=1.).text("Clarity")).help("Increase how much light passes through Resin and reduce its absorption. Internal surfaces and overlapping beads can affect the result, so use it as an illustration.");
                 ui.add(
                     egui::Slider::new(&mut self.scene.resin_cloudiness, 0.0..=1.)
                         .text("Cloudiness"),
-                );
+                ).help("Make the resin surface scatter reflections and refraction more softly. Lower values look clearer and more polished; higher values look hazier.");
                 ui.small("Resin appearance is approximate; internal voids require real geometry.");
             }
             egui::ComboBox::from_label("Studio")
                 .selected_text(&self.scene.studio_preset)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.scene.studio_preset, "light".into(), "Light");
-                    ui.selectable_value(&mut self.scene.studio_preset, "dark".into(), "Dark");
-                });
+                    ui.selectable_value(&mut self.scene.studio_preset, "light".into(), "Light").help("Use a lighter rendered studio floor, background and ambient illumination.");
+                    ui.selectable_value(&mut self.scene.studio_preset, "dark".into(), "Dark").help("Use a darker rendered studio floor, background and ambient illumination, with the same arranged studio lights.");
+                }).help("Choose the rendered background, floor and ambient illumination. Native lighting is approximate; Render preview shows the Blender result.");
         }
         ui.separator();
         if has_model {
@@ -1488,7 +1490,7 @@ impl Studio {
                     egui::DragValue::new(&mut self.scene.import.millimeters_per_unit)
                         .speed(0.1)
                         .range(0.001..=1000.),
-                );
+                ).help("Convert STL coordinates to millimetres before building the model. Use 1 for a file already in mm or 25.4 for inches. This changes physical size and reimports geometry; G-code uses its own units.");
             });
             }
             if beads {
@@ -1498,37 +1500,37 @@ impl Studio {
                     egui::DragValue::new(&mut self.scene.import.filament_diameter_mm)
                         .speed(0.05)
                         .range(0.1..=10.),
-                );
+                ).help("Filament diameter in millimetres, commonly 1.75. G-code extrusion lengths use this to estimate deposited volume and bead width. It is not the nozzle diameter.");
             });
             }
             if !beads {
             ui.label("Build rotation (changes print layers)");
-            rotation_editor(ui, &mut self.scene.import.build_rotation_degrees);
-            ui.checkbox(&mut self.scene.import.stepped_envelope,"Experimental STL stepped solid");
+            rotation_editor(ui, &mut self.scene.import.build_rotation_degrees, "Change the physical STL build orientation and rebuild its printed layers. The lowest point is placed on the build bed.");
+            ui.checkbox(&mut self.scene.import.stepped_envelope,"Experimental STL stepped solid").help("Replace an STL with a mid-layer stepped approximation using the chosen layer heights. This changes the silhouette, requires a closed solid, and may miss features between samples. The source file is unchanged.");
             if self.scene.import.stepped_envelope { ui.small("Mid-layer approximation changes the silhouette; closed solids only. Features between samples may be missed."); }
             }
             if beads {
             ui.collapsing("G-code interpretation",|ui| {
                 egui::ComboBox::from_label("Firmware").selected_text(&self.scene.import.firmware).show_ui(ui,|ui|{
-                    for mode in ["marlin","klipper"] {ui.selectable_value(&mut self.scene.import.firmware,mode.into(),mode);}
-                });
-                ui.checkbox(&mut self.scene.import.joined_beads,"Join contiguous bead paths");
-                ui.checkbox(&mut self.scene.import.allow_arcs,"Allow planar G2/G3 arcs");
-                if self.scene.import.allow_arcs { ui.add(egui::DragValue::new(&mut self.scene.import.chord_error_mm).range(0.001..=1.).speed(0.001).suffix(" mm arc error")); }
-                ui.checkbox(&mut self.scene.import.allow_tool_changes,"Normalized tool changes");
+                    for mode in ["marlin","klipper"] {ui.selectable_value(&mut self.scene.import.firmware,mode.into(),mode).help(if mode == "klipper" { "Use the supported Klipper interpretation rules. Custom macros and implicit offsets still require preprocessing." } else { "Use the supported Marlin-style interpretation rules. Unsupported motion-affecting commands are rejected." });}
+                }).help("Select the interpretation rules for the supported G-code dialect. Unsupported motion-affecting commands and unresolved printer macros are rejected explicitly.");
+                ui.checkbox(&mut self.scene.import.joined_beads,"Join contiguous bead paths").help("Connect adjacent compatible depositing moves into continuous rounded paths. This reduces end-cap overlaps at joins; separate paths, tools and features remain distinct.");
+                ui.checkbox(&mut self.scene.import.allow_arcs,"Allow planar G2/G3 arcs").help("Interpret supported XY-plane circular arcs and approximate them with short bead segments. Other planes and unsupported arc forms still fail explicitly; set approximation precision below.");
+                if self.scene.import.allow_arcs { ui.add(egui::DragValue::new(&mut self.scene.import.chord_error_mm).range(0.001..=1.).speed(0.001).suffix(" mm arc error")).help("Maximum arc approximation error in millimetres. Smaller values follow supported arcs more closely but create more segments and use more memory."); }
+                ui.checkbox(&mut self.scene.import.allow_tool_changes,"Normalized tool changes").help("Allow tool-selection commands that share one XYZ frame and a global extrusion coordinate. Resolve tool offsets and printer macros before import; this does not simulate independent tool kinematics.");
                 if self.scene.import.allow_tool_changes { ui.small("Tool changes assume shared XYZ / global E coordinates. Printer macros and implicit offsets require preprocessing."); }
                 let mut homing = self.scene.import.homing_position_mm.is_some();
-                if ui.checkbox(&mut homing,"Explicit G28 home position").changed() {self.scene.import.homing_position_mm=homing.then_some([0.;3]);}
-                if let Some(home) = &mut self.scene.import.homing_position_mm {ui.horizontal(|ui|{for (axis,value) in ["X","Y","Z"].into_iter().zip(home) {ui.add(egui::DragValue::new(value).prefix(format!("{axis} ")).speed(0.1));}});}
-            });
+                if ui.checkbox(&mut homing,"Explicit G28 home position").help("Provide the known XYZ position used when interpreting G28 homing commands. Enter coordinates in millimetres; the app never sends commands to a printer.").changed() {self.scene.import.homing_position_mm=homing.then_some([0.;3]);}
+                if let Some(home) = &mut self.scene.import.homing_position_mm {ui.horizontal(|ui|{for (axis,value) in ["X","Y","Z"].into_iter().zip(home) {ui.add(egui::DragValue::new(value).prefix(format!("{axis} ")).speed(0.1)).help(format!("Known {axis}-axis home coordinate in millimetres, used when the G-code issues G28. Enter the machine position explicitly rather than assuming an unknown home."));}});}
+            }).help("Choose the supported dialect and explicitly enable optional path features. This is a bounded geometry preview, not a printer firmware or macro emulator.");
             }
             if beads || self.scene.import.stepped_envelope {
             if beads && self.scene.import.layer_boundaries_mm.is_empty() { ui.small("Layer defaults apply where the file omits HEIGHT metadata."); }
             controls::layer_settings(ui, &mut self.scene, false);
             ui.collapsing("Explicit adaptive layer boundaries",|ui| {
                 ui.label("G-code / stepped STL: mm boundaries, starting at 0");
-                ui.text_edit_multiline(&mut self.adaptive_text);
-                if ui.button("Apply boundaries").clicked() {
+                ui.text_edit_multiline(&mut self.adaptive_text).help("Comma-separated physical layer boundaries in millimetres, starting at 0. Editing this text alone does not rebuild; choose Apply boundaries when ready.");
+                if ui.button("Apply boundaries").help("Validate and rebuild using the comma-separated layer boundaries above. Begin at 0 and use strictly increasing millimetre heights. G-code deposition heights must match the boundaries.").clicked() {
                     let parsed: std::result::Result<Vec<f64>,_> = self.adaptive_text.split(',').map(|v|v.trim().parse::<f64>()).collect();
                     match parsed {
                         Ok(values) => match crate::print::schedule::LayerSchedule::explicit(values.clone()) {
@@ -1538,15 +1540,15 @@ impl Studio {
                         Err(_) => self.error=Some("Enter numeric comma-separated layer boundaries.".into()),
                     }
                 }
-                if ui.button("Use uniform layers / file metadata").clicked() {self.scene.import.layer_boundaries_mm.clear();self.adaptive_text.clear();}
+                if ui.button("Use uniform layers / file metadata").help("Clear the explicit adaptive schedule and return to the layer-height defaults or supported G-code HEIGHT metadata.").clicked() {self.scene.import.layer_boundaries_mm.clear();self.adaptive_text.clear();}
                 ui.small(format!("{} explicit boundaries",self.scene.import.layer_boundaries_mm.len()));
-            });
+            }).help("Define exact layer heights instead of uniform defaults. Enter boundary heights in millimetres, starting with 0 and increasing, for example: 0, 0.2, 0.45, 0.65.");
             }
-        });
+        }).help("Settings that change imported geometry or how physical dimensions are interpreted. Editing these rebuilds the model while leaving the source file unchanged.");
             if !sheet {
                 ui.collapsing("Presentation pose", |ui| {
                     ui.label("Display rotation (keeps print layers)");
-                    rotation_editor(ui, &mut self.scene.display_rotation_degrees);
+                    rotation_editor(ui, &mut self.scene.display_rotation_degrees, "Rotate presentation while keeping the print layers attached. This does not change the original build direction.");
                     if ui
                         .add_enabled(
                             self.model.is_some() && !self.importing,
@@ -1555,7 +1557,7 @@ impl Studio {
                             } else {
                                 "Settle on face…"
                             }),
-                        )
+                        ).help("Click a visible triangle in Native inspection to point its normal down. Click this button again to cancel. This aligns a face rather than simulating stability, and requires a loaded model with no import in progress.")
                         .clicked()
                     {
                         self.settle_face = !self.settle_face;
@@ -1571,7 +1573,7 @@ impl Studio {
                     ui.small(
                 "Uses the chosen triangle's normal; this does not simulate physical stability.",
             );
-                });
+                }).help("Rotate or settle the displayed part while keeping its physical print layers attached. Use STL build rotation to change which direction the layers were printed.");
             }
         }
         if serde_json::to_string(&self.scene).unwrap_or_default() != before {
@@ -1589,7 +1591,7 @@ impl Studio {
         if has_model {
             ui.heading(if sheet { "Inspection camera" } else { "Camera" });
             ui.horizontal(|ui| {
-                if ui.button("Fit").clicked() {
+                if ui.button("Fit").help("Center and zoom the inspection camera so the current displayed model fits. This changes the view, not the physical model size.").clicked() {
                     self.timeline_playing = false;
                     self.fit();
                     self.changed();
@@ -1600,7 +1602,7 @@ impl Studio {
                     ("Top", CanonicalView::Top),
                     ("Iso", CanonicalView::Iso),
                 ] {
-                    if ui.button(label).clicked() {
+                    if ui.button(label).help(format!("Look from the {label} direction and fit the model into the inspection view. Sheet exports keep their fixed four cameras.")).clicked() {
                         self.timeline_playing = false;
                         self.camera.canonical(view);
                         self.fit();
@@ -1609,13 +1611,13 @@ impl Studio {
                 }
             });
             if ui
-                .checkbox(&mut self.camera.orthographic, "Orthographic")
+                .checkbox(&mut self.camera.orthographic, "Orthographic").help("Show parallel edges without perspective shrinking distant features. Turn off for a perspective view. Camera keys in one timeline must use the same projection.")
                 .changed()
             {
                 self.timeline_playing = false;
                 self.changed();
             }
-            ui.checkbox(&mut self.show_edges, "Triangle edges");
+            ui.checkbox(&mut self.show_edges, "Triangle edges").help("Overlay mesh triangle edges in native inspection to reveal tessellation. This overlay is not added to rendered exports.");
             egui::ComboBox::from_label("Inspection")
                 .selected_text(format!("{:?}", self.inspection))
                 .show_ui(ui, |ui| {
@@ -1624,17 +1626,17 @@ impl Studio {
                         InspectionMode::Ghost,
                         InspectionMode::Xray,
                     ] {
-                        ui.selectable_value(&mut self.inspection, mode, format!("{mode:?}"));
+                        ui.selectable_value(&mut self.inspection, mode, format!("{mode:?}")).help(match mode { InspectionMode::Opaque => "Show solid native surfaces with normal depth testing.", InspectionMode::Ghost => "Blend translucent native surfaces to inspect internal structure. Adjust Inspection opacity below.", InspectionMode::Xray => "Reveal native geometry through nearer surfaces. This inspection aid does not change exported material transparency." });
                     }
-                });
+                }).help("Choose how to inspect the native mesh: opaque surfaces, translucent Ghost, or Xray with visible structure through the model. This does not change export materials.");
             if self.inspection != InspectionMode::Opaque {
                 ui.add(
                     egui::Slider::new(&mut self.opacity, 0.02..=0.95).text("Inspection opacity"),
-                );
+                ).help("Set how much of the native model shows through in Ghost or Xray mode. This is an inspection aid; rendered material transparency uses Resin settings.");
             }
             if beads {
                 if ui
-                    .checkbox(&mut self.buildup, "Show printed build-up")
+                    .checkbox(&mut self.buildup, "Show printed build-up").help("Inspect only the G-code layers deposited up to the chosen height. Exports can use this as a fixed stage; progressive build-up instead reveals layers during the clip.")
                     .changed()
                 {
                     self.changed();
@@ -1648,13 +1650,13 @@ impl Studio {
                         .add(
                             egui::Slider::new(&mut self.buildup_height, 0.0..=top)
                                 .text("Printed height (mm)"),
-                        )
+                        ).help("Reveal complete deposited layers up to this physical height in millimetres. The slider snaps visibility to actual layer tops; zero shows an empty build.")
                         .changed()
                     {
                         self.timeline_playing = false;
                         self.changed();
                     }
-                    ui.checkbox(&mut self.buildup_playing, "Play build-up");
+                    ui.checkbox(&mut self.buildup_playing, "Play build-up").help("Cycle deposited height in native inspection to see how the part grows. Export build-up animation creates a file and has its own timing.");
                 }
             }
             ui.small("Drag to orbit • right-drag to pan • wheel to zoom");
@@ -1695,12 +1697,12 @@ impl Studio {
                 ui.horizontal(|ui| {
                     ui.label("Seconds per turn");
                     ui.add(egui::DragValue::new(&mut self.turntable_timing.seconds_per_turn)
-                        .range(0.05..=500.).speed(0.05).max_decimals(3));
+                        .range(0.05..=500.).speed(0.05).max_decimals(3)).help("Seconds for one complete 360-degree model rotation. Lower values rotate faster; higher values rotate slower. This is independent of total clip length.");
                 });
                 ui.horizontal(|ui| {
                     ui.label("Animation length (s)");
                     ui.add(egui::DragValue::new(&mut self.turntable_timing.duration_seconds)
-                        .range(0.05..=500.).speed(0.05).max_decimals(2));
+                        .range(0.05..=500.).speed(0.05).max_decimals(2)).help("Total clip length in seconds, rounded to the nearest 20 fps frame (0.05 s). Total turns equal actual clip length divided by seconds per turn; matching poses render once and are copied in order.");
                 });
                 match (self.turntable_timing.total_turns(), self.turntable_timing.frame_count()) {
                     (Ok(turns), Ok(frames)) => {
@@ -1717,19 +1719,19 @@ impl Studio {
         if has_model && self.output_format.supports_section() {
             ui.collapsing("Section analysis", |ui| {
             let before = (self.section,self.section_axis,self.section_position,self.section_positive,self.section_cap,self.side_by_side);
-            ui.checkbox(&mut self.section, "Show section / export cutaway");
+            ui.checkbox(&mut self.section, "Show section / export cutaway").help("Cut the model on a plane in build coordinates for inspection and export. Enable caps for supported closed meshes, or compare the full model beside the section.");
             if self.section {
-            ui.horizontal(|ui| { ui.label("Build axis"); for (axis, label) in [(0, "X"), (1, "Y"), (2, "Z")] { ui.selectable_value(&mut self.section_axis, axis, label); } });
-            ui.horizontal(|ui| { ui.label("Position (mm)"); ui.add(egui::DragValue::new(&mut self.section_position).speed(0.1)); });
-            ui.checkbox(&mut self.section_positive, "Keep positive side");
-            ui.checkbox(&mut self.section_cap, "Cap closed geometry");
-            ui.checkbox(&mut self.side_by_side, "Full model beside section");
+            ui.horizontal(|ui| { ui.label("Build axis"); for (axis, label) in [(0, "X"), (1, "Y"), (2, "Z")] { ui.selectable_value(&mut self.section_axis, axis, label).help(format!("Cut perpendicular to the {label} build axis. Plane position is measured before presentation rotation.")); } });
+            ui.horizontal(|ui| { ui.label("Position (mm)"); ui.add(egui::DragValue::new(&mut self.section_position).speed(0.1)).help("Cut-plane position in millimetres along the selected build axis, before presentation rotation. Place it inside the part to expose its interior."); });
+            ui.checkbox(&mut self.section_positive, "Keep positive side").help("Keep material at coordinates greater than the cut-plane position along the selected build axis. Turn off to keep the lower-coordinate side.");
+            ui.checkbox(&mut self.section_cap, "Cap closed geometry").help("Fill the cut face when the input is closed and consistently wound. Native cutaways stay uncapped; Blender computes rendered caps and section statistics. Open geometry remains uncapped with an explanation.");
+            ui.checkbox(&mut self.side_by_side, "Full model beside section").help("Place the uncut model beside the cutaway at the same scale. Both panels share animation and deposited stage; output width doubles while height stays the selected pixel size.");
             ui.small("STL sections show the modeled solid. G-code sections preserve deposited beads and voids.");
             ui.small("Native cutaway is uncapped. Reliable caps and area/volume metrics are computed during export.");
             if let Some(analysis) = &self.analysis {ui.label(serde_json::to_string_pretty(analysis).unwrap_or_default());}
             }
             if before != (self.section,self.section_axis,self.section_position,self.section_positive,self.section_cap,self.side_by_side) { self.changed(); }
-        });
+        }).help("Inspect or export a physical cutaway. Closed meshes can provide caps and area/volume estimates; deposited G-code beads retain their gaps.");
         }
         ui.add_enabled_ui(
             self.model.is_some()
@@ -1739,11 +1741,12 @@ impl Studio {
             |ui| {
                 if ui
                     .button(format!("Export {}...", self.output_format.label()))
+                    .help(help::EXPORT)
                     .clicked()
                 {
                     self.pick_export(self.output_format.kind());
                 }
-                if ui.button("Render preview").clicked() {
+                if ui.button("Render preview").help(help::PREVIEW).clicked() {
                     self.start_export(
                         ExportKind::Still,
                         self.data_dir.join(format!("preview-{}.png", self.revision)),
@@ -1753,7 +1756,7 @@ impl Studio {
             },
         );
         if ui
-            .checkbox(&mut self.prefs.auto_preview, "Auto-update rendered preview")
+            .checkbox(&mut self.prefs.auto_preview, "Auto-update rendered preview").help("Refresh the Blender preview after you pause editing the scene or camera. It uses the selected renderer, so disable this while making many changes if rendering is slow.")
             .changed()
         {
             self.save_prefs();
@@ -1770,12 +1773,12 @@ impl Studio {
         egui::Window::new("Tools and storage").open(&mut open).show(ctx, |ui| {
             for (label, path) in [("Blender", &mut self.prefs.tools.blender), ("FFmpeg", &mut self.prefs.tools.ffmpeg), ("FFprobe", &mut self.prefs.tools.ffprobe)] {
                 let mut value = path.to_string_lossy().into_owned();
-                ui.label(label); if ui.text_edit_singleline(&mut value).changed() { *path = PathBuf::from(value); }
+                ui.label(label); if ui.text_edit_singleline(&mut value).help(format!("Full path to the {label} executable on this machine. Blender renders images; FFmpeg encodes animations/videos; FFprobe verifies video output. Save settings to keep this path.")).changed() { *path = PathBuf::from(value); }
             }
             ui.label(format!("Job storage: {}", self.data_dir.display()));
             let mut gb = self.prefs.cache_budget_bytes as f64 / 1073741824.;
-            if ui.add(egui::DragValue::new(&mut gb).range(1.0..=1000.).suffix(" GiB job budget")).changed() { self.prefs.cache_budget_bytes = (gb * 1073741824.) as u64; }
-            if ui.button("Save settings").clicked() { self.save_prefs(); self.status = "Settings saved.".into(); }
+            if ui.add(egui::DragValue::new(&mut gb).range(1.0..=1000.).suffix(" GiB job budget")).help("Maximum retained-job storage in GiB. New jobs are refused when their reserved space exceeds this budget; existing files are not automatically deleted. Remove inactive jobs below to free space.").changed() { self.prefs.cache_budget_bytes = (gb * 1073741824.) as u64; }
+            if ui.button("Save settings").help("Save external-tool paths, preview behavior and storage budget on this machine. These preferences are separate from portable model projects.").clicked() { self.save_prefs(); self.status = "Settings saved.".into(); }
             ui.small("Failed job frames are retained for Retry. Native inspection works without external render tools.");
                 ui.label(format!("Retained jobs: {:.2} GiB", self.cache_usage as f64 / 1073741824.));
                 if self.cache_query_pending || self.cache_action_pending {ui.spinner();}
@@ -1783,10 +1786,10 @@ impl Studio {
                         ui.horizontal_wrapped(|ui| {
                             let state=if record.state=="running" && self.busy.is_none() {"Interrupted"} else {&record.state};
                             ui.label(format!("{} — {}", record.label, state));
-                            if ui.small_button("Folder").clicked() { open_path(&path); }
+                            if ui.small_button("Folder").help("Open this retained job folder in the file explorer to inspect its snapshots, rendered frames and diagnostics.").clicked() { open_path(&path); }
                             let active = self.last_task.as_ref().filter(|_| self.busy.is_some()).map(|t| t.0.job_dir.clone());
-                            if ui.add_enabled(self.busy.is_none() && !self.cache_action_pending,egui::Button::new("Recover / encode")).clicked() {self.recover_job(path.clone());}
-                            if ui.add_enabled(active.as_ref()!=Some(&path) && !self.cache_action_pending,egui::Button::new("Remove job")).clicked() {
+                            if ui.add_enabled(self.busy.is_none() && !self.cache_action_pending,egui::Button::new("Recover / encode")).help("Restore this job from its saved geometry and settings, validate retained frames, and finish rendering or encoding. It uses the saved snapshot rather than the currently loaded model. Wait for active jobs or storage actions to finish.").clicked() {self.recover_job(path.clone());}
+                            if ui.add_enabled(active.as_ref()!=Some(&path) && !self.cache_action_pending,egui::Button::new("Remove job")).help("Delete this inactive job folder and its retained files to free storage. Files outside the job folder stay untouched. A running job cannot be removed.").clicked() {
                                 self.cache_action_pending=true;let root=self.data_dir.join("jobs");let sender=self.sender.clone();let target=path.clone();
                                 thread::spawn(move||{let result=CacheStore::new(root).and_then(|cache|cache.remove_job(&target,active.as_deref())).map_err(|error|error.to_string());
                                     let _=sender.send(Message::RemovedJob(result));});
@@ -1811,12 +1814,12 @@ impl Studio {
                 ui.label(project.source_path.display().to_string());
                 if status == SourceStatus::Changed
                     && ui
-                        .button("Reimport current source with saved settings")
+                        .button("Reimport current source with saved settings").help("Use the changed file at its saved location with the project settings. Geometry may differ from the version the project originally referenced.")
                         .clicked()
                 {
                     self.restore_project(project.clone());
                 }
-                if ui.button("Locate replacement source…").clicked()
+                if ui.button("Locate replacement source…").help("Choose the replacement STL or G-code file for this project, then import it with the saved settings. The selected source file is read without being rewritten.").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Models", &["stl", "gcode", "gco"])
                         .pick_file()
@@ -1825,7 +1828,7 @@ impl Studio {
                     relocated.source_path = path;
                     self.restore_project(relocated);
                 }
-                if ui.button("Dismiss").clicked() {
+                if ui.button("Dismiss").help("Close source recovery and keep the previously accepted model available. The missing or changed source is not replaced.").clicked() {
                     self.dismiss_project_recovery();
                 }
             });
@@ -2457,10 +2460,10 @@ impl eframe::App for Studio {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("Turninator");
-                if ui.button("Open model…").clicked() {
+                if ui.button("Open model…").help("Open an STL or supported plain-text G-code file. Drag-and-drop also works. STL dimensions are assumed to be millimetres unless you change source-unit scale.").clicked() {
                     self.pick_model();
                 }
-                if ui.button("Open project…").clicked() {
+                if ui.button("Open project…").help("Restore a saved .turninator project, including source reference, print settings, camera, output selection and motion. Missing or changed source files offer recovery choices.").clicked() {
                     let sender = self.sender.clone();
                     thread::spawn(move || {
                         let _ = sender.send(Message::OpenProject(
@@ -2474,7 +2477,7 @@ impl eframe::App for Studio {
                     .add_enabled(
                         self.model.is_some() && !self.importing,
                         egui::Button::new("Save project…"),
-                    )
+                    ).help("Save the current source reference and scene/output settings as a .turninator project; the source model is not copied into it. Open a model and finish importing before saving.")
                     .clicked()
                 {
                     let sender = self.sender.clone();
@@ -2489,14 +2492,14 @@ impl eframe::App for Studio {
                 }
                 ui.menu_button("Recent", |ui| {
                     for path in self.prefs.recent_files.clone() {
-                        if ui.button(path.display().to_string()).clicked() {
+                        if ui.button(path.display().to_string()).help(format!("Open this recent model: {}. The source file is read without being rewritten.", path.display())).clicked() {
                             self.restore_camera = false;
                             self.import(path);
                             ui.close();
                         }
                     }
-                });
-                if ui.button("Tools / storage").clicked() {
+                }).help("Reopen a recently imported model. Projects are opened separately with Open project.");
+                if ui.button("Tools / storage").help("Configure Blender, FFmpeg and ffprobe, set the retained-job budget, or inspect, recover and remove cached jobs.").clicked() {
                     self.show_tools = true;
                 }
                 if self.importing {
@@ -2513,8 +2516,8 @@ impl eframe::App for Studio {
                             self.progress.0 as f32 / self.progress.1.max(1) as f32,
                         )
                         .text(&self.progress.2),
-                    );
-                    if ui.button("Cancel").clicked() {
+                    ).help("Progress through the current job. Reused frames advance the count without rendering again; encoding and validation happen after rendering.");
+                    if ui.button("Cancel").help("Stop the active render or encode job. Verified frames already written are retained for Retry; existing published output is preserved on failure.").clicked() {
                         self.render.cancel();
                         self.progress.2 = "Cancelling owned render job…".into();
                     }
@@ -2525,11 +2528,11 @@ impl eframe::App for Studio {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                     if self.busy.is_none()
                         && self.last_task.is_some()
-                        && ui.button("Retry retained job").clicked()
+                        && ui.button("Retry retained job").help("Retry the last failed job using its saved model and settings. Matching verified frames are reused. To render newer scene settings, start a new export instead.").clicked()
                     {
                         self.retry();
                     }
-                    if ui.small_button("Dismiss").clicked() {
+                    if ui.small_button("Dismiss").help("Hide this error message without deleting the retained job. Automatic previews can resume if they are enabled.").clicked() {
                         self.error = None;
                     }
                 });
@@ -2538,16 +2541,16 @@ impl eframe::App for Studio {
             if let Some(output) = &self.last_output {
                 let path = output.path.clone();
                 ui.horizontal(|ui| {
-                    if ui.button("Open saved output").clicked() {
+                    if ui.button("Open saved output").help("Open the last exported image, animation or video in its associated application. MP4 playback uses your external video player.").clicked() {
                         open_path(&path);
                     }
-                    if ui.button("Open output folder").clicked()
+                    if ui.button("Open output folder").help("Open the folder containing the last exported file in the file explorer.").clicked()
                         && let Some(parent) = path.parent()
                     {
                         open_path(parent);
                     }
                     if self.output.is_some() {
-                        ui.checkbox(&mut self.show_output, "Show encoded output");
+                        ui.checkbox(&mut self.show_output, "Show encoded output").help("Switch the right panel between the rendered preview and the last decoded image or GIF output. This changes the display only, not the scene or export settings.");
                     }
                 });
             }
@@ -2567,7 +2570,10 @@ impl eframe::App for Studio {
                 let settings = self.viewport_settings();
                 let response = self
                     .viewport
-                    .show(&mut columns[0], &mut self.camera, &settings);
+                    .show(&mut columns[0], &mut self.camera, &settings)
+                    .help(if self.settle_face {
+                        "Click a visible triangle to align that face downward while keeping the print layers attached. Use Cancel face selection to leave this mode. This aligns the selected face; it does not calculate a stable resting position."
+                    } else { help::NATIVE_VIEW });
                 self.native_rect = Some(response.rect);
                 if self.camera.camera_spec() != before {
                     self.timeline_playing = false;
@@ -2605,7 +2611,7 @@ impl eframe::App for Studio {
                     playback.advance(&ctx);
                     if playback.frames.len() > 1
                         && columns[1]
-                            .checkbox(&mut playback.playing, "Play animation")
+                            .checkbox(&mut playback.playing, "Play animation").help("Play or pause the decoded animation in this panel using its saved frame delays. This does not change export speed or camera keys.")
                             .changed()
                         && playback.playing
                     {
@@ -2613,7 +2619,7 @@ impl eframe::App for Studio {
                     }
                     columns[1].add(egui::Image::new(&playback.texture).fit_to_exact_size(
                         fit_image(playback.texture.size_vec2(), columns[1].available_size()),
-                    ));
+                    )).help("The latest rendered preview or decoded image/GIF output. This display may be scaled to fit; Open saved output shows the full exported file. A stale preview needs refreshing after edits.");
                 } else {
                     columns[1].label(
                         "Render a preview to see the selected material and studio lighting.",
@@ -2658,7 +2664,7 @@ fn material_name(value: &str) -> &str {
         _ => value,
     }
 }
-fn rotation_editor(ui: &mut egui::Ui, rotation: &mut [f64; 3]) {
+fn rotation_editor(ui: &mut egui::Ui, rotation: &mut [f64; 3], purpose: &str) {
     ui.horizontal(|ui| {
         for (label, value) in ["X", "Y", "Z"].into_iter().zip(rotation) {
             ui.add(
@@ -2666,7 +2672,8 @@ fn rotation_editor(ui: &mut egui::Ui, rotation: &mut [f64; 3]) {
                     .speed(1.)
                     .prefix(format!("{label} "))
                     .suffix("°"),
-            );
+            )
+            .help(format!("{label}-axis rotation in degrees. {purpose}"));
         }
     });
 }

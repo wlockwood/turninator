@@ -18,6 +18,8 @@ Configure Blender, FFmpeg and ffprobe in **Tools / storage**. Missing tools leav
 
 Under **Export**, choose **Encoding** first: GIF animation, MP4 video, PNG image or 4-view sheet. Only settings for that output appear. MP4 codec is directly below Encoding for MP4; transparent background appears for PNG. Renderer, pixels and samples belong to the selected output, with separate animation and PNG/sheet preferences retained when switching. Use the **Export** button for that selection. **Render preview** follows its renderer/background and previews the complete layout for sheets.
 
+Hover over any control for guidance on what it changes, units, useful limits and tradeoffs. Disabled actions also provide help, including the conditions needed to use them. The native viewport explains orbit/pan/zoom or face selection according to the current mode.
+
 - GIF defaults: 960 square, 80 frames, 20 fps, four seconds, infinite looping. The studio plays the actual encoded GIF.
 - Basic turntables: with camera timelines and build-up disabled, set **Seconds per turn** and **Animation length (s)** under Export. The studio shows total turns and the actual frame count/duration. For example, 4 seconds per turn over 12 seconds produces 3 turns. Length rounds to the nearest 20 fps frame; fractional turns are supported.
 - PNG defaults: 4096 square, Cycles/OptiX, optional transparent background independent of material transmission.
