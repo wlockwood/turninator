@@ -113,6 +113,9 @@ struct Target {
     row: u32,
 }
 
+#[cfg(test)]
+type SubmissionHook = Box<dyn Fn(&wgpu::Queue) + Send + Sync>;
+
 pub struct WgpuStudio {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -135,6 +138,11 @@ pub struct WgpuStudio {
     shadow: Texture,
     target: Option<Target>,
     uploads: u64,
+    in_flight: AtomicBool,
+    unusable: AtomicBool,
+    completion_timeout: Duration,
+    #[cfg(test)]
+    after_sample_submit: Option<SubmissionHook>,
 }
 
 pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
@@ -552,6 +560,11 @@ impl WgpuStudio {
             shadow,
             target: None,
             uploads: 0,
+            in_flight: AtomicBool::new(false),
+            unusable: AtomicBool::new(false),
+            completion_timeout: Duration::from_secs(120),
+            #[cfg(test)]
+            after_sample_submit: None,
         })
     }
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
@@ -569,6 +582,7 @@ impl WgpuStudio {
         materials: &MaterialSet,
         limits: &RenderLimits,
     ) -> Result<UploadedScene> {
+        self.ensure_idle()?;
         let nt = geometry.mesh.triangles.len();
         let nv = geometry.mesh.positions.len();
         let bytes = (nt as u64)
@@ -729,6 +743,7 @@ impl WgpuStudio {
         resident: u64,
         limits: &RenderLimits,
     ) -> Result<()> {
+        self.ensure_idle()?;
         let (row, _) = self.check_budget(width, height, resident, limits)?;
         if self
             .target
@@ -826,6 +841,32 @@ impl WgpuStudio {
     // independent of either the export actor or egui's device/texture ownership.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
+        &mut self,
+        scene: &RenderSceneSnapshot,
+        frame: &FrameSpec,
+        geometry: &UploadedScene,
+        transparent: bool,
+        resident: u64,
+        limits: &RenderLimits,
+        cancel: &AtomicBool,
+    ) -> Result<(RgbaFrame, Duration, Duration)> {
+        self.ensure_idle()?;
+        let result = self.render_inner(
+            scene,
+            frame,
+            geometry,
+            transparent,
+            resident,
+            limits,
+            cancel,
+        );
+        // Cancellation can arrive between AA submissions. Retire every submitted
+        // allocation before the caller drops this job's upload or starts another.
+        self.wait(&AtomicBool::new(false))?;
+        result
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_inner(
         &mut self,
         scene: &RenderSceneSnapshot,
         frame: &FrameSpec,
@@ -962,7 +1003,11 @@ impl WgpuStudio {
                 &sample_group,
                 sample == 0,
             );
-            self.queue.submit([encoder.finish()]);
+            self.submit(encoder.finish());
+            #[cfg(test)]
+            if let Some(hook) = &self.after_sample_submit {
+                hook(&self.queue);
+            }
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         Self::fullscreen(
@@ -972,7 +1017,7 @@ impl WgpuStudio {
             &accum_group,
             true,
         );
-        self.queue.submit([encoder.finish()]);
+        self.submit(encoder.finish());
         // Complete queued render before measuring readback. Polling is bounded so
         // cancellation can suppress publication while submitted work drains safely.
         self.wait(cancel)?;
@@ -981,22 +1026,47 @@ impl WgpuStudio {
         let image = self.readback(cancel)?;
         Ok((image, render_time, start.elapsed()))
     }
+    fn submit(&self, command: wgpu::CommandBuffer) {
+        self.in_flight.store(true, Ordering::Release);
+        self.queue.submit([command]);
+    }
+    fn ensure_idle(&self) -> Result<()> {
+        if self.unusable.load(Ordering::Acquire) {
+            return Err("studio context is unusable after GPU retirement failure".into());
+        }
+        self.wait(&AtomicBool::new(false))
+    }
+    fn poll(&self) -> Result<()> {
+        if let Err(error) = self.device.poll(wgpu::PollType::Poll) {
+            self.unusable.store(true, Ordering::Release);
+            return Err(error.into());
+        }
+        Ok(())
+    }
     fn wait(&self, cancel: &AtomicBool) -> Result<()> {
+        if self.unusable.load(Ordering::Acquire) {
+            return Err("studio context is unusable after GPU retirement failure".into());
+        }
+        if !self.in_flight.load(Ordering::Acquire) {
+            return check(cancel);
+        }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.queue.on_submitted_work_done(move || {
             let _ = tx.send(());
         });
         let start = Instant::now();
         loop {
-            self.device.poll(wgpu::PollType::Poll)?;
+            if start.elapsed() >= self.completion_timeout {
+                self.unusable.store(true, Ordering::Release);
+                return Err("GPU completion timeout; studio context is unusable".into());
+            }
+            self.poll()?;
             if rx.try_recv().is_ok() {
                 break;
             }
-            if start.elapsed() > Duration::from_secs(120) {
-                return Err("GPU completion timeout".into());
-            }
             std::thread::sleep(Duration::from_millis(1));
         }
+        self.in_flight.store(false, Ordering::Release);
         check(cancel)
     }
     fn readback(&self, cancel: &AtomicBool) -> Result<RgbaFrame> {
@@ -1022,7 +1092,7 @@ impl WgpuStudio {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit([encoder.finish()]);
+        self.submit(encoder.finish());
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         target
             .readback
@@ -1032,17 +1102,19 @@ impl WgpuStudio {
             });
         let start = Instant::now();
         loop {
-            self.device.poll(wgpu::PollType::Poll)?;
+            self.poll()?;
             match rx.try_recv() {
                 Ok(r) => {
                     r?;
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.unusable.store(true, Ordering::Release);
                     return Err("GPU map callback disconnected".into());
                 }
                 Err(_) => {
                     if start.elapsed() > Duration::from_secs(120) {
+                        self.unusable.store(true, Ordering::Release);
                         target.readback.unmap();
                         return Err("GPU readback timeout".into());
                     }
@@ -1138,8 +1210,10 @@ impl WgpuStudio {
             &group,
             true,
         );
-        self.queue.submit([encoder.finish()]);
-        self.readback(cancel)
+        self.submit(encoder.finish());
+        let result = self.readback(cancel);
+        self.wait(&AtomicBool::new(false))?;
+        result
     }
 }
 
@@ -1279,5 +1353,154 @@ fn jitter(index: u32, samples: u32) -> [f32; 2] {
         [0., 0.]
     } else {
         POINTS[index as usize]
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_regressions {
+    use super::*;
+    use crate::render::{
+        backends::wgpu::WgpuConfig, geometry::realize_frame, materials::resolve_materials,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    #[ignore = "exclusive GPU; deterministic cancellation after an actual AA submission"]
+    fn active_aa_cancellation_retires_before_same_size_reuse() {
+        let config = WgpuConfig::default();
+        let mut studio = WgpuStudio::new(None, &config.quality, &config.limits).unwrap();
+        let source = Arc::new(crate::mesh::Mesh {
+            positions: vec![[0.; 3], [10., 0., 0.], [0., 0., 10.]],
+            triangles: vec![[0, 1, 2]],
+        });
+        let scene=snapshot_scene(source,serde_json::json!({"schema_version":1,"mesh_path":"D:/fixture/mesh.bin","color":[0.2,0.4,0.6],"roughness":0.45,"geometry_kind":"original","layer_height_mm":0.2,"display_rotation_degrees":[0.,0.,0.],"warnings":[]})).unwrap();
+        let frame = FrameSpec {
+            key: FrameKey {
+                index: 0,
+                panel: RenderPanel::Single,
+            },
+            camera: RenderCamera {
+                position_mm: [0., -40., 5.],
+                target_mm: [0., 0., 5.],
+                up: [0., 0., 1.],
+                projection: RenderProjection::Orthographic {
+                    vertical_span_mm: 20.,
+                },
+            },
+            angle_degrees: 0.,
+            visible_layers: None,
+            section: None,
+            width: 256,
+            height: 256,
+            time_seconds: 0.,
+        };
+        let geometry = realize_frame(&scene, &frame).unwrap();
+        let materials = resolve_materials(&scene).unwrap();
+        let upload = studio
+            .upload(&geometry, &materials, &config.limits)
+            .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let token = cancel.clone();
+        let retired = completed.clone();
+        let count = submissions.clone();
+        studio.after_sample_submit = Some(Box::new(move |queue| {
+            count.fetch_add(1, Ordering::AcqRel);
+            let retired = retired.clone();
+            queue.on_submitted_work_done(move || retired.store(true, Ordering::Release));
+            token.store(true, Ordering::Release);
+        }));
+        let result = studio.render(
+            &scene,
+            &frame,
+            &upload,
+            true,
+            upload.bytes,
+            &config.limits,
+            &cancel,
+        );
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        println!(
+            "actual AA submissions={}, completion observed at cancellation return={}",
+            submissions.load(Ordering::Acquire),
+            completed.load(Ordering::Acquire)
+        );
+        assert_eq!(submissions.load(Ordering::Acquire), 1);
+        assert!(
+            completed.load(Ordering::Acquire),
+            "submitted geometry must retire before cancellation returns and same-size reuse allocates"
+        );
+        drop(upload);
+        studio.after_sample_submit = None;
+        cancel.store(false, Ordering::Release);
+        let fresh = studio
+            .upload(&geometry, &materials, &config.limits)
+            .unwrap();
+        let (image, _, _) = studio
+            .render(
+                &scene,
+                &frame,
+                &fresh,
+                true,
+                fresh.bytes,
+                &config.limits,
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(image.bytes[(160 * 256 + 96) * 4 + 3], 255);
+        assert!(!studio.in_flight.load(Ordering::Acquire));
+        assert_eq!(studio.completion_timeout, Duration::from_secs(120));
+        // Exercise the exact timeout branch without waiting two minutes or
+        // manufacturing a device loss. Even an empty real submission is tracked.
+        studio.completion_timeout = Duration::ZERO;
+        let encoder = studio.device.create_command_encoder(&Default::default());
+        studio.submit(encoder.finish());
+        assert!(
+            studio
+                .wait(&cancel)
+                .unwrap_err()
+                .to_string()
+                .contains("timeout")
+        );
+        assert!(studio.unusable.load(Ordering::Acquire));
+        assert!(studio.in_flight.load(Ordering::Acquire));
+        let uploads = studio.upload_count();
+        assert!(
+            studio
+                .upload(&geometry, &materials, &config.limits)
+                .is_err()
+        );
+        assert!(
+            studio
+                .prepare_frame(256, 256, fresh.bytes, &config.limits)
+                .is_err()
+        );
+        assert!(
+            studio
+                .render(
+                    &scene,
+                    &frame,
+                    &fresh,
+                    true,
+                    fresh.bytes,
+                    &config.limits,
+                    &cancel
+                )
+                .is_err()
+        );
+        assert!(
+            studio
+                .encode_hdr(1, 1, &[[0.18, 0.18, 0.18, 1.]], Default::default(), &cancel)
+                .is_err()
+        );
+        assert_eq!(
+            studio.upload_count(),
+            uploads,
+            "failed retirement must forbid fresh GPU allocations"
+        );
+        println!(
+            "same-size reuse succeeded after drain; forced retirement timeout forbids upload/target/render/HDR reuse"
+        );
     }
 }

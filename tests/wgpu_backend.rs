@@ -1018,3 +1018,89 @@ fn gpu_specular_and_posed_layer_showcase() {
     let (plain, _) = batch(&mut backend, &s, vec![f], true, "layers-faded-reference");
     assert!(difference(&fade[0], &plain[0]) < 0.1);
 }
+
+#[test]
+#[ignore = "exclusive GPU; accepted near-axis tangent regression"]
+fn gpu_tilted_face_has_finite_stable_lighting() {
+    let theta = 89.9f64.to_radians();
+    let mesh = turninator::mesh::Mesh {
+        positions: vec![
+            [0.; 3],
+            [10., 0., 0.],
+            [0., 10. * theta.sin(), 10. * theta.cos()],
+        ],
+        triangles: vec![[0, 1, 2]],
+    };
+    let mut tilted = scene(mesh);
+    tilted.appearance.display_rotation_degrees = [89.9, 0., 0.];
+    let reference = scene(turninator::mesh::Mesh {
+        positions: vec![[0.; 3], [10., 0., 0.], [0., 0., 10.]],
+        triangles: vec![[0, 1, 2]],
+    });
+    let mut backend = WgpuBackend::new(&WgpuConfig::default()).unwrap();
+    let (tilted_image, _) = batch(
+        &mut backend,
+        &tilted,
+        vec![front(&tilted)],
+        true,
+        "tangent-tilted",
+    );
+    let (reference_image, _) = batch(
+        &mut backend,
+        &reference,
+        vec![front(&reference)],
+        true,
+        "tangent-reference",
+    );
+    let sample =
+        |image: &RgbaFrame| image.bytes[(160 * 256 + 96) * 4..(160 * 256 + 96) * 4 + 4].to_vec();
+    let actual = sample(&tilted_image[0]);
+    let expected = sample(&reference_image[0]);
+    println!("accepted X89.9 tilted face {actual:?}; equivalent world plane {expected:?}");
+    assert_eq!(actual[3], 255);
+    assert!(
+        actual[..3].iter().all(|&v| v > 10 && v < 245),
+        "finite non-saturated lit face"
+    );
+    for (a, b) in actual.into_iter().zip(expected) {
+        assert!((a as i32 - b as i32).abs() <= 1);
+    }
+}
+
+#[test]
+fn independent_float32_witness_exposes_fixed_y_tangent_singularity() {
+    let theta = 89.9f64.to_radians();
+    let (s, c) = (theta.sin() as f32, theta.cos() as f32);
+    let build = [0f32, -c, s];
+    let mut world = [
+        0f32,
+        c * build[1] - s * build[2],
+        s * build[1] + c * build[2],
+    ];
+    let length = world.iter().map(|v| v * v).sum::<f32>().sqrt();
+    world = world.map(|v| v / length);
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let first = cross([0., -s, c], world);
+    assert!(first.iter().map(|v| v * v).sum::<f32>() < 0.0001);
+    let legacy = cross([0., 1., 0.], world);
+    let squared = legacy.iter().map(|v| v * v).sum::<f32>();
+    println!(
+        "float32 witness world={world:?}, legacy fallback squared={squared}, normalized={:?}",
+        legacy.map(|v| v / squared.sqrt())
+    );
+    assert_eq!(squared, 0.);
+    assert!(
+        legacy
+            .map(|v| v / squared.sqrt())
+            .iter()
+            .all(|v| !v.is_finite())
+    );
+    // This establishes undefined old basis arithmetic independently of driver
+    // fusion choices. The actual production GPU test covers the accepted pose.
+}

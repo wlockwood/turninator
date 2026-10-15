@@ -159,7 +159,16 @@ fn brdf(n:vec3<f32>,v:vec3<f32>,l:vec3<f32>,t:vec3<f32>,m:Material)->vec3<f32> {
     let mask=1.-pow(dot(n,axis),2.);
     let slope=3.14159265*u.layers.z/height*sin(6.28318531*phase)*mask*gain*u.layers.w;
     if !floor {n=normalize(n-(axis-n*dot(n,axis))*slope);}
-    var tangent=cross(axis,n);if dot(tangent,tangent)<0.0001 {tangent=cross(vec3<f32>(0.,1.,0.),n);}tangent=normalize(tangent);
+    var tangent=cross(axis,n);
+    if dot(tangent,tangent)<0.0001 {
+        // The least-aligned cardinal axis cannot be parallel to a unit normal.
+        // A fixed Y fallback is singular for legal tilted faces facing world Y.
+        let a=abs(n);var basis=vec3<f32>(1.,0.,0.);
+        if a.y<a.x&&a.y<=a.z {basis=vec3<f32>(0.,1.,0.);}
+        else if a.z<a.x&&a.z<a.y {basis=vec3<f32>(0.,0.,1.);}
+        tangent=cross(basis,n);
+    }
+    tangent*=inverseSqrt(max(dot(tangent,tangent),0.00000000000000000001));
     let key=normalize(vec3<f32>(-2.5,-3.,4.));let fill=normalize(vec3<f32>(3.,-1.,2.));let rim=normalize(vec3<f32>(0.,3.,3.));
     let visibility=shadow(p.world,normalize(p.normal));let ao=ambient_occlusion(p,n);
     var color=brdf(n,v,key,tangent,m)*vec3<f32>(3.6,3.3,3.)*visibility+brdf(n,v,fill,tangent,m)*vec3<f32>(0.9,1.1,1.4)+brdf(n,v,rim,tangent,m)*vec3<f32>(2.7,2.8,3.);
