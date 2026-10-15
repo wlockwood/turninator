@@ -4,6 +4,34 @@
   "target": "x86_64-pc-windows-msvc",
   "qualification": "sdk-feasibility-only; production bridges and redistribution unfinished",
   "evidence": "2026-10-15-sdk-probes",
+  "source_builds": {
+    "luxcore": {
+      "version": "2.11.2",
+      "source_commit": "b872186d2fe995a762f73708c606847eed55843e",
+      "source_archive_sha256": "31a82d87c1f912864e7b039620747507d2b0ce9db70648656d41d0ebc4636cda",
+      "dependencies_archive_sha256": "069a1eace7e8f192b07629d6318eca9e0ad970f8c7db39a0919b10eddc2345d0",
+      "patch": {
+        "path": "patches/luxcore/0001-owned-cache-exports-native.patch",
+        "sha256": "2aefa8cdb5d8844b0f25c0ba02a24ca61516be5c1b0d6213eade16bba212fd7b"
+      },
+      "cache_header": {
+        "path": "patches/luxcore/owned_ptx_cache.h",
+        "sha256": "fe8abf7adf1806cf5abe01018938afe2a70e8bd1e1c382646e9b2d8dbe4ffd96"
+      },
+      "dll_sha256": "63e96b108e5007c6d378e2ac0b575d5db6b9e9e8b7b9a69a5b7cef3856f457b5",
+      "import_library_sha256": "ce8e2f0e786d78a4b77673f63fd5f1578e03a7c2a4f07e6079eb4e77b9f18c67",
+      "compiler_identity": "4cbf85c6afdf0092be563772ec2cd142336d933d4c57b18fba584bb73514ea9c",
+      "nvrtc_sha256": "02d2d7ef4690bf1a55dda1d3ac94c86ce8d16920071c87bcd3e70e94ef346e93",
+      "builtins_sha256": "a7afa2a40cbd3f922a33d8bf71c13cb26ca707c7016a9bc5fcde36759ba668f5",
+      "qualified_api": "Windows CUDA/OptiX",
+      "qualification": "corrected-sdk-functional-only",
+      "production_qualified": false,
+      "evidence": {
+        "path": "patches/luxcore/qualification.json",
+        "sha256": "5a2dfe6b0fc407790150f3e0a602bad41bc57ff383c207ef5f219dc817325a5f"
+      }
+    }
+  },
   "common_parser": {
     "name": "nlohmann/json",
     "version": "3.12.0",
