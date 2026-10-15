@@ -17,6 +17,7 @@ pub struct AppSettings {
     pub recent_files: Vec<PathBuf>,
     pub cache_budget_bytes: u64,
     pub auto_preview: bool,
+    pub renderers: crate::render::RendererPreferences,
 }
 impl Default for AppSettings {
     fn default() -> Self {
@@ -26,6 +27,7 @@ impl Default for AppSettings {
             recent_files: Vec::new(),
             cache_budget_bytes: 20 * 1024 * 1024 * 1024,
             auto_preview: false,
+            renderers: Default::default(),
         }
     }
 }
@@ -41,6 +43,7 @@ impl AppSettings {
         if settings.schema_version != 1 {
             return Err("unsupported settings version".into());
         }
+        settings.renderers.validate()?;
         let recents = std::mem::take(&mut settings.recent_files);
         for path in recents.into_iter().rev() {
             settings.remember(path);
@@ -48,6 +51,7 @@ impl AppSettings {
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.renderers.validate()?;
         let bytes = serde_json::to_vec_pretty(self)?;
         if bytes.len() > 1024 * 1024 {
             return Err("settings exceed 1 MiB reload budget".into());

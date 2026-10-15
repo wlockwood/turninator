@@ -252,9 +252,8 @@ pub fn default_request(
     job_dir: PathBuf,
     destination: PathBuf,
     kind: ExportKind,
-    engine: String,
+    selection: crate::render::RenderSelection,
     size: u32,
-    samples: u32,
     transparent: bool,
 ) -> ExportRequest {
     ExportRequest {
@@ -262,9 +261,8 @@ pub fn default_request(
         job_dir,
         destination,
         kind,
-        engine,
+        selection,
         size,
-        samples,
         frame_count: 80,
         transparent,
         ..ExportRequest::default()

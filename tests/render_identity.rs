@@ -58,11 +58,11 @@ fn visual_geometry_and_sampling_changes_invalidate_frames() {
             ..original.clone()
         },
         ExportRequest {
-            samples: 64,
+            selection: turninator::render::RenderSelection::from_legacy("eevee", 64).unwrap(),
             ..original.clone()
         },
         ExportRequest {
-            engine: "cycles".into(),
+            selection: turninator::render::RenderSelection::from_legacy("cycles", 32).unwrap(),
             ..original.clone()
         },
         ExportRequest {

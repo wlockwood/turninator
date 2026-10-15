@@ -24,13 +24,13 @@ fn scratch() -> PathBuf {
 }
 fn project(path: PathBuf, hash: String) -> ProjectFile {
     ProjectFile {
-        schema_version: 1,
+        schema_version: 2,
         source_path: path,
         source_hash: hash,
         scene: SceneSettings::default(),
         camera: OrbitCamera::default(),
         export_size: 960,
-        engine: "eevee".into(),
+        renderers: Default::default(),
         output_options: Default::default(),
     }
 }
@@ -89,7 +89,7 @@ fn invalid_project_cannot_replace_existing_save_or_source() {
     let path = root.join("part.tnproj");
     save_project(&path, &p).unwrap();
     let before = fs::read(&path).unwrap();
-    p.engine = "unsupported".into();
+    p.renderers.animation.backend = turninator::render::BackendId::BlenderCycles; // quality remains Eevee: invalid combination
     assert!(save_project(&path, &p).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
     fs::remove_dir_all(root).unwrap();

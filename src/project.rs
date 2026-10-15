@@ -1,6 +1,8 @@
 use crate::export::{AnimationMode, ExportLayout, SectionSpec, VideoCodec};
+use crate::render::{RenderSelection, RendererPreferences};
 use crate::{Result, presentation::SceneSettings, settings::atomic_write, viewport::OrbitCamera};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -8,6 +10,7 @@ use std::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "Value")]
 pub struct ProjectFile {
     pub schema_version: u32,
     pub source_path: PathBuf,
@@ -15,7 +18,7 @@ pub struct ProjectFile {
     pub scene: SceneSettings,
     pub camera: OrbitCamera,
     pub export_size: u32,
-    pub engine: String,
+    pub renderers: RendererPreferences,
     #[serde(default)]
     pub output_options: OutputPreferences,
 }
@@ -24,9 +27,6 @@ pub struct ProjectFile {
 pub struct OutputPreferences {
     pub output_format: crate::export::OutputFormat,
     pub still_size: u32,
-    pub still_engine: String,
-    pub still_samples: u32,
-    pub samples: u32,
     pub frame_rate: u32,
     pub transparent: bool,
     pub video_codec: VideoCodec,
@@ -43,9 +43,6 @@ impl Default for OutputPreferences {
         Self {
             output_format: Default::default(),
             still_size: 4096,
-            still_engine: "cycles".into(),
-            still_samples: 64,
-            samples: 32,
             frame_rate: crate::animation::DEFAULT_FRAME_RATE,
             transparent: false,
             video_codec: VideoCodec::H264,
@@ -57,6 +54,100 @@ impl Default for OutputPreferences {
             build_stage: None,
             start_angle_degrees: 0.,
         }
+    }
+}
+// Versioned wire readers keep legacy renderer fields out of the canonical model.
+#[derive(Deserialize)]
+struct ProjectBody {
+    source_path: PathBuf,
+    source_hash: String,
+    scene: SceneSettings,
+    camera: OrbitCamera,
+    export_size: u32,
+    #[serde(default)]
+    output_options: OutputPreferences,
+}
+#[derive(Deserialize)]
+#[serde(default)]
+struct LegacyOutputRenderers {
+    still_engine: String,
+    samples: u32,
+    still_samples: u32,
+}
+impl Default for LegacyOutputRenderers {
+    fn default() -> Self {
+        Self {
+            still_engine: "cycles".into(),
+            samples: 32,
+            still_samples: 64,
+        }
+    }
+}
+impl TryFrom<Value> for ProjectFile {
+    type Error = String;
+    fn try_from(value: Value) -> std::result::Result<Self, String> {
+        let version = value["schema_version"]
+            .as_u64()
+            .ok_or("project schema_version required")?;
+        let renderers = match version {
+            1 => {
+                let legacy: LegacyOutputRenderers = serde_json::from_value(
+                    value
+                        .get("output_options")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                )
+                .map_err(|e| e.to_string())?;
+                let animation = RenderSelection::from_legacy(
+                    value["engine"]
+                        .as_str()
+                        .ok_or("legacy project engine required")?,
+                    legacy.samples,
+                )
+                .map_err(|e| e.to_string())?;
+                let still =
+                    RenderSelection::from_legacy(&legacy.still_engine, legacy.still_samples)
+                        .map_err(|e| e.to_string())?;
+                let mut prefs = RendererPreferences {
+                    animation,
+                    still,
+                    ..Default::default()
+                };
+                // Store migrated qualities in their corresponding saved profiles too.
+                if let Some(profile) = prefs.profiles.get_mut(&prefs.animation.backend) {
+                    profile.animation = prefs.animation.quality.clone();
+                }
+                if let Some(profile) = prefs.profiles.get_mut(&prefs.still.backend) {
+                    profile.still = prefs.still.quality.clone();
+                }
+                prefs
+            }
+            2 => {
+                if value.get("engine").is_some()
+                    || ["still_engine", "samples", "still_samples"]
+                        .iter()
+                        .any(|key| value["output_options"].get(key).is_some())
+                {
+                    return Err(
+                        "schema-2 project uses renderers, not legacy renderer fields".into(),
+                    );
+                }
+                serde_json::from_value(value["renderers"].clone()).map_err(|e| e.to_string())?
+            }
+            _ => return Err(format!("unsupported project version: {version}")),
+        };
+        renderers.validate().map_err(|e| e.to_string())?;
+        let b: ProjectBody = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        Ok(Self {
+            schema_version: 2,
+            source_path: b.source_path,
+            source_hash: b.source_hash,
+            scene: b.scene,
+            camera: b.camera,
+            export_size: b.export_size,
+            renderers,
+            output_options: b.output_options,
+        })
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,9 +236,6 @@ fn validate_project(project: &ProjectFile) -> Result<()> {
         return Err("invalid saved build stage or sampled angle".into());
     }
     if !(64..=8000).contains(&output.still_size)
-        || !(1..=4096).contains(&output.samples)
-        || !(1..=4096).contains(&output.still_samples)
-        || !["eevee", "cycles"].contains(&output.still_engine.as_str())
         || output
             .section
             .as_ref()
@@ -155,11 +243,11 @@ fn validate_project(project: &ProjectFile) -> Result<()> {
     {
         return Err("invalid saved output preferences".into());
     }
-    if project.schema_version != 1 {
+    project.renderers.validate()?;
+    if project.schema_version != 2 {
         return Err("unsupported project version".into());
     }
     if !(16..=8000).contains(&project.export_size)
-        || !["eevee", "cycles"].contains(&project.engine.as_str())
         || project.source_hash.len() != 64
         || !project.source_hash.chars().all(|c| c.is_ascii_hexdigit())
     {

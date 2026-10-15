@@ -60,7 +60,7 @@ fn native_worker_exports_diagram_and_survives_request_errors() {
         destination: dir.join("four-view.png"),
         kind: ExportKind::Diagram,
         size: 2048,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         ..ExportRequest::default()
     };
     let result = run_export(&mut worker, &tools, &request, &cancel, |event| {
@@ -135,8 +135,11 @@ fn native_materials_alpha_mp4_and_busy_cancellation() {
             destination: dir.join(format!("{preset}.png")),
             kind: ExportKind::Still,
             size: 128,
-            samples: 8,
-            engine: if preset == "resin" { "cycles" } else { "eevee" }.into(),
+            selection: turninator::render::RenderSelection::from_legacy(
+                if preset == "resin" { "cycles" } else { "eevee" },
+                8,
+            )
+            .unwrap(),
             transparent: true,
             ..ExportRequest::default()
         };
@@ -151,7 +154,7 @@ fn native_materials_alpha_mp4_and_busy_cancellation() {
         destination: dir.join("turntable.mp4"),
         kind: ExportKind::Mp4,
         size: 128,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         frame_count: 4,
         ..ExportRequest::default()
     };
@@ -238,7 +241,7 @@ fn native_section_cube_has_exact_area_volume_and_matched_panels() {
             cap: true,
         }),
         size: 128,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         frame_count: 4,
         ..Default::default()
     };
@@ -332,7 +335,7 @@ fn native_section_bead_voids_and_open_input_are_honest() {
                 cap: true,
             }),
             size: 256,
-            samples: 8,
+            selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
             ..Default::default()
         };
         let mut analysis = None;
@@ -417,7 +420,7 @@ fn native_buildup_maps_tools_reveals_geometry_and_reuses_frames_for_av1() {
         kind: ExportKind::Gif,
         animation: AnimationMode::BuildUp,
         size: 256,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         frame_count: 8,
         ..Default::default()
     };
@@ -584,7 +587,7 @@ fn native_large_sheet_and_complete_section_animation() {
         destination: dir.join("four-view-4096.png"),
         kind: ExportKind::Diagram,
         size: 4096,
-        samples: 16,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 16).unwrap(),
         ..Default::default()
     };
     let started = Instant::now();
@@ -656,7 +659,7 @@ fn native_layer_filter_reduces_subpixel_temporal_residuals() {
             destination: dir.join(format!("{name}.gif")),
             kind: ExportKind::Gif,
             size: 256,
-            samples: 16,
+            selection: turninator::render::RenderSelection::from_legacy("eevee", 16).unwrap(),
             frame_count: 80,
             ..Default::default()
         };
@@ -727,7 +730,7 @@ fn native_layer_filter_reduces_subpixel_temporal_residuals() {
         destination: dir.join("resolved-pitch.png"),
         kind: ExportKind::Still,
         size: 256,
-        samples: 16,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 16).unwrap(),
         ..Default::default()
     };
     run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();

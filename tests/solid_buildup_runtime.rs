@@ -103,7 +103,7 @@ fn prove_stages(stepped: bool) {
         destination: dir.join("empty.png"),
         kind: ExportKind::Still,
         size: 160,
-        samples: 4,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 4).unwrap(),
         transparent: true,
         build_stage: Some(BuildStage { visible_layers: 0 }),
         ..Default::default()

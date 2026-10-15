@@ -81,8 +81,7 @@ fn resin_buildup_sections_follow_one_timeline_and_preserve_bead_voids() {
         destination: dir.join("paired-resin.gif"),
         kind: ExportKind::Gif,
         size: 128,
-        samples: 8,
-        engine: "cycles".into(),
+        selection: turninator::render::RenderSelection::from_legacy("cycles", 8).unwrap(),
         layout: ExportLayout::SideBySide,
         section: Some(SectionSpec {
             axis: 0,
@@ -225,7 +224,7 @@ fn fixed_stage_exports_png_sheet_and_empty_section() {
         destination: dir.join("partial.png"),
         kind: ExportKind::Still,
         size: 256,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         transparent: true,
         build_stage: Some(BuildStage { visible_layers: 1 }),
         start_angle_degrees: 37.5,

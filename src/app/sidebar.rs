@@ -3,7 +3,7 @@ use super::*;
 
 impl Studio {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let preview_options_before = (self.preview_engine().to_owned(), self.transparent);
+        let preview_options_before = (self.preview_selection().clone(), self.transparent);
         let before = serde_json::to_string(&self.scene).unwrap_or_default();
         let import_before = serde_json::to_string(&self.scene.import).unwrap_or_default();
         let was_stepped = self.scene.import.stepped_envelope;
@@ -37,7 +37,7 @@ impl Studio {
             self.importing = true;
             self.gate.advance();
         }
-        if (self.preview_engine().to_owned(), self.transparent) != preview_options_before {
+        if (self.preview_selection().clone(), self.transparent) != preview_options_before {
             self.changed();
         }
     }
@@ -211,8 +211,10 @@ impl Studio {
             if material != self.scene.material_preset {
                 self.scene.select_material(&material);
                 if material == "resin" {
-                    self.engine = "cycles".into();
-                    self.still_engine = "cycles".into();
+                    self.renderers
+                        .select_backend(false, BackendId::BlenderCycles);
+                    self.renderers
+                        .select_backend(true, BackendId::BlenderCycles);
                 }
             }
             if !beads || self.scene.color_mode == "uniform" {
@@ -422,12 +424,9 @@ impl Studio {
             format: &mut self.output_format,
             codec: &mut self.codec,
             frame_rate: &mut self.frame_rate,
-            animation_engine: &mut self.engine,
+            renderers: &mut self.renderers,
             animation_size: &mut self.size,
-            animation_samples: &mut self.samples,
-            still_engine: &mut self.still_engine,
             still_size: &mut self.still_size,
-            still_samples: &mut self.still_samples,
             transparent: &mut self.transparent,
         })
         .show(ui)

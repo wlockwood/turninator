@@ -18,6 +18,7 @@ use crate::{
         load_model, model_scene,
     },
     project::{OutputPreferences, ProjectFile, SourceStatus, load_project, save_project},
+    render::{BackendId, RenderSelection, RendererPreferences},
     session::{RenderEvent, RenderService, RenderTask, default_request},
     settings::{AppSettings, default_data_directory},
     viewport::{
@@ -207,12 +208,9 @@ pub struct Studio {
     restore_camera: bool,
     unresolved_project: Option<(ProjectFile, SourceStatus)>,
     project_path: Option<PathBuf>,
-    engine: String,
+    renderers: RendererPreferences,
     size: u32,
     still_size: u32,
-    still_engine: String,
-    still_samples: u32,
-    samples: u32,
     transparent: bool,
     show_edges: bool,
     show_tools: bool,
@@ -283,6 +281,7 @@ impl Studio {
             ),
             camera: OrbitCamera::default(),
             scene: SceneSettings::default(),
+            renderers: prefs.renderers.clone(),
             prefs,
             data_dir,
             sender,
@@ -316,12 +315,8 @@ impl Studio {
             restore_camera: false,
             unresolved_project: None,
             project_path: None,
-            engine: "eevee".into(),
             size: 960,
             still_size: 4096,
-            still_engine: "cycles".into(),
-            still_samples: 64,
-            samples: 32,
             transparent: false,
             show_edges: false,
             show_tools: false,
@@ -573,11 +568,11 @@ impl Studio {
         )?;
         Ok(scene)
     }
-    fn preview_engine(&self) -> &str {
+    fn preview_selection(&self) -> &RenderSelection {
         if self.output_format.animated() {
-            &self.engine
+            &self.renderers.animation
         } else {
-            &self.still_engine
+            &self.renderers.still
         }
     }
     fn preview_kind(&self) -> ExportKind {
@@ -636,21 +631,20 @@ impl Studio {
                 job,
                 destination,
                 kind,
-                if preview {
-                    self.preview_engine().to_owned()
-                } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
-                    self.still_engine.clone()
-                } else {
-                    self.engine.clone()
+                {
+                    let mut selection = if preview {
+                        self.preview_selection().clone()
+                    } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
+                        self.renderers.still.clone()
+                    } else {
+                        self.renderers.animation.clone()
+                    };
+                    if preview && let Some(samples) = selection.quality.samples_mut() {
+                        *samples = 16;
+                    }
+                    selection
                 },
                 render_size,
-                if preview {
-                    16
-                } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
-                    self.still_samples
-                } else {
-                    self.samples
-                },
                 self.transparent
                     && kind == ExportKind::Still
                     && (!preview || self.output_format.supports_transparency()),
@@ -1127,13 +1121,13 @@ impl Studio {
                     }
                     if let Some(model) = &self.model {
                         let project = ProjectFile {
-                            schema_version: 1,
+                            schema_version: 2,
                             source_path: model.path.clone(),
                             source_hash: model.source_hash.clone(),
                             scene: self.scene.clone(),
                             camera: self.camera.clone(),
                             export_size: self.size,
-                            engine: self.engine.clone(),
+                            renderers: self.renderers.clone(),
                             output_options: self.output_preferences(),
                         };
                         match save_project(&path, &project) {
@@ -1256,9 +1250,6 @@ impl Studio {
         self.pending_build_orientation = None;
         let options = project.output_options;
         self.still_size = options.still_size;
-        self.still_engine = options.still_engine;
-        self.still_samples = options.still_samples;
-        self.samples = options.samples;
         self.transparent = options.transparent;
         self.codec = options.video_codec;
         self.output_format = options.output_format;
@@ -1292,7 +1283,7 @@ impl Studio {
             .join(", ");
         self.camera = project.camera;
         self.size = project.export_size;
-        self.engine = project.engine;
+        self.renderers = project.renderers;
         self.restore_camera = true;
         self.unresolved_project = None;
         self.import(project.source_path);
@@ -1319,9 +1310,6 @@ impl Studio {
         OutputPreferences {
             output_format: self.output_format,
             still_size: self.still_size,
-            still_engine: self.still_engine.clone(),
-            still_samples: self.still_samples,
-            samples: self.samples,
             frame_rate: self.frame_rate,
             transparent: self.transparent,
             video_codec: self.codec,
@@ -1634,7 +1622,8 @@ impl Studio {
                     .is_some_and(|m| ExportKind::Still.suggested_file_name(&m.path)
                         == "renamed-output-model.2.png")
             );
-            self.engine = "cycles".into();
+            self.renderers
+                .select_backend(false, BackendId::BlenderCycles);
             self.start_export(
                 ExportKind::Still,
                 directory.join("cancelled-preview.png"),
@@ -1667,11 +1656,14 @@ impl Studio {
                         .is_some_and(|model| model.import_settings == self.scene.import)
             );
             self.error = None;
-            self.engine = "eevee".into();
+            self.renderers
+                .select_backend(false, BackendId::BlenderEevee);
             self.fit();
             self.changed();
             self.size = 128;
-            self.samples = 4;
+            if let Some(samples) = self.renderers.animation.quality.samples_mut() {
+                *samples = 4;
+            }
             self.turntable_timing = TurntableTiming {
                 seconds_per_turn: 0.2,
                 duration_seconds: 0.6,
@@ -1778,13 +1770,13 @@ impl Studio {
             self.section_position = 0.75;
             if let Some(model) = &self.model {
                 let project = ProjectFile {
-                    schema_version: 1,
+                    schema_version: 2,
                     source_path: model.path.clone(),
                     source_hash: model.source_hash.clone(),
                     scene: self.scene.clone(),
                     camera: self.camera.clone(),
                     export_size: self.size,
-                    engine: self.engine.clone(),
+                    renderers: self.renderers.clone(),
                     output_options: self.output_preferences(),
                 };
                 let project_path = directory.join("smoke.turninator");
@@ -1898,7 +1890,9 @@ impl Studio {
                 "rendered",
             )));
             self.size = 128;
-            self.samples = 4;
+            if let Some(samples) = self.renderers.animation.quality.samples_mut() {
+                *samples = 4;
+            }
             if let Some(model) = self.model.as_ref().filter(|m| !m.groups.is_empty()) {
                 self.section_axis = 0;
                 self.section_position = (model.bounds_mm.min[0] + model.bounds_mm.max[0]) / 2.;
@@ -1909,7 +1903,8 @@ impl Studio {
                 self.scene.select_material("resin");
                 self.scene.color_mode = "tool".into();
                 self.scene.studio_preset = "dark".into();
-                self.engine = "cycles".into();
+                self.renderers
+                    .select_backend(false, BackendId::BlenderCycles);
                 self.changed();
             }
             self.start_export(
@@ -1987,13 +1982,15 @@ impl Studio {
             self.smoke_checks["mp4_preview_uses_animation_renderer"] = serde_json::json!(
                 self.last_task
                     .as_ref()
-                    .is_some_and(|task| task.0.engine == self.engine && !task.0.transparent)
+                    .is_some_and(|task| task.0.selection.backend
+                        == self.renderers.animation.backend
+                        && !task.0.transparent)
             );
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "format-mp4",
             )));
             self.output_format = OutputFormat::Png;
-            self.still_engine = "eevee".into();
+            self.renderers.select_backend(true, BackendId::BlenderEevee);
             self.transparent = true;
             self.changed();
             self.start_export(
@@ -2004,11 +2001,10 @@ impl Studio {
             self.smoke_stage = 92;
         }
         if self.smoke_stage == 92 && self.preview_revision == Some(self.revision) {
-            self.smoke_checks["png_preview_uses_png_renderer_and_alpha"] = serde_json::json!(
-                self.last_task
-                    .as_ref()
-                    .is_some_and(|task| task.0.engine == self.still_engine && task.0.transparent)
-            );
+            self.smoke_checks["png_preview_uses_png_renderer_and_alpha"] =
+                serde_json::json!(self.last_task.as_ref().is_some_and(|task| {
+                    task.0.selection.backend == self.renderers.still.backend && task.0.transparent
+                }));
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "format-png",
             )));
@@ -2026,7 +2022,7 @@ impl Studio {
                 self.last_task
                     .as_ref()
                     .is_some_and(|task| task.0.kind == ExportKind::Diagram
-                        && task.0.engine == self.still_engine
+                        && task.0.selection.backend == self.renderers.still.backend
                         && task.0.section.is_none()
                         && !task.0.transparent)
                     && self.viewport_settings().section.is_none()
@@ -2036,7 +2032,9 @@ impl Studio {
                 "format-sheet",
             )));
             self.still_size = 512;
-            self.still_samples = 4;
+            if let Some(samples) = self.renderers.still.quality.samples_mut() {
+                *samples = 4;
+            }
             self.start_export(
                 ExportKind::Diagram,
                 directory.join("selected-sheet.png"),
@@ -2056,11 +2054,12 @@ impl Studio {
                 .is_some_and(|output| output.frames.len() == 1)
         {
             self.smoke_checks["sheet_export_uses_visible_quality"] =
-                serde_json::json!(self.last_task.as_ref().is_some_and(|task| task.0.engine
-                    == self.still_engine
-                    && task.0.size == 512
-                    && task.0.samples == 4
-                    && task.0.kind == ExportKind::Diagram));
+                serde_json::json!(self.last_task.as_ref().is_some_and(|task| {
+                    task.0.selection.backend == self.renderers.still.backend
+                        && task.0.size == 512
+                        && task.0.selection.quality.samples() == Some(4)
+                        && task.0.kind == ExportKind::Diagram
+                }));
             self.output_format = OutputFormat::Gif;
             self.show_output = false;
             self.changed();
@@ -2077,7 +2076,8 @@ impl Studio {
                     && self
                         .last_task
                         .as_ref()
-                        .is_some_and(|task| !task.0.transparent && task.0.engine == self.engine)
+                        .is_some_and(|task| !task.0.transparent
+                            && task.0.selection.backend == self.renderers.animation.backend)
                     && self.output_format.supports_section()
                     && self.timeline_enabled
             );

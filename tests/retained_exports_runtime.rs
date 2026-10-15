@@ -38,7 +38,7 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
     let mut request = ExportRequest {
         kind: ExportKind::Gif,
         size: 64,
-        samples: 4,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 4).unwrap(),
         frame_count: 4,
         ..Default::default()
     };

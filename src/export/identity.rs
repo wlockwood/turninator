@@ -14,6 +14,7 @@ pub fn retained_render_key(
     mesh_hash: &str,
     request: &ExportRequest,
 ) -> Result<String> {
+    request.selection.validate()?;
     if mesh_hash.len() != 64 || !mesh_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("retained render requires a SHA-256 mesh snapshot hash".into());
     }
@@ -57,13 +58,12 @@ pub fn retained_render_key(
         Value::Null
     };
     let recipe = json!({
-        "retained_render_version":1,
+        "retained_render_version":2,
         "scene":scene,
         "mesh_hash":mesh_hash.to_ascii_lowercase(),
         "kind":if animated { "animation" } else if diagram { "diagram" } else { "still" },
-        "engine":request.engine,
+        "selection":request.selection,
         "size":request.size,
-        "samples":request.samples,
         "frame_count":frame_count,
         "transparent":if diagram { true } else { request.transparent && !animated },
         "section":request.section,
