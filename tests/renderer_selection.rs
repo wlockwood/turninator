@@ -214,3 +214,74 @@ fn minimal_legacy_scene_uses_existing_defaults_without_changing_wire_identity() 
     assert_eq!(snapshot.camera.target_mm, [15., 25., 35.]);
     assert!(snapshot.legacy_scene.get("camera").is_none());
 }
+
+#[test]
+fn historical_empty_stage_section_analysis_preserves_producer_payload() {
+    use turninator::render::contract::SectionAnalysis;
+    // Exact shape emitted by renderer/scene.py prepare_buildup_section's empty stage.
+    let empty = json!({"axis":0,"position_mm":0.75,"keep_positive":true,
+        "capped":false,"closed_input":false,"cross_section_area_mm2":0.0,
+        "original_volume_mm3":0.0,"remaining_volume_mm3":0.0,"visible_layer":-1,
+        "visible_source_triangles":0,"output_triangles":0,"warnings":[],
+        "meaning":"Empty build stage: no deposited geometry is visible."});
+    let analysis = SectionAnalysis::from_legacy(empty.clone(), true).unwrap();
+    assert_eq!(analysis.legacy, empty);
+    assert!(analysis.cap_supported);
+    assert!(analysis.legacy.get("volume_basis").is_none());
+
+    // Missing volume_basis must remain invalid for nonempty or malformed analyses.
+    for (key, value) in [
+        ("output_triangles", json!(1)),
+        ("visible_source_triangles", json!(1)),
+        ("remaining_volume_mm3", json!(1.0)),
+        ("cross_section_area_mm2", Value::Null),
+        ("closed_input", json!(true)),
+        ("capped", json!(true)),
+        ("visible_layer", json!("invalid")),
+        ("warnings", json!(["unexpected"])),
+        (
+            "meaning",
+            json!("Geometric intersection of the modeled mesh."),
+        ),
+        ("volume_basis", Value::Null),
+    ] {
+        let mut malformed = empty.clone();
+        malformed[key] = value;
+        assert!(
+            SectionAnalysis::from_legacy(malformed, true).is_err(),
+            "invalid {key}"
+        );
+    }
+    let mut malformed = empty.clone();
+    malformed
+        .as_object_mut()
+        .unwrap()
+        .remove("visible_source_triangles");
+    assert!(SectionAnalysis::from_legacy(malformed, true).is_err());
+}
+
+#[test]
+fn ordinary_and_stepped_section_analysis_require_and_preserve_volume_basis() {
+    use turninator::render::contract::SectionAnalysis;
+    for basis in [
+        "Original: signed closed-mesh volume magnitude, additive for separate shells. Remaining: closed cut-mesh volume magnitude.",
+        "Additive volumes of independently closed, nonoverlapping stepped layers.",
+    ] {
+        let payload = json!({"axis":1,"position_mm":5.0,"keep_positive":false,"capped":true,
+            "closed_input":true,"cross_section_area_mm2":20.0,"original_volume_mm3":100.0,
+            "remaining_volume_mm3":50.0,"output_triangles":12,"warnings":[],
+            "volume_basis":basis,"meaning":"Geometric intersection of the modeled mesh; not strength, mass, or measured print behavior."});
+        assert_eq!(
+            SectionAnalysis::from_legacy(payload.clone(), true)
+                .unwrap()
+                .legacy,
+            payload
+        );
+        let mut missing_basis = payload;
+        missing_basis
+            .as_object_mut()
+            .unwrap()
+            .remove("volume_basis");
+        assert!(SectionAnalysis::from_legacy(missing_basis, true).is_err());
+    }
+}

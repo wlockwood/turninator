@@ -486,6 +486,26 @@ pub struct SectionAnalysis {
 }
 impl SectionAnalysis {
     pub fn from_legacy(legacy: Value, cap_supported: bool) -> Result<Self> {
+        let measurements = [
+            "cross_section_area_mm2",
+            "original_volume_mm3",
+            "remaining_volume_mm3",
+        ];
+        // The historical empty-stage producer has no volume_basis: no geometry
+        // was analyzed. Accept its exact shape without adding provenance fields.
+        let empty_stage = legacy.get("volume_basis").is_none()
+            && legacy["output_triangles"].as_u64() == Some(0)
+            && legacy["visible_source_triangles"].as_u64() == Some(0)
+            && legacy["visible_layer"]
+                .as_i64()
+                .is_some_and(|layer| (-1..=1_000_000).contains(&layer))
+            && legacy["capped"] == false
+            && legacy["closed_input"] == false
+            && measurements
+                .iter()
+                .all(|key| legacy[key].as_f64() == Some(0.))
+            && legacy["warnings"].as_array().is_some_and(Vec::is_empty)
+            && legacy["meaning"] == "Empty build stage: no deposited geometry is visible.";
         if legacy["axis"].as_u64().is_none_or(|n| n > 2)
             || legacy["position_mm"]
                 .as_f64()
@@ -494,17 +514,12 @@ impl SectionAnalysis {
                 .iter()
                 .any(|k| !legacy[k].is_boolean())
             || legacy["output_triangles"].as_u64().is_none()
-            || ["volume_basis", "meaning"]
-                .iter()
-                .any(|k| !legacy[k].is_string())
+            || !legacy["meaning"].is_string()
+            || !legacy["volume_basis"].is_string() && !empty_stage
         {
             return Err("invalid legacy section analysis".into());
         }
-        for key in [
-            "cross_section_area_mm2",
-            "original_volume_mm3",
-            "remaining_volume_mm3",
-        ] {
+        for key in measurements {
             let value = legacy.get(key).ok_or("missing section measurement")?;
             if !value.is_null() && value.as_f64().is_none_or(|n| !n.is_finite() || n < 0.) {
                 return Err("invalid section measurement".into());
