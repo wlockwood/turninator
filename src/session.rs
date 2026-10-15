@@ -102,7 +102,9 @@ impl RenderService {
                         let mut timeline = timeline.clone();
                         timeline.buildup |=
                             task.request.animation == crate::export::AnimationMode::BuildUp;
-                        let bytes = serde_json::to_vec(&timeline.worker_frames()?)?;
+                        let bytes = serde_json::to_vec(
+                            &timeline.worker_frames_at_rate(task.request.frame_rate)?,
+                        )?;
                         if bytes.len() > 8 * 1024 * 1024 {
                             return Err("timeline states exceed 8 MiB budget".into());
                         }

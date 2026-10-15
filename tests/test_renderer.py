@@ -28,6 +28,17 @@ def binary(vertices=None, triangles=None):
 
 
 class MeshTests(unittest.TestCase):
+    def test_turntable_rate_preserves_speed_and_exact_repeated_poses(self):
+        angles=scene.turntable_angles(180,0,2.0,frame_rate=30)
+        self.assertEqual(len(set(angles)),60)
+        self.assertEqual(angles[:60],angles[60:120])
+        self.assertEqual(angles[:60],angles[120:])
+        self.assertEqual(angles[15],90.)
+        self.assertEqual(scene.turntable_angles(3,0,0.05,frame_rate=30),[0.,240.,120.])
+        for rate in (0,101,True,1.5):
+            with self.assertRaises(ValueError):
+                scene.turntable_angles(3,0,1,frame_rate=rate)
+
     def test_event_line_is_written_in_one_call(self):
         output = mock.Mock()
         with mock.patch.object(worker.sys, 'stdout', output):

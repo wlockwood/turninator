@@ -232,6 +232,7 @@ pub struct Studio {
     native_rect: Option<egui::Rect>,
     timeline: Timeline,
     turntable_timing: TurntableTiming,
+    frame_rate: u32,
     timeline_enabled: bool,
     timeline_playing: bool,
     timeline_time: f64,
@@ -337,6 +338,7 @@ impl Studio {
             native_rect: None,
             timeline: Timeline::default(),
             turntable_timing: TurntableTiming::default(),
+            frame_rate: crate::animation::DEFAULT_FRAME_RATE,
             timeline_enabled: false,
             timeline_playing: false,
             timeline_time: 0.,
@@ -584,11 +586,11 @@ impl Studio {
                 && matches!(kind, ExportKind::Gif | ExportKind::Mp4))
             .then_some(self.turntable_timing);
             let frames = if let Some(timeline) = &timeline {
-                timeline.frame_count()?
+                timeline.frame_count_at_rate(self.frame_rate)?
             } else if let Some(timing) = turntable_timing {
-                timing.frame_count()?
+                timing.frame_count_at_rate(self.frame_rate)?
             } else {
-                80
+                crate::animation::frame_count_for_duration(4., self.frame_rate)?
             };
             let reserve = u64::from(render_size).pow(2)
                 * 8
@@ -632,6 +634,12 @@ impl Studio {
             request.timeline = timeline;
             request.turntable_timing = turntable_timing;
             request.frame_count = frames;
+            request.frame_rate =
+                if preview || matches!(kind, ExportKind::Still | ExportKind::Diagram) {
+                    crate::animation::DEFAULT_FRAME_RATE
+                } else {
+                    self.frame_rate
+                };
             if self.section && kind != ExportKind::Diagram {
                 request.section = Some(SectionSpec {
                     axis: self.section_axis,
@@ -1193,6 +1201,7 @@ impl Studio {
         self.output_format = options.output_format;
         self.export_buildup = options.animation == AnimationMode::BuildUp;
         self.turntable_timing = options.turntable_timing;
+        self.frame_rate = options.frame_rate;
         self.timeline_enabled = options.timeline.is_some();
         self.timeline = options.timeline.unwrap_or_default();
         self.timeline_playing = false;
@@ -1249,6 +1258,7 @@ impl Studio {
             still_engine: self.still_engine.clone(),
             still_samples: self.still_samples,
             samples: self.samples,
+            frame_rate: self.frame_rate,
             transparent: self.transparent,
             video_codec: self.codec,
             animation: if self.export_buildup {
@@ -1293,11 +1303,11 @@ impl Studio {
                 self.changed();
             }
             if !self.timeline_enabled { return; }
-            ui.add(egui::DragValue::new(&mut self.timeline.duration_seconds).range(0.05..=500.).speed(0.1).suffix(" seconds")).help("Total camera-animation duration in seconds. Export uses 20 fps, rounded to the nearest frame. All key times must fit within this duration.");
+            ui.add(egui::DragValue::new(&mut self.timeline.duration_seconds).range(0.05..=500.).speed(0.1).suffix(" seconds")).help("Total camera-animation duration in seconds, rounded to the nearest frame at the selected export framerate. All key times must fit within this duration.");
             ui.checkbox(&mut self.timeline.looping, "Close camera path into a loop").help("Return the camera to its first recorded view before the clip repeats. Leave time after the last key for a closing transition, or finish with a matching camera; incompatible endpoints are rejected.");
             ui.checkbox(&mut self.timeline.turntable, "Rotate the model too").help("Add one full model rotation over the camera timeline while lights stay fixed. Camera motion and deposited-layer build-up can run at the same time.");
             let deposited = self.model.as_ref().is_some_and(|m| !m.layer_tops_mm.is_empty());
-            ui.small("20 fps. Set a time, orbit/pan to compose a view, then record it. Transition settings belong to the segment leaving each key.");
+            ui.small("Set a time, orbit/pan to compose a view, then record it. Export uses the selected framerate. Transition settings belong to the segment leaving each key.");
             let scrub = ui.add(egui::Slider::new(&mut self.timeline_time, 0.0..=self.timeline.duration_seconds).text("Time (s)")).help("Scrub this camera path in seconds to preview the camera and deposited stage in native inspection. Scrubbing pauses playback; it does not change clip length or key times.");
             let mut sample = scrub.changed();
             if sample { self.timeline_playing = false; }
@@ -1362,7 +1372,10 @@ impl Studio {
                 self.changed();
             }
             if let Err(error)=self.timeline.validate() { ui.colored_label(egui::Color32::YELLOW,error.to_string()); }
-            else if let Ok(frames)=self.timeline.frame_count() { ui.small(format!("{frames} frames • {:.2} s",self.timeline.duration_seconds)); }
+            else { match self.timeline.frame_count_at_rate(self.frame_rate) {
+                Ok(frames) => { ui.small(format!("{frames} frames • {:.2} s at {} fps",f64::from(frames)/f64::from(self.frame_rate),self.frame_rate)); }
+                Err(error) => { ui.colored_label(egui::Color32::YELLOW,error.to_string()); }
+            }}
             if sample { self.sample_timeline(); }
             if deposited && (self.timeline.buildup || self.export_buildup) { ui.small("Build-up reveals whole print layers. STL cuts show the modeled solid; G-code retains deposited paths and gaps. This does not reproduce printer time or nozzle travel."); }
         }).help("Record camera views at chosen times and define the motion between them. Enable the timeline to replace basic turntable timing for GIF or MP4.");
@@ -1685,6 +1698,7 @@ impl Studio {
         if (controls::OutputEditor {
             format: &mut self.output_format,
             codec: &mut self.codec,
+            frame_rate: &mut self.frame_rate,
             animation_engine: &mut self.engine,
             animation_size: &mut self.size,
             animation_samples: &mut self.samples,
@@ -1721,12 +1735,12 @@ impl Studio {
                 ui.horizontal(|ui| {
                     ui.label("Animation length (s)");
                     ui.add(egui::DragValue::new(&mut self.turntable_timing.duration_seconds)
-                        .range(0.05..=500.).speed(0.05).max_decimals(2)).help("Total clip length in seconds, rounded to the nearest 20 fps frame (0.05 s). Total turns equal actual clip length divided by seconds per turn; matching poses render once and are copied in order.");
+                        .range(0.05..=500.).speed(0.05).max_decimals(2)).help("Total clip length in seconds, rounded to the nearest frame at the selected framerate (at least one frame). Total turns equal actual clip length divided by seconds per turn; matching poses render once and are copied in order.");
                 });
-                match (self.turntable_timing.total_turns(), self.turntable_timing.frame_count()) {
+                match (self.turntable_timing.total_turns_at_rate(self.frame_rate), self.turntable_timing.frame_count_at_rate(self.frame_rate)) {
                     (Ok(turns), Ok(frames)) => {
                         ui.label(format!("{turns:.3} total turns"));
-                        ui.small(format!("{frames} frames • {:.2} s at 20 fps", f64::from(frames)/20.));
+                        ui.small(format!("{frames} frames • {:.2} s at {} fps", f64::from(frames)/f64::from(self.frame_rate),self.frame_rate));
                     }
                     (Err(error), _) | (_, Err(error)) => {
                         ui.colored_label(egui::Color32::YELLOW, error.to_string());
@@ -2125,7 +2139,7 @@ impl Studio {
                 serde_json::json!(self.error.is_none() && self.debounced_import.is_none());
             self.smoke_checks["timeline_project_restored"] = serde_json::json!(
                 self.timeline_enabled
-                    && self.timeline.frame_count().ok() == Some(4)
+                    && self.timeline.frame_count_at_rate(self.frame_rate).ok() == Some(4)
                     && self.timeline.keyframes.len() == 2
                     && self.timeline.keyframes[0].spiral_turns == 1.
             );

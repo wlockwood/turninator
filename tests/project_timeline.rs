@@ -357,3 +357,24 @@ fn malformed_or_out_of_budget_saved_stage_and_angle_are_rejected_on_load() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn output_frame_rate_roundtrips_and_invalid_rates_preserve_project() {
+    let (root, original) = fixture();
+    let path = root.join("rate.turninator");
+    let mut project: ProjectFile = serde_json::from_value(original).unwrap();
+    for rate in [1, 24, 30, 60, 100] {
+        project.output_options.frame_rate = rate;
+        save_project(&path, &project).unwrap();
+        let (loaded, status) = load_project(&path).unwrap();
+        assert_eq!(status, SourceStatus::Current);
+        assert_eq!(loaded.output_options.frame_rate, rate);
+    }
+    let before = fs::read(&path).unwrap();
+    for rate in [0, 101, u32::MAX] {
+        project.output_options.frame_rate = rate;
+        assert!(save_project(&path, &project).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    fs::remove_dir_all(root).unwrap();
+}

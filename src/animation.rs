@@ -2,7 +2,33 @@
 use crate::{Result, viewport::OrbitCamera};
 use serde::{Deserialize, Serialize};
 
-/// Basic turntable timing. Output length is rounded to the nearest 20 fps frame.
+pub const DEFAULT_FRAME_RATE: u32 = 20;
+pub const MAX_FRAME_RATE: u32 = 100;
+
+pub fn default_frame_rate() -> u32 {
+    DEFAULT_FRAME_RATE
+}
+
+pub fn validate_frame_rate(frame_rate: u32) -> Result<()> {
+    if !(1..=MAX_FRAME_RATE).contains(&frame_rate) {
+        return Err("framerate must be from 1 to 100 frames per second".into());
+    }
+    Ok(())
+}
+
+pub fn frame_count_for_duration(duration_seconds: f64, frame_rate: u32) -> Result<u32> {
+    validate_frame_rate(frame_rate)?;
+    if !duration_seconds.is_finite() || !(0.05..=500.).contains(&duration_seconds) {
+        return Err("animation duration must be finite, from 0.05 to 500 seconds".into());
+    }
+    let count = (duration_seconds * f64::from(frame_rate)).round().max(1.);
+    if count > 10000. {
+        return Err("animation exceeds 10000 frames; reduce framerate or duration".into());
+    }
+    Ok(count as u32)
+}
+
+/// Basic turntable timing. Output length is rounded to the nearest output frame.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TurntableTiming {
@@ -30,11 +56,19 @@ impl TurntableTiming {
         Ok(())
     }
     pub fn frame_count(&self) -> Result<u32> {
+        self.frame_count_at_rate(DEFAULT_FRAME_RATE)
+    }
+    pub fn frame_count_at_rate(&self, frame_rate: u32) -> Result<u32> {
         self.validate()?;
-        Ok((self.duration_seconds * 20.).round() as u32)
+        frame_count_for_duration(self.duration_seconds, frame_rate)
     }
     pub fn total_turns(&self) -> Result<f64> {
-        Ok(f64::from(self.frame_count()?) / 20. / self.seconds_per_turn)
+        self.total_turns_at_rate(DEFAULT_FRAME_RATE)
+    }
+    pub fn total_turns_at_rate(&self, frame_rate: u32) -> Result<f64> {
+        Ok(f64::from(self.frame_count_at_rate(frame_rate)?)
+            / f64::from(frame_rate)
+            / self.seconds_per_turn)
     }
 }
 
@@ -161,8 +195,11 @@ impl Timeline {
         Ok(())
     }
     pub fn frame_count(&self) -> Result<u32> {
+        self.frame_count_at_rate(DEFAULT_FRAME_RATE)
+    }
+    pub fn frame_count_at_rate(&self, frame_rate: u32) -> Result<u32> {
         self.validate()?;
-        Ok((self.duration_seconds * 20.).round().clamp(1., 10000.) as u32)
+        frame_count_for_duration(self.duration_seconds, frame_rate)
     }
     pub fn sample(&self, time_seconds: f64) -> Result<AnimationSample> {
         self.validate()?;
@@ -235,7 +272,10 @@ impl Timeline {
         })
     }
     pub fn sample_frame(&self, index: u32) -> Result<AnimationSample> {
-        let count = self.frame_count()?;
+        self.sample_frame_at_rate(index, DEFAULT_FRAME_RATE)
+    }
+    pub fn sample_frame_at_rate(&self, index: u32, frame_rate: u32) -> Result<AnimationSample> {
+        let count = self.frame_count_at_rate(frame_rate)?;
         if index >= count {
             return Err("timeline frame index outside duration".into());
         }
@@ -255,8 +295,11 @@ impl Timeline {
         Ok(sample)
     }
     pub fn worker_frames(&self) -> Result<Vec<serde_json::Value>> {
-        (0..self.frame_count()?)
-            .map(|index| Ok(self.sample_frame(index)?.worker_state()))
+        self.worker_frames_at_rate(DEFAULT_FRAME_RATE)
+    }
+    pub fn worker_frames_at_rate(&self, frame_rate: u32) -> Result<Vec<serde_json::Value>> {
+        (0..self.frame_count_at_rate(frame_rate)?)
+            .map(|index| Ok(self.sample_frame_at_rate(index, frame_rate)?.worker_state()))
             .collect()
     }
 }

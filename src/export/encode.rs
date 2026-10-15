@@ -141,6 +141,37 @@ pub fn inspect_gif(path: &Path, size: u32, count: u32) -> Result<()> {
     inspect_gif_dimensions(path, size, size, count)
 }
 pub fn inspect_gif_dimensions(path: &Path, width: u32, height: u32, count: u32) -> Result<()> {
+    inspect_gif_dimensions_at_rate(path, width, height, count, 20)
+}
+
+fn validate_frame_rate(frame_rate: u32) -> Result<()> {
+    if !(1..=100).contains(&frame_rate) {
+        return Err("frame rate must be between 1 and 100 FPS".into());
+    }
+    Ok(())
+}
+
+/// Quantize absolute frame boundaries, avoiding cumulative GIF timing drift.
+pub fn gif_frame_delays(count: u32, frame_rate: u32) -> Result<Vec<u16>> {
+    validate_frame_rate(frame_rate)?;
+    if !(1..=10_000).contains(&count) {
+        return Err("frame count must be between 1 and 10000".into());
+    }
+    let rate = u64::from(frame_rate);
+    let boundary = |index: u32| (u64::from(index) * 100 + rate / 2) / rate;
+    Ok((0..count)
+        .map(|index| (boundary(index + 1) - boundary(index)) as u16)
+        .collect())
+}
+
+pub fn inspect_gif_dimensions_at_rate(
+    path: &Path,
+    width: u32,
+    height: u32,
+    count: u32,
+    frame_rate: u32,
+) -> Result<()> {
+    let delays = gif_frame_delays(count, frame_rate)?;
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::RGBA);
     let mut decoder = options.read_info(BufReader::new(fs::File::open(path)?))?;
@@ -149,12 +180,12 @@ pub fn inspect_gif_dimensions(path: &Path, width: u32, height: u32, count: u32) 
     }
     let mut found = 0;
     while let Some(frame) = decoder.read_next_frame()? {
-        if frame.delay != 5 {
-            return Err("GIF frame delay must be five centiseconds".into());
+        if delays.get(found).copied() != Some(frame.delay) {
+            return Err("GIF frame delay differs from requested frame rate".into());
         }
         found += 1;
     }
-    if found != count || decoder.repeat() != gif::Repeat::Infinite {
+    if found != count as usize || decoder.repeat() != gif::Repeat::Infinite {
         return Err("GIF frame count or infinite loop metadata differs".into());
     }
     Ok(())
@@ -163,7 +194,16 @@ pub fn inspect_gif_dimensions(path: &Path, width: u32, height: u32, count: u32) 
 const GIF_DITHER: &str = "sierra2_4a";
 
 pub fn gif_encoding_recipe() -> serde_json::Value {
-    serde_json::json!({"palette":format!("full,opaque,{GIF_DITHER}"),"fps":20,"final_delay_cs":5,"loop":0})
+    gif_encoding_recipe_at_rate(20)
+}
+
+pub fn gif_encoding_recipe_at_rate(frame_rate: u32) -> serde_json::Value {
+    let constant_delay = if (1..=100).contains(&frame_rate) && 100_u32.is_multiple_of(frame_rate) {
+        Some(100 / frame_rate)
+    } else {
+        None
+    };
+    serde_json::json!({"palette":format!("full,opaque,{GIF_DITHER}"),"fps":frame_rate,"final_delay_cs":constant_delay,"delay_policy":"round_absolute_centisecond_boundaries","loop":0})
 }
 
 pub fn encode_gif(
@@ -185,6 +225,23 @@ pub fn encode_gif_dimensions(
     height: u32,
     cancel: &AtomicBool,
 ) -> Result<ExportResult> {
+    encode_gif_dimensions_at_rate(frames, destination, tools, count, width, height, 20, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_gif_dimensions_at_rate(
+    frames: &Path,
+    destination: &Path,
+    tools: &ToolPaths,
+    count: u32,
+    width: u32,
+    height: u32,
+    frame_rate: u32,
+    cancel: &AtomicBool,
+) -> Result<ExportResult> {
+    let delays = gif_frame_delays(count, frame_rate)?;
+    let rate = frame_rate.to_string();
+    let final_delay = delays.last().ok_or("missing GIF frame delay")?.to_string();
     validate_frames_dimensions(frames, count, width, height)?;
     cancelled(cancel)?;
     let scratch = Scratch::new(destination.parent().ok_or("destination has no parent")?)?;
@@ -203,7 +260,7 @@ pub fn encode_gif_dimensions(
     let mut args = common.clone();
     args.extend(arguments(&[
         "-framerate",
-        "20",
+        &rate,
         "-start_number",
         "0",
         "-i",
@@ -225,7 +282,7 @@ pub fn encode_gif_dimensions(
     let mut args = common;
     args.extend(arguments(&[
         "-framerate",
-        "20",
+        &rate,
         "-start_number",
         "0",
         "-i",
@@ -241,7 +298,14 @@ pub fn encode_gif_dimensions(
     args.push(format!("paletteuse=dither={GIF_DITHER}"));
     args.extend(arguments(&["-frames:v"]));
     args.push(count.to_string());
-    args.extend(arguments(&["-r", "20", "-loop", "0", "-final_delay", "5"]));
+    args.extend(arguments(&[
+        "-r",
+        &rate,
+        "-loop",
+        "0",
+        "-final_delay",
+        &final_delay,
+    ]));
     args.push(encoded.to_string_lossy().into_owned());
     run_owned(
         &tools.ffmpeg,
@@ -250,10 +314,11 @@ pub fn encode_gif_dimensions(
         cancel,
         Duration::from_secs(600),
     )?;
-    inspect_gif_dimensions(&encoded, width, height, count)?;
+    inspect_gif_dimensions_at_rate(&encoded, width, height, count, frame_rate)?;
     cancelled(cancel)?;
     publish(&encoded, destination)?;
-    result(destination, width, height, count, count as u64 * 50)
+    let duration_ms = delays.iter().map(|&delay| u64::from(delay) * 10).sum();
+    result(destination, width, height, count, duration_ms)
 }
 
 pub fn encode_mp4(
@@ -309,19 +374,46 @@ pub fn encode_mp4_with_codec(
     codec: super::jobs::VideoCodec,
     cancel: &AtomicBool,
 ) -> Result<ExportResult> {
+    encode_mp4_with_codec_at_rate(
+        frames,
+        destination,
+        tools,
+        count,
+        width,
+        height,
+        codec,
+        20,
+        cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mp4_with_codec_at_rate(
+    frames: &Path,
+    destination: &Path,
+    tools: &ToolPaths,
+    count: u32,
+    width: u32,
+    height: u32,
+    codec: super::jobs::VideoCodec,
+    frame_rate: u32,
+    cancel: &AtomicBool,
+) -> Result<ExportResult> {
+    validate_frame_rate(frame_rate)?;
     validate_frames_dimensions(frames, count, width, height)?;
     if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err("MP4 dimensions must be even".into());
     }
     let scratch = Scratch::new(destination.parent().ok_or("destination has no parent")?)?;
     let encoded = scratch.0.join("output.mp4");
+    let rate = frame_rate.to_string();
     let mut args = arguments(&[
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
         "-framerate",
-        "20",
+        &rate,
         "-start_number",
         "0",
         "-i",
@@ -349,6 +441,8 @@ pub fn encode_mp4_with_codec(
         _ => args.extend(arguments(&["-crf", "18"])),
     }
     args.extend(arguments(&[
+        "-r",
+        &rate,
         "-pix_fmt",
         "yuv420p",
         "-movflags",
@@ -369,7 +463,7 @@ pub fn encode_mp4_with_codec(
         "v:0",
         "-count_frames",
         "-show_entries",
-        "stream=width,height,nb_read_frames,duration,codec_name",
+        "stream=width,height,nb_read_frames,duration,codec_name,avg_frame_rate",
         "-of",
         "json",
     ]);
@@ -387,6 +481,12 @@ pub fn encode_mp4_with_codec(
         .as_str()
         .ok_or("ffprobe missing duration")?
         .parse::<f64>()?;
+    let (rate_numerator, rate_denominator) = stream["avg_frame_rate"]
+        .as_str()
+        .and_then(|value| value.split_once('/'))
+        .ok_or("ffprobe missing frame rate")?;
+    let actual_rate = rate_numerator.parse::<f64>()? / rate_denominator.parse::<f64>()?;
+    let expected_duration = f64::from(count) / f64::from(frame_rate);
     if stream["width"] != width
         || stream["height"] != height
         || stream["codec_name"]
@@ -398,11 +498,20 @@ pub fn encode_mp4_with_codec(
             .as_str()
             .and_then(|s| s.parse::<u32>().ok())
             != Some(count)
-        || (duration - count as f64 / 20.0).abs() > 0.025
+        || !duration.is_finite()
+        || (duration - expected_duration).abs() > 0.001
+        || !actual_rate.is_finite()
+        || (actual_rate - f64::from(frame_rate)).abs() > 0.000_001
     {
-        return Err("MP4 dimensions/frame count/duration validation failed".into());
+        return Err("MP4 dimensions/frame count/duration/frame rate validation failed".into());
     }
     cancelled(cancel)?;
     publish(&encoded, destination)?;
-    result(destination, width, height, count, count as u64 * 50)
+    result(
+        destination,
+        width,
+        height,
+        count,
+        (duration * 1000.0).round() as u64,
+    )
 }

@@ -623,7 +623,9 @@ def apply_section(obj, section, rotation, center_xy, bottom, extent, geometry_ki
             "meaning":"Geometric intersection of the modeled mesh; not strength, mass, or measured print behavior."}
 
 
-def turntable_angles(frame_count, start_degrees, seconds_per_turn=None):
+def turntable_angles(frame_count, start_degrees, seconds_per_turn=None, frame_rate=20):
+    if type(frame_rate) is not int or not 1 <= frame_rate <= 100:
+        raise ValueError("framerate must be an integer from 1 to 100")
     if isinstance(frame_count, bool) or not isinstance(frame_count, int) or not 1 <= frame_count <= 10000:
         raise ValueError("frame_count outside 1..10000")
     _finite_number(start_degrees, "start_angle_degrees")
@@ -631,7 +633,7 @@ def turntable_angles(frame_count, start_degrees, seconds_per_turn=None):
         period = Fraction(frame_count)
     else:
         _finite_number(seconds_per_turn, "seconds_per_turn", 0.05, 500)
-        period = Fraction(str(seconds_per_turn)) * 20
+        period = Fraction(str(seconds_per_turn)) * frame_rate
     # Decimal timing has an exact rational phase. Repeated turns therefore use
     # identical angles even when a turn spans a non-integral number of frames.
     return [(start_degrees % 360 + float((Fraction(index) / period) % 1) * 360) % 360

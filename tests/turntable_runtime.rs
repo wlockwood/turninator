@@ -2,6 +2,16 @@
 #[test]
 #[ignore = "requires Blender, GPU and FFmpeg; writes artifacts/turntable-timing-proof"]
 fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
+    prove_repeated_turns(20);
+}
+
+#[test]
+#[ignore = "requires Blender/GPU and FFmpeg; validates selected30fps plus repeated-frame reuse"]
+fn selected_frame_rate_preserves_turns_duration_reuse_and_paired_sections() {
+    prove_repeated_turns(30);
+}
+
+fn prove_repeated_turns(frame_rate: u32) {
     use serde_json::{Value, json};
     use std::{
         fs,
@@ -17,13 +27,13 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
     };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("artifacts/turntable-timing-proof")
-        .join(
+        .join(format!(
+            "{}-{frame_rate}fps",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis()
-                .to_string(),
-        );
+        ));
     fs::create_dir_all(&dir).unwrap();
     let mesh = Mesh {
         positions: vec![
@@ -54,7 +64,7 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
     mesh.write_binary(&dir.join("mesh.bin")).unwrap();
     let scene = json!({"schema_version":1,"mesh_path":dir.join("mesh.bin"),"geometry_kind":"original",
         "display_rotation_degrees":[0,0,0],"color":[0.04,0.2,0.65],"roughness":0.4,
-        "layer_height_mm":0.2,"studio_preset":"dark","warnings":[]});
+        "layer_height_mm":0.2,"solid_layer_tops_mm":[2.,4.,6.,8.,10.],"studio_preset":"dark","warnings":[]});
     fs::write(dir.join("scene.json"), serde_json::to_vec(&scene).unwrap()).unwrap();
     let mut tools = ToolPaths::default();
     if let Some(blender) = std::env::var_os("TURNINATOR_TEST_BLENDER") {
@@ -68,6 +78,7 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
         destination: dir.join("three-turns.gif"),
         kind: ExportKind::Gif,
         size: 128,
+        frame_rate,
         samples: 8,
         turntable_timing: Some(TurntableTiming {
             seconds_per_turn: 0.2,
@@ -76,7 +87,13 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
         ..Default::default()
     };
     let result = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
-    assert_eq!((result.frame_count, result.duration_ms), (12, 600));
+    let total_frames = frame_rate * 3 / 5;
+    let unique_frames = frame_rate / 5;
+    let partial_frames = frame_rate / 2;
+    assert_eq!(
+        (result.frame_count, result.duration_ms),
+        (total_frames, 600)
+    );
     let render_dir: PathBuf = fs::read_dir(&request.job_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -87,27 +104,29 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
             .unwrap()
     };
     let first = details();
-    assert_eq!(first["unique_frame_count"], 4);
-    assert_eq!(first["rendered_frame_count"], 4);
-    assert_eq!(first["copied_frame_count"], 8);
+    assert_eq!(first["unique_frame_count"], unique_frames);
+    assert_eq!(first["rendered_frame_count"], unique_frames);
+    assert_eq!(first["copied_frame_count"], total_frames - unique_frames);
+    assert_eq!(first["frame_rate"], frame_rate);
     assert_eq!(first["render_strategy"], "animation");
-    assert_eq!(first["frame_pipeline"]["validated_frames"], 4);
+    assert_eq!(first["frame_pipeline"]["validated_frames"], unique_frames);
     assert!(first["frame_pipeline"]["workers"].as_u64().unwrap() >= 1);
-    for i in 0..12 {
+    for i in 0..total_frames {
         assert_eq!(
             fs::read(render_dir.join(format!("frames/frame_{i:04}.png"))).unwrap(),
-            fs::read(render_dir.join(format!("frames/frame_{:04}.png", i % 4))).unwrap()
+            fs::read(render_dir.join(format!("frames/frame_{:04}.png", i % unique_frames)))
+                .unwrap()
         );
     }
     // Retrying validated jobs renders and copies nothing.
     request.destination = dir.join("retry.mp4");
     request.kind = ExportKind::Mp4;
     let retry = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
-    assert_eq!((retry.frame_count, retry.duration_ms), (12, 600));
+    assert_eq!((retry.frame_count, retry.duration_ms), (total_frames, 600));
     let retried = details();
     assert_eq!(retried["rendered_frame_count"], 0);
     assert_eq!(retried["copied_frame_count"], 0);
-    assert_eq!(retried["verified_frame_count"], 12);
+    assert_eq!(retried["verified_frame_count"], total_frames);
     // Retry validates each PNG completely; one corrupt image must be regenerated
     // without publishing progress out of order or touching its valid siblings.
     let untouched = fs::read(render_dir.join("frames/frame_0000.png")).unwrap();
@@ -117,7 +136,7 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
     let repaired = details();
     assert_eq!(repaired["render_strategy"], "individual_frames");
     assert_eq!(repaired["rendered_frame_count"], 1);
-    assert_eq!(repaired["verified_frame_count"], 11);
+    assert_eq!(repaired["verified_frame_count"], total_frames - 1);
     assert_eq!(repaired["frame_pipeline"]["validated_frames"], 1);
     assert_eq!(
         fs::read(render_dir.join("frames/frame_0000.png")).unwrap(),
@@ -128,7 +147,10 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
     request.kind = ExportKind::Gif;
     request.turntable_timing.as_mut().unwrap().duration_seconds = 0.5;
     let partial = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
-    assert_eq!((partial.frame_count, partial.duration_ms), (10, 500));
+    assert_eq!(
+        (partial.frame_count, partial.duration_ms),
+        (partial_frames, 500)
+    );
     // Both full and cutaway panels independently share their repeated poses.
     request.destination = dir.join("paired.gif");
     request.layout = ExportLayout::SideBySide;
@@ -141,7 +163,7 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
     let paired = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
     assert_eq!(
         (paired.width, paired.frame_count, paired.duration_ms),
-        (256, 10, 500)
+        (256, partial_frames, 500)
     );
     let panel_dir = fs::read_dir(&request.job_dir)
         .unwrap()
@@ -153,15 +175,65 @@ fn repeated_turns_render_once_and_preserve_order_duration_and_retry() {
             &fs::read(panel_dir.join(panel).join("render-result.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(stats["rendered_frame_count"], 4);
-        assert_eq!(stats["copied_frame_count"], 6);
+        assert_eq!(stats["rendered_frame_count"], unique_frames);
+        assert_eq!(stats["copied_frame_count"], partial_frames - unique_frames);
         let analysis = stats["frame_analysis"].as_array().unwrap();
-        assert_eq!(analysis[0], analysis[4]);
+        assert_eq!(analysis[0], analysis[unique_frames as usize]);
+    }
+    if frame_rate != 20 {
+        use turninator::animation::{CameraKeyframe, Timeline};
+        use turninator::viewport::OrbitCamera;
+        let camera = OrbitCamera {
+            target_mm: [10., 6., 5.],
+            distance_mm: 100.,
+            ortho_span_mm: 40.,
+            ..Default::default()
+        };
+        request.turntable_timing = None;
+        request.section = None;
+        request.layout = ExportLayout::Single;
+        request.kind = ExportKind::Mp4;
+        request.destination = dir.join("selected-rate-camera.mp4");
+        request.timeline = Some(Timeline {
+            duration_seconds: 0.2,
+            keyframes: vec![
+                CameraKeyframe {
+                    camera: camera.clone(),
+                    ..Default::default()
+                },
+                CameraKeyframe {
+                    time_seconds: 0.2,
+                    camera: OrbitCamera {
+                        yaw_degrees: camera.yaw_degrees + 30.,
+                        ..camera
+                    },
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let moving = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
+        assert_eq!(
+            (moving.frame_count, moving.duration_ms),
+            (frame_rate / 5, 200)
+        );
+        request.timeline = None;
+        request.animation = turninator::export::AnimationMode::BuildUp;
+        request.frame_count = frame_rate / 5;
+        request.kind = ExportKind::Gif;
+        request.destination = dir.join("selected-rate-build-up.gif");
+        let growing = run_export(&mut worker, &tools, &request, &cancel, |_| {}).unwrap();
+        assert_eq!(
+            (growing.frame_count, growing.duration_ms),
+            (frame_rate / 5, 200)
+        );
     }
     fs::write(
         dir.join("acceptance.json"),
-        serde_json::to_vec_pretty(&json!({"first":first,"retry":retried,
-        "gif":result,"mp4":retry,"partial":partial,"paired":paired}))
+        serde_json::to_vec_pretty(
+            &json!({"first":first,"retry":retried,"repaired":repaired,"frame_rate":frame_rate,
+        "gif":result,"mp4":retry,"partial":partial,"paired":paired}),
+        )
         .unwrap(),
     )
     .unwrap();

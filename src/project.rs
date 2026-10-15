@@ -27,6 +27,7 @@ pub struct OutputPreferences {
     pub still_engine: String,
     pub still_samples: u32,
     pub samples: u32,
+    pub frame_rate: u32,
     pub transparent: bool,
     pub video_codec: VideoCodec,
     pub animation: AnimationMode,
@@ -45,6 +46,7 @@ impl Default for OutputPreferences {
             still_engine: "cycles".into(),
             still_samples: 64,
             samples: 32,
+            frame_rate: crate::animation::DEFAULT_FRAME_RATE,
             transparent: false,
             video_codec: VideoCodec::H264,
             animation: AnimationMode::Turntable,
@@ -129,6 +131,7 @@ fn validate_project(project: &ProjectFile) -> Result<()> {
     project.scene.validate()?;
     project.camera.validate()?;
     let output = &project.output_options;
+    crate::animation::validate_frame_rate(output.frame_rate)?;
     output.turntable_timing.validate()?;
     if let Some(timeline) = &output.timeline {
         timeline.validate()?;

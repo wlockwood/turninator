@@ -27,6 +27,7 @@ impl<T> HelpResponse for egui::CollapsingResponse<T> {
 pub(super) const ENCODING: &str = "Choose the file you want to create. Only settings for that output are shown; switching formats keeps your other preferences.";
 pub(super) const RENDERER: &str = "EEVEE gives a fast studio preview. Cycles traces light for more realistic reflections and resin, and requires a supported NVIDIA OptiX GPU in this app. Both use your configured Blender.";
 pub(super) const SAMPLES: &str = "More samples reduce render noise and help resolve fine detail, but take longer. Start with 32 for EEVEE or 64 for Cycles, then increase if the result is noisy.";
+pub(super) const FRAME_RATE: &str = "Output frames per second, from 1 to 100 (default 20). Higher rates make motion smoother but create more frames to render and store; clip length and seconds per turn stay the same. Matching poses are still reused. GIF timing rounds to 0.01-second steps, and some players slow very short delays; use MP4 for dependable high-rate playback. Jobs are limited to 10,000 frames, so reduce rate or duration if needed.";
 pub(super) const BUILD_UP: &str = "Grow the part through whole print layers during GIF or MP4 export, ending with the complete model. Closed STL surfaces show a solid top cross-section while preserving modeled holes; G-code retains deposited paths and voids. Works with camera motion, materials and sections. This represents layer order, not printer time or nozzle travel.";
 pub(super) const PREVIEW: &str = "Render the current view with the selected Blender renderer; sheets preview all four views. Uses 768 pixels and 16 samples for a quick check. Open a model and finish any current render/import first.";
 pub(super) const LAYER_HEIGHT: &str = "Spacing between later printed layers, in millimetres; 0.20 mm is a common FDM setting. Smaller values create finer detail. For G-code this is a fallback where HEIGHT metadata is absent.";
@@ -39,10 +40,10 @@ pub(super) fn encoding(format: crate::export::OutputFormat) -> &'static str {
     use crate::export::OutputFormat;
     match format {
         OutputFormat::Gif => {
-            "A looping animation that is easy to share. Uses 20 frames per second and a shared color palette; detailed gradients can be less smooth than MP4."
+            "A looping animation that is easy to share. Uses the selected framerate and a shared color palette; detailed gradients can be less smooth than MP4. GIF timing uses centisecond steps and player support varies at high rates."
         }
         OutputFormat::Mp4 => {
-            "A 20 fps video with smoother gradients than GIF. Choose H.264 or AV1 below, then open the saved video in your player."
+            "A video at the selected framerate, with smoother gradients than GIF. Choose H.264 or AV1 below, then open the saved video in your player."
         }
         OutputFormat::Png => {
             "One high-resolution image of the current view, including any selected section or deposited stage. Can keep a transparent background."

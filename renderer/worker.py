@@ -286,10 +286,11 @@ def render(request):
         raise ValueError("output_dir must be absolute")
     output_dir = Path(raw_directory)
     seconds_per_turn = request.get("seconds_per_turn")
+    frame_rate = request.get("frame_rate",20)
     if seconds_per_turn is not None and (mode != "turntable" or request.get("frame_states") is not None or request.get("frame_states_path") is not None):
         raise ValueError("basic rotation speed requires a turntable without camera frame states")
     angles = turntable_angles(request.get("frame_count", 80) if mode != "still" else 1,
-                              request.get("start_angle_degrees", 0.0), seconds_per_turn)
+                              request.get("start_angle_degrees", 0.0), seconds_per_turn, frame_rate)
     if mode == "buildup":
         angles = [angles[0]]*len(angles)
     states=load_frame_states(request,len(angles))
@@ -316,6 +317,7 @@ def render(request):
               "engine": engine, "size": size, "width": width, "height": height, "samples": samples, "mode": mode,
               "angles": angles, "transparent": transparent,
               "seconds_per_turn": seconds_per_turn,
+              "frame_rate": frame_rate,
               "frame_states_hash":hashlib.sha256(json.dumps(states,sort_keys=True,allow_nan=False).encode()).hexdigest() if states is not None else None,
               "build_stage":stage}
     prepare_manifest(output_dir, recipe, reuse)
@@ -325,6 +327,7 @@ def render(request):
         render_spec["fit_turntable"]=False
         render_spec["camera"]=states[0]["camera"]
     obj, info = build_scene(render_spec, engine, size, samples, transparent, width, height)
+    bpy.context.scene.render.fps = frame_rate
     if info["geometry_hash"] != recipe["geometry_hash"]:
         raise ValueError("geometry changed during scene preparation")
     prepare_seconds = time.perf_counter() - started
@@ -453,7 +456,7 @@ def render(request):
     analysis_temporary.write_text(json.dumps(frame_analysis,allow_nan=False),encoding="utf-8")
     os.replace(analysis_temporary,analysis_path)
     payload={"paths": completed, "engine": engine, "size": size, "samples": samples,
-             "frame_count":len(angles),"build_layer_count":len(info.get("build_layers") or []),
+             "frame_count":len(angles),"frame_rate":frame_rate,"build_layer_count":len(info.get("build_layers") or []),
              "unique_frame_count": len(set(sources)), "rendered_frame_count": rendered_count,
              "copied_frame_count": copied_count, "verified_frame_count": verified_count,
              "render_strategy":"animation" if batch_times else "individual_frames",

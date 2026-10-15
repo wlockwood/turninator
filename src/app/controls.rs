@@ -70,6 +70,7 @@ pub(super) fn layer_settings(
 pub(super) struct OutputEditor<'a> {
     pub format: &'a mut OutputFormat,
     pub codec: &'a mut VideoCodec,
+    pub frame_rate: &'a mut u32,
     pub animation_engine: &'a mut String,
     pub animation_size: &'a mut u32,
     pub animation_samples: &'a mut u32,
@@ -106,6 +107,9 @@ impl OutputEditor<'_> {
                     ui.selectable_value(self.codec, VideoCodec::H264, "H.264").help("A widely supported video format and a good default for sharing. Uses the configured FFmpeg H.264 encoder.");
                     ui.selectable_value(self.codec, VideoCodec::Av1, "AV1").help("An alternative video codec that can give smaller files. Encoding can take longer and some players may not support it. Requires AV1 support in your FFmpeg.");
                 }).help("Choose the codec inside the MP4 file. H.264 favors broad compatibility; AV1 can reduce file size but needs a compatible encoder and player. Unavailable codecs produce an error rather than silently switching.");
+        }
+        if self.format.animated() {
+            frame_rate_control(ui, self.frame_rate);
         }
         let (engine, size, samples) = if self.format.animated() {
             (
@@ -153,10 +157,59 @@ impl OutputEditor<'_> {
     }
 }
 
+fn frame_rate_control(ui: &mut egui::Ui, frame_rate: &mut u32) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.label("Framerate (fps)").help(help::FRAME_RATE);
+        ui.add(
+            egui::DragValue::new(frame_rate)
+                .range(1..=crate::animation::MAX_FRAME_RATE)
+                .speed(1),
+        )
+        .help(help::FRAME_RATE)
+    })
+    .inner
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::project::OutputPreferences;
+
+    #[test]
+    fn frame_rate_control_displays_its_timing_and_cost_tooltip() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| {
+            style.interaction.tooltip_delay = 0.;
+            style.interaction.tooltip_grace_time = 0.;
+        });
+        let mut rate = 30;
+        let mut rect = egui::Rect::NOTHING;
+        let mut found = false;
+        for frame in 0..4 {
+            let input = egui::RawInput {
+                time: Some(f64::from(frame)),
+                events: if frame == 0 {
+                    vec![]
+                } else {
+                    vec![egui::Event::PointerMoved(rect.center())]
+                },
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                rect = frame_rate_control(ui, &mut rate).rect;
+            });
+            found |= text_output(output).iter().any(|(text, _)| {
+                text.contains("frames per second")
+                    && text.contains("render and store")
+                    && text.contains("GIF timing")
+            });
+        }
+        assert!(
+            found,
+            "framerate tooltip should explain smoothness, cost and GIF timing"
+        );
+        assert_eq!(rate, 30);
+    }
 
     #[test]
     fn one_build_checkbox_can_disable_a_saved_timeline_flag() {
@@ -222,6 +275,7 @@ mod tests {
                     OutputEditor {
                         format: &mut format,
                         codec: &mut options.video_codec,
+                        frame_rate: &mut options.frame_rate,
                         animation_engine: &mut engine,
                         animation_size: &mut size,
                         animation_samples: &mut samples,
@@ -279,6 +333,7 @@ mod tests {
     fn codec_is_below_encoding_and_only_drawn_for_mp4() {
         let mut options = OutputPreferences {
             video_codec: VideoCodec::Av1,
+            frame_rate: 24,
             transparent: true,
             ..Default::default()
         };
@@ -291,6 +346,12 @@ mod tests {
             let texts = rendered_text(format, &mut options);
             let encoding_y = texts.iter().find(|(text, _)| text == "Encoding").unwrap().1;
             let codec = texts.iter().find(|(text, _)| text == "MP4 codec");
+            let rate = texts.iter().find(|(text, _)| text == "Framerate (fps)");
+            assert_eq!(rate.is_some(), format.animated());
+            if let Some((_, y)) = rate {
+                assert!(*y > codec.map_or(encoding_y, |(_, y)| *y));
+            }
+            assert_eq!(options.frame_rate, 24);
             if format == OutputFormat::Mp4 {
                 assert!(codec.unwrap().1 > encoding_y);
             } else {
