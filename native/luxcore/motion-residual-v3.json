@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "checker": "analytic-common-phase-residual-v3",
+  "basis": "256-subpixel analytic first-height/buildZ phase; per-regime harmonics1..4; shared coefficients across poses",
+  "coefficients": [
+    0.05267924918289073,
+    2.985773610175924,
+    0.04860027266326995,
+    -0.04183721964693487,
+    -0.620817861242188,
+    0.09605463686974197,
+    -0.06791178506934276,
+    0.005672643113853668,
+    0.32651851616618105,
+    -0.09542511477886335,
+    1.3483155413496566,
+    5.261097474197723,
+    -3.303042824669937,
+    1.7026336331854601,
+    -1.153829610683037,
+    -1.251144516662392,
+    0.2689734320563537,
+    -0.4598926449832174
+  ],
+  "training_phases": [
+    0,
+    0.25,
+    0.5,
+    0.75
+  ],
+  "held_out_phase": 0.375,
+  "fit_source": "cabi-motion-v2/layers_motion_oidn",
+  "maximum_residual_variation": 2.0
+}
