@@ -7,6 +7,12 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#ifdef TN_NATIVE_LIFECYCLE_TEST_HOOKS
+namespace tn::test {
+// Linked only into the controlled lifecycle test, never bridge DLLs.
+void before_idle_wait(const std::atomic<bool>& stopping,const std::atomic<bool>& cancellation);
+}
+#endif
 namespace tn::facade {
 namespace {
 static_assert(std::atomic<uint32_t>::is_always_lock_free && std::atomic<uint64_t>::is_always_lock_free && std::atomic<bool>::is_always_lock_free);
@@ -62,7 +68,13 @@ struct Context {
             for(;;) {
                 {
                     std::unique_lock lock(mutex);
-                    changed.wait(lock,[&]{return stopping.load()||task.has_value();});
+                    changed.wait(lock,[&]{
+                        const bool ready=stopping.load()||task.has_value();
+#ifdef TN_NATIVE_LIFECYCLE_TEST_HOOKS
+                        if(!ready) test::before_idle_wait(stopping,cancellation);
+#endif
+                        return ready;
+                    });
                     if(stopping.load()) break;
                     next=std::move(task); task.reset();
                 }
@@ -105,7 +117,11 @@ struct Context {
         { std::lock_guard lock(mutex); initialized=true; } changed.notify_one();
     }
     ~Context() noexcept {
-        stopping=true; cancellation=true; changed.notify_one();
+        cancellation=true; // active SDK work observes cancellation without waiting
+        // Serialize the predicate with wait's check-and-sleep transition. An
+        // atomic store plus notify alone can be lost before the worker sleeps.
+        { std::lock_guard lock(mutex); stopping=true; }
+        changed.notify_one();
         if(worker.joinable()) worker.join();
     }
 };

@@ -141,3 +141,75 @@ There is no hard cancellation guarantee for a blocked driver/compiler, so create
 or destroy can still block. No actual GPU pixels, performance, color/alpha,
 volume/layer support, production availability or redistribution qualification
 is claimed. Existing Task5a/5b SDK/packaging gates remain open.
+
+## Review fix round1: idle shutdown and upload cancellation
+
+Base: `bf6b4c8399b5b8db875c53c5ec0fe1af52f70d80`. Addresses Important I1 and
+Minor M1 from `task-5c-review.md`. Only `native/common/facade.cpp`,
+`native/fixture/{CMakeLists.txt,lifecycle.cpp}` and this report change. ABI1,
+exports, public Rust contracts, SDK backends and parser pin are unchanged.
+
+I1 root cause was verified in the actual wait path: the predicate was read under
+`Context::mutex`, but destruction changed `stopping` without taking that mutex.
+An atomic stop store did not prevent notify from occurring between the worker's
+false predicate check and its wait. Destruction now sets cancellation promptly,
+then acquires the same mutex to set `stopping`, releases it, notifies and joins.
+No SDK work holds that mutex, and poll/cancel remain lock-free.
+
+The lifecycle executable alone compiles an instrumented copy of the exact common
+facade source with `TN_NATIVE_LIFECYCLE_TEST_HOOKS`; it links the shared core's
+validation object. Ordinary fixture/production bridge facades compile without
+that macro and contain no hook call or new ABI export. A single hook runs after
+the idle predicate evaluates false while the worker still owns its wait mutex.
+The regression arms the hook only during a completed frame, reads the drained
+frame back to Idle, then destroys on the owner thread. The hook waits for prompt
+atomic cancellation and checks that `stopping` has not changed while the worker
+still owns the mutex. Old code fails this check; the test exits the worker through
+normal exception cleanup instead of deliberately hanging after a lost notify.
+Fixed code allows the worker to enter its real atomic unlock/wait transition,
+after which destroy obtains the mutex, sets stop and wakes/joins it. This is a
+controlled boundary regression, not a probabilistic create/destroy loop.
+
+M1 adds an independent SDK-upload gate to the same fake backend. Cancellation
+is observed while upload/drain remains held; poll must stay Cancelling and begin
+must reject until the gate opens. No render starts for the interrupted upload.
+After drain and Cancelled acknowledgement, retrying the same scene without a
+new upload call must produce SDK upload revisions `[7,7]` and one completed
+render/readback. The existing conditional upload-generation assignment already
+satisfied this behavior; the new test directly protects it.
+
+Coordinator granted the focused CPU/native/shared-Cargo slots. Exact covering
+verification in the same worktree/build directory:
+
+1. I1 RED before the destructor fix:
+   `./tools/build-renderers.ps1 -Fixture -BuildDirectory artifacts/native-core`
+   and `cmake --build artifacts/native-core --config Release --target tn_fixture_lifecycle`
+   exited0. Then
+   `ctest --test-dir artifacts/native-core -C Release -R fixture_worker_lifecycle --output-on-failure`
+   exited1: **0/1 passed**, `fixture_worker_lifecycle` failed in0.03seconds with
+   `stop predicate changed while worker still held wait mutex`.
+2. I1 GREEN after serializing stop: the same targeted build and CTest exited0,
+   **1/1 passed**. The new gated-upload coverage also passed, **1/1**.
+3. M1 regression sensitivity RED: temporarily assigned `uploaded_generation`
+   unconditionally after upload, rebuilt `tn_fixture_lifecycle`, and ran the same
+   targeted CTest. It exited1, **0/1 passed**, named failure
+   `interrupted upload generation must be uploaded again` in0.05seconds. Removed
+   the mutation; the final code retains `if(!work.cancelled())`.
+4. Final complete focused native build:
+   `./tools/build-renderers.ps1 -Fixture -BuildDirectory artifacts/native-core`
+   exited0 with `/W4 /WX /EHsc`, rebuilding all fixture bridges with the fixed
+   ordinary facade and the controlled lifecycle executable. Then
+   `ctest --test-dir artifacts/native-core -C Release --output-on-failure`
+   exited0: **2/2 passed**, no failures.
+5. `$env:CARGO_TARGET_DIR='D:/code/turninator/target'; $env:TN_RENDERER_FIXTURE_DIR='D:/code/turninator/.worktrees/renderer-native-core/artifacts/native-core/fixture/Release'; cargo test --offline --test embedded_loader`
+   exited0: **9 passed / 0 failed / 0 ignored**, including repeated context/module
+   destruction and all fault/dependency/matrix/capacity cases. Covering
+   `cargo clippy --offline --lib --test embedded_loader -- -D warnings`
+   exited0, clean; no Rust source/test changes were needed. CPU/native/shared
+   Cargo slots were explicitly released after these checks.
+6. `git diff --check`, path-limited staged review and
+   `git diff --cached --check` clean before commit. No whole-suite or GPU tests.
+
+These changes resolve the ordinary idle-worker missed wake. They do not alter
+the documented possibility of SDK/compiler/driver blocking during teardown;
+actual SDK cancellation/drain and GPU behavior remain separately unqualified.

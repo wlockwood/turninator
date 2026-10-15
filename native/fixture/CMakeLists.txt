@@ -24,9 +24,11 @@ target_link_libraries(tn_fixture_contract PRIVATE tn_fixture)
 target_link_libraries(tn_fixture_contract PRIVATE tn_native_core)
 target_compile_options(tn_fixture_contract PRIVATE /W4 /WX /EHsc)
 add_test(NAME fixture_caller_buffers COMMAND tn_fixture_contract)
-add_executable(tn_fixture_lifecycle lifecycle.cpp ../common/exports.cpp)
+# Compile an instrumented facade here; the library supplies only validation.cpp.
+# Production/fixture DLLs link the ordinary facade with no test hooks.
+add_executable(tn_fixture_lifecycle lifecycle.cpp ../common/exports.cpp ../common/facade.cpp)
 target_link_libraries(tn_fixture_lifecycle PRIVATE tn_native_core)
-target_compile_definitions(tn_fixture_lifecycle PRIVATE TN_BUILDING_BRIDGE)
+target_compile_definitions(tn_fixture_lifecycle PRIVATE TN_BUILDING_BRIDGE TN_NATIVE_LIFECYCLE_TEST_HOOKS)
 target_compile_options(tn_fixture_lifecycle PRIVATE /W4 /WX /EHsc)
 add_test(NAME fixture_worker_lifecycle COMMAND tn_fixture_lifecycle)
 set_tests_properties(fixture_caller_buffers fixture_worker_lifecycle PROPERTIES TIMEOUT 30)

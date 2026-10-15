@@ -14,9 +14,12 @@ struct Control {
     bool entered=false, release=false, owner_calls_done=false, timed_out=false;
     bool throw_render=false, throw_upload=false, throw_describe=false, unknown_exception=false, throw_factory=false;
     bool destroyed=false, destroy_started=false, cancellation_seen=false;
+    bool gate_idle_wait=false, gate_idle_after_render=false, idle_boundary=false, unsynchronized_stop=false;
+    bool gate_upload=false, upload_entered=false, upload_release=false, upload_cancel_seen=false;
     std::vector<std::thread::id> threads;
     std::vector<uint64_t> revisions;
     uint32_t seed=0;
+    uint32_t render_count=0;
     float position=0;
 } control;
 void check(bool b,const char* what) { if(!b) throw std::runtime_error(what); }
@@ -30,14 +33,24 @@ struct PendingBackend final : tn::Backend {
         record(); if(control.throw_describe) throw std::runtime_error("describe fault");
         return R"({"schema_version":1,"backend":"fixture","sdk_version":"test","device_id":"cpu-fixture","device_name":"CPU fixture","api":"fixture","driver":"none"})";
     }
-    void upload(const tn::Scene& s,tn::Work&) override {
+    void upload(const tn::Scene& s,tn::Work& work) override {
         record(); control.revisions.push_back(s.revision);
         control.position=s.positions_mm.empty()?0:s.positions_mm[0];
         if(control.throw_upload) throw std::runtime_error("upload fault");
+        std::unique_lock lock(control.mutex);
+        if(control.gate_upload) {
+            control.upload_entered=true; control.changed.notify_all();
+            while(!control.upload_release) {
+                if(work.cancelled()) { control.upload_cancel_seen=true; control.changed.notify_all(); }
+                control.changed.wait_for(lock,10ms); // pending SDK upload/drain
+            }
+        }
     }
     std::vector<uint8_t> render(const tn::Frame& f,tn::Work& work) override {
         record();
         std::unique_lock lock(control.mutex); control.entered=true;
+        ++control.render_count;
+        if(control.gate_idle_after_render) { control.gate_idle_wait=true; control.gate_idle_after_render=false; }
         control.seed=f.parameters.sample_seed; work.total=7; work.completed=3;
         control.changed.notify_all();
         while(!control.release) { // SDK/readback drain gate
@@ -78,6 +91,10 @@ void release() { std::lock_guard lock(control.mutex); control.release=true; cont
 void reset() {
     control.entered=control.release=control.owner_calls_done=control.timed_out=false;
     control.destroyed=control.destroy_started=control.cancellation_seen=false;
+    control.gate_idle_wait=control.gate_idle_after_render=control.idle_boundary=control.unsynchronized_stop=false;
+    control.gate_upload=control.upload_entered=control.upload_release=control.upload_cancel_seen=false;
+    control.render_count=0;
+    error_text[0]=0;
     control.throw_render=control.throw_upload=control.throw_describe=control.unknown_exception=control.throw_factory=false;
     control.threads.clear(); control.revisions.clear();
 }
@@ -138,6 +155,57 @@ void destroy_joins_pending() {
     { std::lock_guard lock(control.mutex); control.destroy_started=true; control.changed.notify_all(); }
     tn_renderer_destroy(c); drainer.join(); verify_owner();
 }
+void cancellation_during_upload_drains_and_reuploads() {
+    reset(); auto c=create(); upload(c,7);
+    {
+        std::lock_guard lock(control.mutex); control.gate_upload=true; control.release=true;
+    }
+    const std::string q=R"({"schema_version":1,"quality":{"kind":"filament","aa":"high","shadows":"high"}})";
+    auto f=frame_input(7,q); check(tn_renderer_begin_frame(c,&f,&error)==TN_OK,"begin gated upload");
+    {
+        std::unique_lock lock(control.mutex);
+        check(control.changed.wait_for(lock,5s,[]{return control.upload_entered;}),"SDK upload entry");
+    }
+    check(tn_renderer_cancel(c,&error)==TN_OK,"cancel during upload");
+    {
+        std::unique_lock lock(control.mutex);
+        check(control.changed.wait_for(lock,5s,[]{return control.upload_cancel_seen;}),"SDK upload observes cancellation");
+        check(control.render_count==0,"cancelled upload must not start render");
+    }
+    check(poll(c)==TN_CANCELLING,"upload cancellation cannot acknowledge before drain");
+    check(tn_renderer_begin_frame(c,&f,&error)==TN_INVALID_STATE,"no begin during upload drain");
+    {
+        std::lock_guard lock(control.mutex); control.upload_release=true; control.changed.notify_all();
+    }
+    wait_state(c,TN_CANCELLED); check(poll(c)==TN_IDLE,"upload drain restores Idle");
+    check(tn_renderer_begin_frame(c,&f,&error)==TN_OK,"same-scene retry after interrupted upload");
+    wait_state(c,TN_READY);
+    check(control.revisions==std::vector<uint64_t>{7,7},"interrupted upload generation must be uploaded again");
+    check(control.render_count==1,"only retried frame renders");
+    uint8_t bytes[16]; tn_image image{sizeof(tn_image),1};
+    check(tn_renderer_read_rgba8(c,bytes,sizeof(bytes),&image,&error)==TN_OK,"retried upload readback");
+    tn_renderer_destroy(c); verify_owner();
+}
+void destroy_at_idle_wait_boundary() {
+    reset(); auto c=create(); upload(c,1);
+    {
+        std::lock_guard lock(control.mutex);
+        control.gate_idle_after_render=true; control.release=true;
+    }
+    const std::string q=R"({"schema_version":1,"quality":{"kind":"filament","aa":"high","shadows":"high"}})";
+    auto f=frame_input(1,q); check(tn_renderer_begin_frame(c,&f,&error)==TN_OK,"begin idle-boundary frame");
+    {
+        std::unique_lock lock(control.mutex);
+        check(control.changed.wait_for(lock,5s,[]{return control.idle_boundary;}),"controlled idle predicate boundary");
+    }
+    check(poll(c)==TN_READY,"frame drained before idle shutdown");
+    uint8_t bytes[16]; tn_image image{sizeof(tn_image),1};
+    check(tn_renderer_read_rgba8(c,bytes,sizeof(bytes),&image,&error)==TN_OK,"idle-boundary read");
+    check(poll(c)==TN_IDLE,"idle before destroy");
+    tn_renderer_destroy(c);
+    check(!control.unsynchronized_stop,"stop predicate changed while worker still held wait mutex");
+    verify_owner();
+}
 void exceptions_cleanup() {
     for(int stage=0;stage<5;++stage) {
         reset();
@@ -169,9 +237,31 @@ std::unique_ptr<Backend> make_backend(const Config&) {
     return std::make_unique<PendingBackend>();
 }
 }
+namespace tn::test {
+void before_idle_wait(const std::atomic<bool>& stopping,const std::atomic<bool>& cancellation) {
+    {
+        std::lock_guard lock(control.mutex);
+        if(!control.gate_idle_wait) return;
+        control.gate_idle_wait=false; control.idle_boundary=true; control.changed.notify_all();
+    }
+    // The facade still holds its wait mutex and has evaluated a false predicate.
+    // Prompt atomic cancellation tells us the owner has entered destruction.
+    const auto deadline=std::chrono::steady_clock::now()+5s;
+    while(!cancellation.load()) {
+        check(std::chrono::steady_clock::now()<deadline,"owner requests shutdown at wait boundary");
+        std::this_thread::yield();
+    }
+    if(stopping.load()) {
+        control.unsynchronized_stop=true;
+        // Exit the worker through its normal exception cleanup instead of
+        // sleeping forever after the deliberately exposed missed notification.
+        throw std::runtime_error("stop predicate changed outside wait mutex");
+    }
+}
+}
 int main() {
     error={sizeof(tn_error),1,error_text,sizeof(error_text)};
-    try { pending_cancel_and_bounded_queue(); destroy_joins_pending(); exceptions_cleanup();
-        std::cout<<"worker ownership, bounded queue, nonblocking cancellation/drain, copies, retry, exceptions and join passed\n"; return 0;
+    try { pending_cancel_and_bounded_queue(); destroy_joins_pending(); cancellation_during_upload_drains_and_reuploads(); destroy_at_idle_wait_boundary(); exceptions_cleanup();
+        std::cout<<"worker ownership, bounded queue, cancellation/render/upload drain, reupload, idle shutdown, copies, retry, exceptions and join passed\n"; return 0;
     } catch(const std::exception& e) { release(); std::cerr<<e.what()<<": "<<error_text<<"\n"; return 1; }
 }
