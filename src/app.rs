@@ -1,4 +1,5 @@
 //! Native studio. Import and rendering run independently of the UI thread.
+mod comparison;
 mod controls;
 mod help;
 use crate::{
@@ -2379,6 +2380,27 @@ impl Studio {
                     && self.output_format.supports_section()
                     && self.timeline_enabled
             );
+            self.smoke_checks["camera_before_layout_resize"] = self.camera.camera_spec();
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(940., 700.)));
+            self.smoke_stage = 96;
+        }
+        if self.smoke_stage == 96 && (ctx.viewport_rect().width() - 940.).abs() < 1. {
+            self.smoke_checks["narrow_comparison_rects"] =
+                self.smoke_checks["comparison_rects"].clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "comparison-narrow",
+            )));
+            self.smoke_stage = 98;
+        }
+        if self.smoke_stage == 97 && (ctx.viewport_rect().width() - 1420.).abs() < 1. {
+            self.smoke_checks["wide_comparison_rects"] =
+                self.smoke_checks["comparison_rects"].clone();
+            self.smoke_checks["resize_preserves_camera"] = serde_json::json!(
+                self.smoke_checks["camera_before_layout_resize"] == self.camera.camera_spec()
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "comparison-wide",
+            )));
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "complete",
             )));
@@ -2415,6 +2437,10 @@ impl Studio {
                 image.size[1] as u32,
                 image::ColorType::Rgba8,
             );
+            if name == "comparison-narrow" {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1420., 1020.)));
+                self.smoke_stage = 97;
+            }
             if name == "complete" {
                 let _ = fs::write(directory.join("result.json"), serde_json::json!({"model":self.model.as_ref().map(|m| &m.path), "triangles":self.viewport.triangle_count(),"revision":self.revision,"preview_revision":self.preview_revision,"error":self.error,"checks":self.smoke_checks}).to_string());
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2611,68 +2637,57 @@ impl eframe::App for Studio {
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.columns(2, |columns| {
-                columns[0].heading("Native inspection");
-                let before = self.camera.camera_spec();
-                let settings = self.viewport_settings();
-                let response = self
-                    .viewport
-                    .show(&mut columns[0], &mut self.camera, &settings)
-                    .help(if self.settle_face {
-                        "Click a visible triangle to align that face downward while keeping the print layers attached. Use Cancel face selection to leave this mode. This aligns the selected face; it does not calculate a stable resting position."
-                    } else { help::NATIVE_VIEW });
-                self.native_rect = Some(response.rect);
-                if self.camera.camera_spec() != before {
-                    self.timeline_playing = false;
-                    self.changed();
-                }
-                if self.settle_face
-                    && !self.importing
-                    && response.clicked()
-                    && let Some(pointer) = response.interact_pointer_pos()
-                    && self.settle_pointer(response.rect, pointer).is_none()
+            let display = if self.show_output { &self.output } else { &self.preview };
+            let image_size = display.as_ref().map_or(egui::vec2(1.,1.),|p| p.texture.size_vec2());
+            let animated = display.as_ref().is_some_and(|p| p.frames.len()>1);
+            let status = (!self.show_output && self.preview_revision != Some(self.revision))
+                .then_some(if self.busy.is_some() { "Updating…" } else { "Stale" });
+            let panes = comparison::layout(ui,if self.show_output { "Encoded output" } else { "Rendered preview" },status,image_size,animated);
+            let before = self.camera.camera_spec();
+            let settings = self.viewport_settings();
+            let mut native_ui = ui.new_child(egui::UiBuilder::new()
+                .id_salt("native_canvas").max_rect(panes.native));
+            let response = self.viewport.show(&mut native_ui,&mut self.camera,&settings)
+                .help(if self.settle_face {
+                    "Click a visible triangle to align that face downward while keeping the print layers attached. Use Cancel face selection to leave this mode. This aligns the selected face; it does not calculate a stable resting position."
+                } else { help::NATIVE_VIEW });
+            self.native_rect = Some(response.rect);
+            if self.camera.camera_spec() != before {
+                self.timeline_playing = false;
+                self.changed();
+            }
+            if self.settle_face && !self.importing && response.clicked()
+                && let Some(pointer) = response.interact_pointer_pos()
+                && self.settle_pointer(response.rect,pointer).is_none()
+            {
+                self.status = "No visible face under that point; click the model surface.".into();
+            }
+            let display = if self.show_output { &mut self.output } else { &mut self.preview };
+            if let Some(playback) = display {
+                playback.advance(&ctx);
+                let image = ui.put(panes.preview,egui::Image::new(&playback.texture)
+                    .fit_to_exact_size(panes.preview.size()))
+                    .help("The latest rendered preview or decoded image/GIF output. Both panels scale together to this image's aspect ratio; resizing does not change the render camera or output resolution. Open saved output shows the full exported file. A stale preview needs refreshing after edits.");
+                if let Some(footer) = panes.playback
+                    && ui.put(footer,egui::Checkbox::new(&mut playback.playing,"Play animation"))
+                        .help("Play or pause the decoded animation in this panel using its saved frame delays. This does not change export speed or camera keys.")
+                        .changed() && playback.playing
                 {
-                    self.status =
-                        "No visible face under that point; click the model surface.".into();
+                    playback.next = Instant::now() + playback.frames[playback.index].duration;
                 }
-                columns[1].horizontal(|ui| {
-                    ui.heading(if self.show_output {
-                        "Encoded output"
-                    } else {
-                        "Rendered preview"
+                if self.smoke_output.is_some() {
+                    let matched = (response.rect.size()-image.rect.size()).length()<0.01
+                        && (response.rect.top()-image.rect.top()).abs()<0.01;
+                    self.smoke_checks["comparison_canvases_match"] = serde_json::json!(matched
+                        && self.smoke_checks["comparison_canvases_match"].as_bool().unwrap_or(true));
+                    self.smoke_checks["comparison_rects"] = serde_json::json!({
+                        "native":[response.rect.left(),response.rect.top(),response.rect.width(),response.rect.height()],
+                        "preview":[image.rect.left(),image.rect.top(),image.rect.width(),image.rect.height()]
                     });
-                    if !self.show_output && self.preview_revision != Some(self.revision) {
-                        ui.label(if self.busy.is_some() {
-                            "Updating…"
-                        } else {
-                            "Stale"
-                        });
-                    }
-                });
-                let display = if self.show_output {
-                    &mut self.output
-                } else {
-                    &mut self.preview
-                };
-                if let Some(playback) = display {
-                    playback.advance(&ctx);
-                    if playback.frames.len() > 1
-                        && columns[1]
-                            .checkbox(&mut playback.playing, "Play animation").help("Play or pause the decoded animation in this panel using its saved frame delays. This does not change export speed or camera keys.")
-                            .changed()
-                        && playback.playing
-                    {
-                        playback.next = Instant::now() + playback.frames[playback.index].duration;
-                    }
-                    columns[1].add(egui::Image::new(&playback.texture).fit_to_exact_size(
-                        fit_image(playback.texture.size_vec2(), columns[1].available_size()),
-                    )).help("The latest rendered preview or decoded image/GIF output. This display may be scaled to fit; Open saved output shows the full exported file. A stale preview needs refreshing after edits.");
-                } else {
-                    columns[1].label(
-                        "Render a preview to see the selected material and studio lighting.",
-                    );
                 }
-            });
+            } else {
+                ui.put(panes.preview,egui::Label::new("Render a preview to see the selected material and studio lighting.").wrap());
+            }
         });
         self.tools_window(&ctx);
         self.recovery_window(&ctx);
@@ -2723,9 +2738,6 @@ fn rotation_editor(ui: &mut egui::Ui, rotation: &mut [f64; 3], purpose: &str) {
             .help(format!("{label}-axis rotation in degrees. {purpose}"));
         }
     });
-}
-fn fit_image(image: egui::Vec2, available: egui::Vec2) -> egui::Vec2 {
-    image * (available.x / image.x).min(available.y / image.y).max(0.01)
 }
 fn open_path(path: &Path) {
     #[cfg(windows)]
