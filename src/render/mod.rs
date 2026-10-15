@@ -1,6 +1,7 @@
 pub mod backends;
 pub mod capabilities;
 pub mod contract;
+pub mod embedded;
 pub mod registry;
 pub mod requirements;
 pub mod selection;

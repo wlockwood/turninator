@@ -1,0 +1,818 @@
+{
+  "schema_version": 1,
+  "abi_version": 1,
+  "target": "x86_64-pc-windows-msvc",
+  "qualification": "sdk-feasibility-only; production bridges and redistribution unfinished",
+  "evidence": "2026-10-15-sdk-probes",
+  "toolchain": {
+    "cmake": "4.2.3",
+    "generator": "Visual Studio 17 2022",
+    "toolset": "14.44.35207",
+    "compiler": "19.44.35215.0",
+    "windows_sdk": "10.0.26100.0",
+    "cpp_standard": 20,
+    "crt": "/MD",
+    "iterator_debug_level": 0
+  },
+  "filament": {
+    "version": "1.78.0",
+    "commit": "c1dc4e444784850d6dc891a1fb38747c30b85463",
+    "material_compiler_version": "78",
+    "qualified_probe_api": "Vulkan",
+    "production_qualified": false
+  },
+  "luxcore": {
+    "version": "2.11.2",
+    "commit": "b872186d2fe995a762f73708c606847eed55843e",
+    "deps_version": "2.2.3",
+    "boost_version": "1.88.0",
+    "nvrtc_version": "12.8.93",
+    "qualified_probe_api": "CUDA/OptiX",
+    "production_qualified": false,
+    "support_source_workaround": "Matching properties.cpp and matrix4x4.cpp compiled without LUXCORE_DLL; ABI/CRT/ownership qualification remains incomplete",
+    "sample_semantics": "minimum per-pixel spp only; overshoot and double-join hazards remain"
+  },
+  "archives": [
+    {
+      "backend": "filament",
+      "path": "filament-v1.78.0-windows.tgz",
+      "source": "https://github.com/google/filament/releases/download/v1.78.0/filament-v1.78.0-windows.tgz",
+      "sha256": "38643cfeec54ce58c4d5d57f94d935a247ad9c1f76968e24d5367d22b396f40f"
+    },
+    {
+      "backend": "luxcore",
+      "path": "LuxCore-Samples-Windows-X64.zip",
+      "source": "https://github.com/LuxCoreRender/LuxCore/releases/download/samples-v2.11.2/LuxCore-Samples-Windows-X64.zip",
+      "sha256": "507569ec86cb75a9a3301c8cf5eac0c5ed6db483b9792fea183a0b55c9897797"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-source.tar.gz",
+      "source": "https://codeload.github.com/LuxCoreRender/LuxCore/tar.gz/b872186d2fe995a762f73708c606847eed55843e",
+      "sha256": "31a82d87c1f912864e7b039620747507d2b0ce9db70648656d41d0ebc4636cda"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-deps-windows-2022.zip",
+      "source": "https://github.com/LuxCoreRender/LuxCoreDeps/releases/download/v2.2.3/luxcore-deps-windows-2022.zip",
+      "sha256": "069a1eace7e8f192b07629d6318eca9e0ad970f8c7db39a0919b10eddc2345d0"
+    }
+  ],
+  "header_manifests": [
+    {
+      "backend": "filament",
+      "path": "filament-headers-inventory.json",
+      "sha256": "3a7815d275895ac4e0403125725863ca852190db662f90c231d95115c430e683"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-headers-inventory.json",
+      "sha256": "f01d66a4926938ab073bb940891b3986559236ca452da778b072a0a932c73020"
+    },
+    {
+      "backend": "luxcore",
+      "path": "boost-headers-inventory.json",
+      "sha256": "e338f81f6d51ecd96a9ea6b7247483fc32fbd46fe3271b70582d4ac993c7ed97"
+    }
+  ],
+  "inputs": [
+    {
+      "backend": "filament",
+      "path": "filament/bin/cmgen.exe",
+      "size": 940544,
+      "sha256": "0e6876c03ee27db31429efe2de91896fea815f68120f82e8a59743e46d3ca986"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/bin/matc.exe",
+      "size": 7892480,
+      "sha256": "a78df6a0ec5f59aa84ef488b0b53218656f13781a1bfbc7403259befc086a620"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/abseil.lib",
+      "size": 23742956,
+      "sha256": "be55b020236412e32a15c184dc3fd6b31d472900e58bd8adcecd854a0f8eedb2"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/assimp.lib",
+      "size": 24212782,
+      "sha256": "15960f7a7b7a54475c700060771eb1a1a6d8557ffb054b0084e5189ae1424702"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/backend.lib",
+      "size": 30847000,
+      "sha256": "53c760b3204591f11b34b9951e9f478b3218c7f6d753213a44e78092ac081dca"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/basis_transcoder.lib",
+      "size": 3578956,
+      "sha256": "8c2004f48bb2a44f4f9c2bf5cd6c2c650a0b464a963ff4421c7b6b06eaf61cec"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/bluegl.lib",
+      "size": 1889622,
+      "sha256": "8c371d3932598ab9ae9b74069265f4a2f1c5c09c6ec79d4113db732458396f42"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/bluevk.lib",
+      "size": 705192,
+      "sha256": "89619ba290a23f756553fc0c84b0ddcc69e5395816e0a2166ed60e73d9f2871a"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/camutils.lib",
+      "size": 248220,
+      "sha256": "730ff602120ab04afe662b566557006b571e5d13dce6ddfde783ebeea0926e3f"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/civetweb.lib",
+      "size": 1189520,
+      "sha256": "22b2fe79eab1219c1a618be616df186b2a07cf19a29930a75c886eb9109f1d9c"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/dracodec.lib",
+      "size": 20197852,
+      "sha256": "a0706f2c3b9d3aeba6a7f373c273646d04d5b80058878b983bf9fd1bdf856739"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filabridge.lib",
+      "size": 1138390,
+      "sha256": "fdec927e556fd2f5d23f2aedf588d94c863ac2dd6b75d9f4f7644047f61e5238"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filaflat.lib",
+      "size": 731574,
+      "sha256": "6479de2606b459d6eb3978861d24b09b11b280e4c039b1b73e3cd4729286260d"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filamat.lib",
+      "size": 187425536,
+      "sha256": "c870320b7bff4720c29d1f1bd009ccbcae3dbefa7cc244ea5ff1e782d46534b5"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filament-generatePrefilterMipmap.lib",
+      "size": 195534,
+      "sha256": "cee68be43c376ce6acf3bfd5e8398bc7d16e4a7b99edfa7ae8962fba29afd359"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filament-iblprefilter.lib",
+      "size": 346978,
+      "sha256": "6ef03700e082fb29503e22d9f6cb1ad1737a9e17b6dcc1faf09407289fc3c6a8"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filament.lib",
+      "size": 85258810,
+      "sha256": "4fc4790a7daf3f0cba1d06a458f2f771373a53b21051cd5872133ff00408e8c9"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filamentapp-resources.lib",
+      "size": 957268,
+      "sha256": "ab434b9fec94e39fb91d01487c80abdf899ebc14ff21e999781ec28a7527eb4d"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filamentapp.lib",
+      "size": 5847942,
+      "sha256": "2e9379b114cf6c5fda2e6db2c604b8654eaa44916f76a09f6f6712b3f5597af6"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/filameshio.lib",
+      "size": 316454,
+      "sha256": "1e7b10d950db9c43eb5092bb2014aa402fedff60bfa84c852f596b56b9c79d83"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/geometry.lib",
+      "size": 2486408,
+      "sha256": "1371c237f38e705d3317d66bfbb55dc95f1daf86699579edc23e7ceefaaa701e"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/getopt.lib",
+      "size": 50376,
+      "sha256": "d250051e1bf60a7f4480ce465a8b93016ed89dc714feb4dd26ea288684eba270"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/gltfio.lib",
+      "size": 530076,
+      "sha256": "a4455173e104ca5bb4e2ddf42d603b11bbd65136d3113451eafec43b18517c61"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/gltfio_core.lib",
+      "size": 12608140,
+      "sha256": "2f0085a852a1115bdb597b1bbaf21060a243328a36f0cdcef7e869ebfd4a02c0"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/ibl-lite.lib",
+      "size": 1628004,
+      "sha256": "5f2c9f996fc4175fba686342612ce36320da0eee1893a54a8c3ff4755e6eea1b"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/ibl.lib",
+      "size": 1891476,
+      "sha256": "86eb873e7178456ae1a751373a0ab2c3d2aa2fe6b190eb449a9954a34941f80c"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/image.lib",
+      "size": 864926,
+      "sha256": "125c759ac92490dc7f811a0a6d83fb02b3318ce3d2dfc2341d19b384d5e022d8"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/imagediff.lib",
+      "size": 302066,
+      "sha256": "ec516dc3ba869b2956b20048ef75e42c89eb6f5397dc0ad20c59106cf3cc9e69"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/imageio-lite.lib",
+      "size": 511530,
+      "sha256": "0faed9e59b599e8880e2448d2f87acf8428040334f25b84d2e5ae21e4c894145"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/ktxreader.lib",
+      "size": 412184,
+      "sha256": "0452ece47cfceb934dbd388219f61528b224a9d1ff0451750fb63426ce7467aa"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/matdbg.lib",
+      "size": 51275354,
+      "sha256": "9cc03430e3f054453625187915f712e9179eb07b4f89679027fcdfe21e5ce89c"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/matp.lib",
+      "size": 4116726,
+      "sha256": "a8a97ef6e8189b2c4e3eea9834b98c25ce81e1c74a4a7814651eb2e27d7afd45"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/meshoptimizer.lib",
+      "size": 499232,
+      "sha256": "5953fe45dd7e67a629083934ec3de9df6b4519777a87b65ab1ae060aeeb582ad"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/mikktspace.lib",
+      "size": 111616,
+      "sha256": "397cfb98dba4575b086d423c5af35373d5dc299aac412492a4f8e7a82de3ef66"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/perfetto.lib",
+      "size": 33542884,
+      "sha256": "2d78857045b2328c7e6ca384c6364591c1d5b31ed7c89ad4cde6dfcfe6559ee4"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/shaders.lib",
+      "size": 150910,
+      "sha256": "9072ea0fa2afc279e0e9b08a6dae1f5c00f6f686103ea8b9c32527d44ef753ae"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/smol-v.lib",
+      "size": 221410,
+      "sha256": "ab652231542f73472d0c548e22e5129867894d36fe125e58ab90e75d689e9be3"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/stb.lib",
+      "size": 356408,
+      "sha256": "8a9d327f8cda5837be2c94bc11080f476f0f5f8253d3f9e0330d42125e926b35"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/uberarchive.lib",
+      "size": 710678,
+      "sha256": "8747b3377237b74e0fc75e83883f81927b6018a308548539a8f5001c6f0ded22"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/uberzlib.lib",
+      "size": 378074,
+      "sha256": "df51e59fb78a63b530dd37e57ecfec9ea6d66762cdf83e08d7a60ab4f6623f1b"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/utils.lib",
+      "size": 5048816,
+      "sha256": "1dbc644861249fed1a242f0849bfe87b98d3baa030b03dd62b31dcc5ec74c2d6"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/viewer.lib",
+      "size": 3081074,
+      "sha256": "8717c18148961a351325a06b06b350767988e6be02eff7a309b7d67d8a82f232"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/lib/x86_64/md/zstd.lib",
+      "size": 3633470,
+      "sha256": "32c9dced79c1f5e612cfe379f68a8b9c911491ab76b1df970c2655e7efa61ca3"
+    },
+    {
+      "backend": "filament",
+      "path": "filament/LICENSE",
+      "size": 11564,
+      "sha256": "f4fe379e2fb014a378b89f5d3f63bfd3fdee9d6e514ded6b6723a1762be65d9e"
+    },
+    {
+      "backend": "filament",
+      "path": "filament-licenses/source-files.json",
+      "size": 1151,
+      "sha256": "e68137cf41081f4221ab9090063df73cd076fb363dd9a7ba1c76eb19fe71ba65"
+    },
+    {
+      "backend": "filament",
+      "path": "filament-licenses/third_party__abseil__LICENSE",
+      "size": 11361,
+      "sha256": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747"
+    },
+    {
+      "backend": "filament",
+      "path": "filament-licenses/third_party__glslang__LICENSE",
+      "size": 3927,
+      "sha256": "42ffa20349670c33bff23cec16858121d1bc6174f89efc86b3413f176708e5db"
+    },
+    {
+      "backend": "filament",
+      "path": "filament-licenses/third_party__glslang__LICENSE.txt",
+      "size": 54615,
+      "sha256": "17e70c676e1521ff3e4686f04a2053d93a7e28a33be8de7ec37ab0ff72feb677"
+    },
+    {
+      "backend": "filament",
+      "path": "filament-licenses/third_party__spirv-cross__LICENSE",
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/embree4.dll",
+      "size": 25642496,
+      "sha256": "f477315fe0c2e6cf05dffb90ee45bfc24959d8f15714aa2cadd3c2931bd53c86"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/luxcore.dll",
+      "size": 39528960,
+      "sha256": "2d49100e749c5a256322cb4635cb34bb054f0595ee7e957c7bbe4d4645dfae99"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/LuxOpenImageDenoise.dll",
+      "size": 115712,
+      "sha256": "3251dcdb742493a7d86b2daf6dd6fb02c7aa2279b688a041d3b65733d0641270"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/LuxOpenImageDenoise_core.dll",
+      "size": 50589184,
+      "sha256": "de4668a98e437ea27dd599c028fd1b270335320ce3c2b6c7d184718bac2da9b7"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/LuxOpenImageDenoise_device_cpu.dll",
+      "size": 688128,
+      "sha256": "f4630884ee83a18f4fa2818153361e5caa4a130e5ccfcedd0e9a648e72954fca"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/nvrtc-builtins64_128.dll",
+      "size": 6356480,
+      "sha256": "a7afa2a40cbd3f922a33d8bf71c13cb26ca707c7016a9bc5fcde36759ba668f5"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/nvrtc64_120_0.alt.dll",
+      "size": 86794240,
+      "sha256": "5464ea01b079d78042374dc7819684910c8e9d5c63000e2d2d5aa02298ecf2ae"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/nvrtc64_120_0.dll",
+      "size": 86728192,
+      "sha256": "02d2d7ef4690bf1a55dda1d3ac94c86ce8d16920071c87bcd3e70e94ef346e93"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/tbb12.dll",
+      "size": 340992,
+      "sha256": "992b9b0d049d6ec37a5dafade96d838d5aea123b510fdeee140ae358e436665f"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/bin/tbbmalloc.dll",
+      "size": 107520,
+      "sha256": "a31901f7c544ba3168d8897966b3e4f029157611ec80fb990fd4193bce1a67a9"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore/native/LuxCore/lib/luxcore.lib",
+      "size": 16020318,
+      "sha256": "b7c86f69438279f51dfdda1ac8ab35017ae3bf0c772b30b8671ec8959a184b6f"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-source/LuxCore-b872186d2fe995a762f73708c606847eed55843e/COPYING.txt",
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-source/LuxCore-b872186d2fe995a762f73708c606847eed55843e/src/luxrays/core/geometry/matrix4x4.cpp",
+      "size": 4946,
+      "sha256": "616931195081f22019116fa94b9858f2fc0d7ee7926ca0948e571bf888bdfc75"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-source/LuxCore-b872186d2fe995a762f73708c606847eed55843e/src/luxrays/utils/properties.cpp",
+      "size": 32503,
+      "sha256": "c515ec033f7cfa361bfd9aa5c61382ec1d8c7a8e8e445f548cc1ff7e71d0ca6e"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/boost7e03a08f816ec/p/licenses/LICENSE_1_0.txt",
+      "size": 1338,
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/brotl601b1e56dbc5d/p/licenses/LICENSE",
+      "size": 1084,
+      "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/bzip2cfc911dd6e120/p/licenses/LICENSE",
+      "size": 1896,
+      "sha256": "c6dbbf828498be844a89eaa3b84adbab3199e342eb5cb2ed2f0d4ba7ec0f38a3"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/eigendf8111b9f98f2/p/licenses/COPYING.APACHE",
+      "size": 11362,
+      "sha256": "03379001a7b12a2ec997a25554247d985270b353c10d5bafee9ac8d6519820b7"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/eigendf8111b9f98f2/p/licenses/COPYING.BSD",
+      "size": 1517,
+      "sha256": "51928dce36213c5333ba3172e847d735d4c6e9b7ff2722a326c49067155b82eb"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/eigendf8111b9f98f2/p/licenses/COPYING.MINPACK",
+      "size": 2193,
+      "sha256": "c87b7f8ee88f6195e91743820c00354833583aef091b72e2d4a49c8e28e798a0"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/eigendf8111b9f98f2/p/licenses/COPYING.MPL2",
+      "size": 16727,
+      "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/eigendf8111b9f98f2/p/licenses/COPYING.README",
+      "size": 264,
+      "sha256": "db640ff2bd90c6abd6a4d3fbb351e0ee4d555417cf840492054d1cbb2ea85644"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/embredb85d705e547b/p/licenses/LICENSE.txt",
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/expat19c0883071356/p/licenses/COPYING",
+      "size": 1144,
+      "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/fmt1f2a4d994fb47/p/licenses/LICENSE",
+      "size": 1431,
+      "sha256": "07580f2a3b35709ce703d523f447b242f6dfec7582a8c0df102c7fa2849375f8"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/giflic8232094a6b80/p/licenses/COPYING",
+      "size": 1088,
+      "sha256": "0c9b7990ecdca88b676db232c226548ac408b279f550d424d996f0d83591dd8e"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/glfw5110a91a51194/p/licenses/LICENSE.md",
+      "size": 904,
+      "sha256": "149704059b5d0bf551637e50042dd4de9c2cae921021f6636298911e3a5f9462"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/highwc619cc2e1a5ef/p/licenses/LICENSE",
+      "size": 11356,
+      "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/highwc619cc2e1a5ef/p/licenses/LICENSE-BSD3",
+      "size": 1515,
+      "sha256": "d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/imath925eacad890c9/p/licenses/LICENSE.md",
+      "size": 1497,
+      "sha256": "c20236d3b39fd20eba8e3d1fb3b892a5483df2e7d8d61bf43f165d3fac22f601"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/imguid1df451bb7fa9/p/licenses/LICENSE.txt",
+      "size": 1083,
+      "sha256": "173506a2d6f7fb67990d257fb2507f188690eca39060c39469ae7bef43aae2a3"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/lcms0fa8c5c429de2/p/licenses/LICENSE",
+      "size": 1080,
+      "sha256": "6dbd60437f8ef91d8de1f08ad75882547fd4931bfcc3566a0735f28db1484d31"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libdeb8bcd71698df4/p/licenses/COPYING",
+      "size": 1078,
+      "sha256": "4ad69099cb4374836fd27583d9991e2838cd86b6e4666ab26b2d32582c91e73a"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libjp9e3d20dab0326/p/licenses/LICENSE.md",
+      "size": 5622,
+      "sha256": "e10114e6e40f3d0311c401ca25245ac5ef459a43c20f976fd63f03e816f5741f"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libjx8a2617e958f85/p/licenses/LICENSE",
+      "size": 1508,
+      "sha256": "8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libpn1ef73269e9d45/p/licenses/LICENSE",
+      "size": 5345,
+      "sha256": "bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libsqeaafa3ac1af5a/p/licenses/LICENSE.txt",
+      "size": 1121,
+      "sha256": "a6b8c383bf3ab28460d6507484d605dd722e03971606f0cd3032a3af682b63a5"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libtieb1b776597617/p/licenses/LICENSE.md",
+      "size": 2416,
+      "sha256": "0e27c2382d7b8147972bbb746e04059a1152c8d0fda9d03ef1399d1a433c4ade"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libul7a3ce3deaf35c/p/licenses/LICENSE",
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/libwe11f7db1b2f4e9/p/licenses/COPYING",
+      "size": 1496,
+      "sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/lz403e74c444bf6d/p/licenses/LICENSE",
+      "size": 1311,
+      "sha256": "8b58c446121a109ccf32edc094bba3010a3d85e4ee3702950db55e4d3e87736c"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/miniz4c2d2efb37d62/p/licenses/LICENSE",
+      "size": 877,
+      "sha256": "675181c03fc1302a1c8554c00f7be9bb420c5dbc9dcc2013433cec144413de03"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/nlohmd56f23d0cfdc6/p/licenses/LICENSE.MIT",
+      "size": 1076,
+      "sha256": "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/nvrtca80ca79dae017/p/LICENSE",
+      "size": 63021,
+      "sha256": "e2c71babfd18a8e69542dd7e9ca018f9caa438094001a58e6bc4d8c999bf0d07"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/onetb19707003240bb/p/licenses/LICENSE.txt",
+      "size": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/openc3397a5cebc658/p/licenses/LICENSE",
+      "size": 1485,
+      "sha256": "82a40c52065ee968aa62015735e84378ac11425db7a233e6a2dcd2c83fc24276"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/opene1c55f7fd3cd29/p/licenses/LICENSE.md",
+      "size": 1501,
+      "sha256": "84853c91d4c2e0310741d4773469d98bb93e61029608e0ba0882a3fffdf330bd"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/openib7fac0a377de5/p/licenses/LICENSE.md",
+      "size": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/openj08f1f971adba2/p/licenses/LICENSE",
+      "size": 2112,
+      "sha256": "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/openj5453ea7bbdf16/p/licenses/LICENSE",
+      "size": 1448,
+      "sha256": "5ddf5177863dfc9ab65fa129d587db651241f00e21ed2427b218bea997591f98"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/opens584830ecf7b75/p/licenses/external/perl/Text-Template-1.56/LICENSE",
+      "size": 18412,
+      "sha256": "9837f05336ef3cbacb6a96e1672a0426d81ad01191f214b8d48e22ca62338181"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/opens584830ecf7b75/p/licenses/LICENSE.txt",
+      "size": 10175,
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/opensab59c7b75c855/p/licenses/LICENSE.txt",
+      "size": 10186,
+      "sha256": "9211071ceaea05cec948f44a025ede3030f41506960d68b50e7ddb6edc2abe5b"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/openv36b61f77d87eb/p/licenses/LICENSE",
+      "size": 10173,
+      "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/pugixeaf2a0ecaad5f/p/licenses/LICENSE",
+      "size": 1118,
+      "sha256": "61a4e83db23c737423e3ee4b071440d22b40cd1c98b0c2fa4f29191f4bb6061b"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/pybin014ea642256f2/p/licenses/LICENSE",
+      "size": 1684,
+      "sha256": "83965b843b98f670d3a85bd041ed4b372c8ec50d7b4a5995a83ac697ba675dcb"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/pystr4773ec222e3d6/p/licenses/LICENSE",
+      "size": 1530,
+      "sha256": "f7f060301402ea0b5c507b865b1a9de037d4d7b24f37422a93b70fe9c7a9b78a"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/robinf1cd3ffe90176/p/licenses/LICENSE",
+      "size": 1075,
+      "sha256": "686cf8d62cc44fecff4be967238aba89665f9b6acf8a728987801ffc3a626bc7"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/snapp4b1ab408bff2c/p/licenses/COPYING",
+      "size": 2645,
+      "sha256": "55172044f7e241207117448a4d9d6ba1d0925c8ad66b5d4c08c70adfa9cc3de6"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/spdlo6e886929db141/p/licenses/LICENSE",
+      "size": 1323,
+      "sha256": "d678c20826e1392578508e1c78649a1e3c31bda05ef4388d967dbd654461b140"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/tsl-r3127272c0eaa2/p/licenses/LICENSE",
+      "size": 1102,
+      "sha256": "11f2c685ba565a31aef1219f63a7a8845602c97bff70016b9e3278dfe51a2ec5"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/winfl758671887c6ff/p/licenses/bison-license",
+      "size": 1855,
+      "sha256": "97fd685958d93be7f8dab939bb8161dbd6afb0718c63bfc337c24321aea44273"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/winfl758671887c6ff/p/licenses/COPYING.GPL3",
+      "size": 679,
+      "sha256": "4f38ee7dddf539873026132d370ceb2d011bedefbe4990b963f8eeb491faa09f"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/winfl758671887c6ff/p/licenses/flex-license",
+      "size": 35147,
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/xz_utff35c2f90455d/p/licenses/COPYING",
+      "size": 3119,
+      "sha256": "616a3ad264ce29b8f1cb97e53037b139d406899ca8d1f799651e17bfa09830b8"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/yaml-a93127b3df620/p/licenses/LICENSE",
+      "size": 1061,
+      "sha256": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/zlib8a45b4c879d17/p/licenses/LICENSE",
+      "size": 1002,
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/zstd9118f8b50a523/p/licenses/LICENSE",
+      "size": 1549,
+      "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/ninjaa3155d7c5e37b/p/licenses/COPYING",
+      "size": 11358,
+      "sha256": "eb7e9ab9690124c5c9f42bdc81383d886a3dede26345b6ed15bbad7caf81f7ea"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-source/LuxCore-b872186d2fe995a762f73708c606847eed55843e/deps/cuew/src/cuew.cpp",
+      "size": 33142,
+      "sha256": "933d531967ac874c3e41fcd2f26ccc89b4fec7abae9eb4f694b9c3673f70e140"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-source/LuxCore-b872186d2fe995a762f73708c606847eed55843e/build-system/build-settings.json",
+      "size": 234,
+      "sha256": "13397191b5a1aa0c849e0f7a425fd2fc111b0c8ff7e5b56ba60324c1a8cae197"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcore-source/LuxCore-b872186d2fe995a762f73708c606847eed55843e/include/luxrays/utils/exportdefs.h",
+      "size": 2583,
+      "sha256": "b3c90daf26cf448535d6e39eed9e0712e05443ae1b8c66f6ae2407672ea6e03a"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/boost7e03a08f816ec/p/conaninfo.txt",
+      "size": 1358,
+      "sha256": "38539335dcfc25a105aeb4ce2b9fffb42a139b99c278e7b8578b1098f32eb030"
+    },
+    {
+      "backend": "luxcore",
+      "path": "luxcoredeps/extracted/b/boost7e03a08f816ec/p/include/boost/version.hpp",
+      "size": 1117,
+      "sha256": "26446b268b3ece5640f913db846f6541f8e6c3dd6fcedfc8aec92669c222443c"
+    }
+  ]
+}
