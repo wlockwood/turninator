@@ -190,6 +190,8 @@ impl Studio {
                 "seconds":self.started.elapsed().as_secs_f64()-self.smoke_checks["case_started"].as_f64().unwrap_or(0.),
                 "requested_size":self.last_task.as_ref().map(|t|t.0.size),
                 "notice":renderers::material_notice(&self.scene.material_preset,case.backend),
+                "warnings":self.renderer_warnings,
+                "export_context_released":self.render.context_released(),
             });
             if !self.smoke_checks["cases"].is_array() {
                 self.smoke_checks["cases"] = serde_json::json!([]);

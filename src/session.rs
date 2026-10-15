@@ -98,6 +98,7 @@ struct Queue {
     active: Option<(JobTicket, bool)>,
     shutdown: bool,
     release_idle: bool,
+    backend_retained: bool,
 }
 pub struct RenderService {
     queue: Arc<(Mutex<Queue>, Condvar)>,
@@ -112,21 +113,20 @@ impl Default for RenderService {
     }
 }
 type BackendFactory = dyn FnMut(
-        &crate::render::RenderSelection,
-        &RenderSceneSnapshot,
-        &ExportRequest,
-        &ToolPaths,
-        &RenderLimits,
-        &AtomicBool,
-    ) -> Result<PreparedBackend>
-    + Send;
+    &crate::render::RenderSelection,
+    &RenderSceneSnapshot,
+    &ExportRequest,
+    &ToolPaths,
+    &RenderLimits,
+    &AtomicBool,
+) -> Result<PreparedBackend>;
 impl RenderService {
     pub fn new() -> Self {
-        let mut registry = None;
-        Self::with_backend_factory(move |selection, scene, request, tools, limits, cancel| {
-            registry
-                .get_or_insert_with(BackendRegistry::default)
-                .prepare(selection, scene, request, tools, limits, cancel)
+        Self::with_factory_builder(|| -> Box<BackendFactory> {
+            let registry = BackendRegistry::default();
+            Box::new(move |selection, scene, request, tools, limits, cancel| {
+                registry.prepare(selection, scene, request, tools, limits, cancel)
+            })
         })
     }
     /// The factory crosses the thread boundary; its renderer is created and destroyed only on the actor.
@@ -143,13 +143,18 @@ impl RenderService {
         + Send
         + 'static,
     ) -> Self {
+        Self::with_factory_builder(move || Box::new(factory))
+    }
+    fn with_factory_builder(
+        builder: impl FnOnce() -> Box<BackendFactory> + Send + 'static,
+    ) -> Self {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let actor_queue = queue.clone();
         let partial = Arc::new(Mutex::new(None));
         let actor_partial = partial.clone();
         let (events, event_receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let mut factory: Box<BackendFactory> = Box::new(factory);
+            let mut factory = builder();
             let mut prepared: Option<(String, PreparedBackend)> = None;
             loop {
                 let (task, ticket, recovery) = {
@@ -164,6 +169,7 @@ impl RenderService {
                             drop(queue);
                             prepared = None;
                             queue = lock.lock().unwrap();
+                            queue.backend_retained = false;
                             continue;
                         }
                         if queue.pending.is_some() {
@@ -187,7 +193,16 @@ impl RenderService {
                     &events,
                     &actor_partial,
                 );
-                actor_queue.0.lock().unwrap().active = None;
+                // SDK teardown can block; publish the release acknowledgement only
+                // after destruction, without holding the UI-visible queue mutex.
+                if result.is_err() {
+                    prepared = None;
+                }
+                {
+                    let mut queue = actor_queue.0.lock().unwrap();
+                    queue.active = None;
+                    queue.backend_retained = prepared.is_some();
+                }
                 match result {
                     Ok(result) if !ticket.cancel.load(Ordering::Acquire) => {
                         let _ = events.send(RenderEvent::Completed {
@@ -216,7 +231,6 @@ impl RenderService {
                             engine: ticket.engine,
                             message: error.to_string(),
                         });
-                        prepared = None;
                     }
                 }
             }
@@ -287,6 +301,14 @@ impl RenderService {
         let mut queue = self.queue.0.lock().unwrap();
         queue.release_idle = true;
         self.queue.1.notify_one();
+    }
+    /// True only after the actor has drained and destroyed its export context.
+    pub fn context_released(&self) -> bool {
+        let queue = self.queue.0.lock().unwrap();
+        !queue.backend_retained
+            && queue.active.is_none()
+            && queue.pending.is_none()
+            && !queue.release_idle
     }
     pub fn take_partial(&self) -> Option<(JobTicket, RgbaFrame)> {
         let mut delivered = self.last_partial_delivery.lock().unwrap();

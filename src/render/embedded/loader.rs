@@ -190,6 +190,41 @@ mod platform {
             .clone()
             .map_err(Into::into)
     }
+    fn loader_path(canonical: &Path) -> Vec<u16> {
+        use std::path::{Component, Prefix};
+        let mut wide: Vec<u16> = canonical.as_os_str().encode_wide().collect();
+        // DLL_LOAD_DIR can fail to resolve nested private dependencies when its
+        // directory uses the verbatim namespace. Keep canonical validation, but
+        // pass an equivalent ordinary drive path when it is short/unambiguous.
+        let ordinary = canonical.components().all(|component| match component {
+            Component::Normal(name) => name.to_str().is_some_and(|name| {
+                let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+                let device = matches!(
+                    stem.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+                ) || ["COM", "LPT"].iter().any(|prefix| {
+                    stem.strip_prefix(prefix).is_some_and(|suffix| {
+                        matches!(
+                            suffix,
+                            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                        )
+                    })
+                });
+                !device
+                    && !name.ends_with(['.', ' '])
+                    && !name.chars().any(|c| c < ' ' || "<>:\"|?*".contains(c))
+            }),
+            _ => true,
+        });
+        if matches!(canonical.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_)))
+            && wide.len() < 264
+            && ordinary
+        {
+            wide.drain(..4);
+        }
+        wide.push(0);
+        wide
+    }
     impl EmbeddedLibrary {
         /// Only exe_dir/renderers/{backend}/tn_renderer_{backend}.dll is accepted.
         /// First valid-path load permanently restricts process default DLL search
@@ -232,7 +267,7 @@ mod platform {
                 return Err("unexpected selected renderer DLL name/directory".into());
             }
             restrict_default_search()?;
-            let wide: Vec<u16> = canonical.as_os_str().encode_wide().chain(Some(0)).collect();
+            let wide = loader_path(&canonical);
             // SAFETY: canonical absolute NUL-terminated path; transitive search restricted.
             let handle = unsafe {
                 LoadLibraryExW(
@@ -243,7 +278,8 @@ mod platform {
             };
             if handle.is_null() {
                 return Err(format!(
-                    "optional renderer unavailable (DLL/dependency): {}",
+                    "optional renderer unavailable (DLL/dependency) at {}: {}",
+                    canonical.display(),
                     std::io::Error::last_os_error()
                 )
                 .into());

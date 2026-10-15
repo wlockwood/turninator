@@ -121,5 +121,15 @@ pub fn assess_selection(
     if let Some(notice) = material_notice(&scene.appearance.material_preset, selection.backend) {
         result.warnings.push(notice.into());
     }
+    if selection.backend == BackendId::LuxCore {
+        result
+            .warnings
+            .extend(crate::render::backends::luxcore::warnings(
+                scene,
+                request.kind,
+                request.transparent,
+                &selection.quality,
+            ));
+    }
     result
 }

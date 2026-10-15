@@ -785,6 +785,7 @@ impl Studio {
             if !assessment.errors.is_empty() {
                 return Err(assessment.errors.join("; ").into());
             }
+            self.renderer_warnings = assessment.warnings;
             let key = crate::export::identity::retained_render_key(
                 &scene,
                 &model.snapshot_hash,

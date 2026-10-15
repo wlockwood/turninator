@@ -352,6 +352,13 @@ impl super::Studio {
             }
             return;
         }
+        // Export completion precedes SDK context destruction. Keep the previous
+        // viewport image until the actor acknowledges the GPU handoff.
+        if !self.render.context_released() {
+            self.render.release_idle();
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            return;
+        }
         let pixels = (rect.size() * ctx.pixels_per_point()).ceil();
         let dimensions = [pixels.x.max(16.) as u32, pixels.y.max(16.) as u32];
         let signature = serde_json::to_string(&(

@@ -32,6 +32,7 @@ pub struct PreparedBackend {
 
 #[derive(Default)]
 pub struct BackendRegistry {
+    luxcore: RefCell<super::backends::luxcore::LuxCoreRuntimeCache>,
     statuses: RefCell<BTreeMap<BackendId, BackendStatus>>,
 }
 
@@ -72,8 +73,13 @@ fn nonempty<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 
 impl BackendRegistry {
     pub fn status(&self, backend: BackendId) -> BackendStatus {
-        if backend == BackendId::Filament && !self.statuses.borrow().contains_key(&backend) {
-            let mut status = super::backends::filament::FilamentBackend::status();
+        if matches!(backend, BackendId::Filament | BackendId::LuxCore)
+            && !self.statuses.borrow().contains_key(&backend)
+        {
+            let mut status = match backend {
+                BackendId::LuxCore => super::backends::luxcore::LuxCoreBackend::status(),
+                _ => super::backends::filament::FilamentBackend::status(),
+            };
             if let Err(error) = native_package_files(backend) {
                 status.availability = BackendAvailability::Unavailable {
                     reason: error.to_string(),
@@ -148,31 +154,58 @@ impl BackendRegistry {
                 preparation_timings: BTreeMap::from([("total".into(), started.elapsed())]),
             });
         }
-        if selection.backend == BackendId::Filament {
+        if matches!(selection.backend, BackendId::Filament | BackendId::LuxCore) {
             selection.validate()?;
             validate_requirements(tools, &requirements_for(selection, request.kind, false))?;
             if request.selection != *selection {
                 return Err("request selection differs from renderer preparation".into());
             }
             let started = Instant::now();
-            let mut backend = super::backends::filament::FilamentBackend::new(
-                &super::embedded::EmbeddedConfig {
-                    selection: selection.clone(),
-                    limits: limits.clone(),
-                    identity: bootstrap_identity(selection.backend),
-                    cache_directory: None,
-                },
-            )?;
+            let cache_directory = if selection.backend == BackendId::LuxCore {
+                let parent = request
+                    .job_dir
+                    .parent()
+                    .ok_or("job cache parent missing")?
+                    .canonicalize()?;
+                let directory = parent.join(".luxcore-kernels");
+                match std::fs::create_dir(&directory) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error.into()),
+                }
+                if !directory.is_dir() || directory.canonicalize()? != directory {
+                    return Err(
+                        "LuxCore compiler cache must be an owned directory without redirection"
+                            .into(),
+                    );
+                }
+                Some(directory)
+            } else {
+                None
+            };
+            let config = super::embedded::EmbeddedConfig {
+                selection: selection.clone(),
+                limits: limits.clone(),
+                identity: bootstrap_identity(selection.backend),
+                cache_directory,
+            };
+            let mut backend: Box<dyn RenderBackend> = match selection.backend {
+                BackendId::LuxCore => Box::new(self.luxcore.borrow_mut().prepare(&config)?),
+                _ => Box::new(super::backends::filament::FilamentBackend::new(&config)?),
+            };
             backend.configure(request)?;
             let identity = backend.identity();
             let assessment = backend.assess(scene, request);
             let mut effective_selection = selection.clone();
             effective_selection.device = Some(identity.device.clone());
-            let mut status = super::backends::filament::FilamentBackend::status();
+            let mut status = match selection.backend {
+                BackendId::LuxCore => super::backends::luxcore::LuxCoreBackend::status(),
+                _ => super::backends::filament::FilamentBackend::status(),
+            };
             status.availability = BackendAvailability::Available;
             self.statuses.borrow_mut().insert(selection.backend, status);
             return Ok(PreparedBackend {
-                backend: Box::new(backend),
+                backend,
                 effective_selection,
                 identity,
                 assessment,

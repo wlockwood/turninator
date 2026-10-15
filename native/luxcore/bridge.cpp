@@ -223,6 +223,7 @@ public:
         diagnostics["counters"]["gpu_task_count"]=task_count;
         diagnostics["counters"]["requested_minimum_samples"]=requested;diagnostics["counters"]["effective_aa_dimension"]=aa;diagnostics["counters"]["nominal_samples"]=uint64_t(aa)*aa;
         diagnostics["settings"]["denoise_enabled"]=use_denoise?"true":"false";
+        diagnostics["counters"]["constructor_seed"]=uint64_t(f.sample_seed?f.sample_seed:1);
         work.total=pixels*aa*aa;
         try {
             const bool reuse=session&&started&&last_width==f.width&&last_height==f.height&&last_aa==aa&&last_seed==f.sample_seed&&last_transparent==(f.transparent!=0);

@@ -253,17 +253,25 @@ fn actor_cancellation_replacement_and_owner_thread_destruction() {
     let (responded, response) = mpsc::channel();
     let query = std::thread::spawn(move || {
         service.cancel();
-        responded.send(()).unwrap();
+        responded.send(service.context_released()).unwrap();
         service
     });
     let responsive = response.recv_timeout(Duration::from_millis(250));
     release_drop.store(true, Ordering::Release);
     let service = query.join().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !service.context_released() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        service.context_released(),
+        "actor must acknowledge the completed teardown"
+    );
     drop(service);
     assert_eq!(dropped.load(Ordering::SeqCst), 2);
     assert_eq!(
         responsive,
-        Ok(()),
-        "UI cancellation must not wait for idle SDK destruction"
+        Ok(false),
+        "UI must remain responsive and wait for actual SDK destruction"
     );
 }

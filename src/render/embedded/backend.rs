@@ -10,6 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn job_sample_seed(backend: BackendId, complete_pixel_key: &str) -> u32 {
+    if backend != BackendId::LuxCore {
+        return 0;
+    }
+    use sha2::{Digest, Sha256};
+    let bytes = Sha256::digest(complete_pixel_key.as_bytes());
+    (u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & 0x7fff_ffff).max(1)
+}
+
 /// Small synchronous owner interface; polling never calls Rust from an SDK thread.
 /// Implementations must drain on cancellation and retain their module through destruction.
 pub trait EmbeddedDriver {
@@ -360,7 +369,10 @@ impl<D: EmbeddedDriver> EmbeddedJob<'_, '_, D> {
             model_to_world: std::array::from_fn(|i| matrix[i / 4][i % 4]),
             quality: self.studio.selection.quality.clone(),
             transparent: self.transparent,
-            sample_seed: 0,
+            sample_seed: job_sample_seed(
+                self.studio.identity.backend,
+                self.context.pixel_recipe_key,
+            ),
         };
         let start = Instant::now();
         // Even a failed begin may have queued native work. Drain all transport failures.
@@ -401,6 +413,29 @@ impl<D: EmbeddedDriver> EmbeddedJob<'_, '_, D> {
                 return Err(
                     RenderReportRejected("embedded runtime identity changed".into()).into(),
                 );
+            }
+            if let Some(diagnostics) = &info.diagnostics {
+                // Nested native timings are observations, never pixel identity.
+                // Startup includes SDK compilation; do not label it GPU-only time.
+                let phase = if self.completed.is_empty() {
+                    "first_frame"
+                } else {
+                    "later_frames"
+                };
+                for name in [
+                    "session_start_or_edit",
+                    "render_wait",
+                    "denoise",
+                    "readback_and_color",
+                ] {
+                    if let Some(ms) = diagnostics.timings_ms.get(name) {
+                        *self
+                            .timings
+                            .entry(format!("native/{phase}/{name}"))
+                            .or_default() += Duration::try_from_secs_f64(ms / 1000.)
+                            .map_err(|_| "invalid native timing")?;
+                    }
+                }
             }
             self.studio.diagnostics = info.diagnostics;
             self.timing("readback", read_start);
@@ -482,4 +517,19 @@ pub fn render_sequence<D: EmbeddedDriver>(
         })?;
     }
     Ok(job.report())
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    #[test]
+    fn luxcore_seed_is_positive_stable_and_bound_to_the_complete_pixel_key() {
+        let a = job_sample_seed(BackendId::LuxCore, &"a".repeat(64));
+        let b = job_sample_seed(BackendId::LuxCore, &"b".repeat(64));
+        assert!(a > 0 && a <= i32::MAX as u32);
+        assert!(b > 0 && b <= i32::MAX as u32);
+        assert_ne!(a, b);
+        assert_eq!(a, job_sample_seed(BackendId::LuxCore, &"a".repeat(64)));
+        assert_eq!(job_sample_seed(BackendId::Filament, &"a".repeat(64)), 0);
+    }
 }
