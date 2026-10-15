@@ -140,6 +140,19 @@ impl RenderService {
                             .is_ok_and(|bytes| bytes == scene_bytes);
                     if !snapshots_match {
                         cache.check_budget(task.cache_budget_bytes, reserve)?;
+                    }
+                    crate::render::requirements::validate_requirements(
+                        &task.tools,
+                        &crate::render::requirements::requirements_for(
+                            &task.request.selection,
+                            task.request.kind,
+                            false,
+                        ),
+                    )?;
+                    crate::render::backends::blender::validate_legacy_execution(
+                        &task.request.selection,
+                    )?;
+                    if !snapshots_match {
                         task.mesh.write_binary(&mesh_path)?;
                         crate::settings::atomic_write(&task.request.scene_path, &scene_bytes)?;
                     }

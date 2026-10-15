@@ -1,5 +1,8 @@
+pub mod backends;
 pub mod capabilities;
 pub mod contract;
+pub mod registry;
+pub mod requirements;
 pub mod selection;
 pub mod worker;
 pub use selection::{BackendId, BackendQuality, RenderSelection, RendererPreferences};

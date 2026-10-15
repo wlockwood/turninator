@@ -588,7 +588,6 @@ impl Studio {
         }
         let kind = if preview { self.preview_kind() } else { kind };
         let result = (|| -> Result<()> {
-            self.prefs.tools.validate()?;
             self.next_job += 1;
             let cache = CacheStore::new(self.data_dir.join("jobs"))?;
             let render_size = if preview {
@@ -649,6 +648,11 @@ impl Studio {
                     && kind == ExportKind::Still
                     && (!preview || self.output_format.supports_transparency()),
             );
+            crate::render::requirements::validate_requirements(
+                &self.prefs.tools,
+                &crate::render::requirements::requirements_for(&request.selection, kind, false),
+            )?;
+            crate::render::backends::blender::validate_legacy_execution(&request.selection)?;
             request.timeline = timeline;
             request.turntable_timing = turntable_timing;
             request.frame_count = frames;

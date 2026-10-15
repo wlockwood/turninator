@@ -542,6 +542,50 @@ pub struct RealizedScene {
     pub reference_bounds_mm: Bounds,
     pub analysis: Option<SectionAnalysis>,
 }
+/// Existing STL layer-reveal measurements. Empty/full stages have no cutting
+/// plane or cross-section measurements; preserve that distinction and JSON.
+#[derive(Clone, Debug)]
+pub struct BuildAnalysis {
+    pub legacy: Value,
+}
+impl BuildAnalysis {
+    pub fn from_legacy(legacy: Value) -> Result<Self> {
+        if ["capped", "closed_input"]
+            .iter()
+            .any(|key| !legacy[key].is_boolean())
+            || legacy["output_triangles"].as_u64().is_none()
+            || legacy["visible_layer"]
+                .as_i64()
+                .is_none_or(|layer| !(-1..50_000).contains(&layer))
+            || legacy["z_top_mm"]
+                .as_f64()
+                .is_none_or(|z| !z.is_finite() || z < 0.)
+        {
+            return Err("invalid legacy build analysis".into());
+        }
+        let volume = legacy
+            .get("remaining_volume_mm3")
+            .ok_or("missing build volume measurement")?;
+        if !volume.is_null() && volume.as_f64().is_none_or(|n| !n.is_finite() || n < 0.) {
+            return Err("invalid build volume measurement".into());
+        }
+        if legacy["visible_layer"] == -1
+            && (legacy["z_top_mm"] != 0.
+                || legacy["output_triangles"] != 0
+                || legacy["remaining_volume_mm3"] != 0.
+                || legacy["capped"] != false
+                || legacy["closed_input"] != false)
+        {
+            return Err("invalid empty build analysis".into());
+        }
+        // Intermediate solid stages carry the actual apply_section record;
+        // validate its extra fields without adding them to empty/full stages.
+        if legacy.get("axis").is_some() {
+            SectionAnalysis::from_legacy(legacy.clone(), legacy["closed_input"] == true)?;
+        }
+        Ok(Self { legacy })
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PhysicalMaterial {
     pub name: String,
@@ -599,7 +643,8 @@ pub struct RenderReport {
     pub warnings: Vec<String>,
     pub identity: BackendIdentity,
     pub quality: BackendQuality,
-    pub analyses: Vec<SectionAnalysis>,
+    pub analyses: BTreeMap<FrameKey, SectionAnalysis>,
+    pub build_analyses: BTreeMap<FrameKey, BuildAnalysis>,
     pub phase_timings: BTreeMap<String, Duration>,
 }
 #[derive(Clone, Debug)]

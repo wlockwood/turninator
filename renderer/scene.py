@@ -873,6 +873,33 @@ def apply_layer_filter(material,camera,resolution_x,resolution_y,pitch_mm):
             node.name="TurninatorFootprint"
 
 
+def probe_gpu_runtime():
+    """Read the actual current renderer context, including headless WGL.
+
+    Blender disables the Python drawing API in background mode. After explicit
+    preparation has initialized Eevee, its current WGL context still exposes the
+    hardware/driver strings directly. Never substitute OS inventory or guesses.
+    """
+    import gpu
+    import sys
+    try:
+        return {"backend": gpu.platform.backend_type_get(), "vendor": gpu.platform.vendor_get(),
+                "renderer": gpu.platform.renderer_get(), "version": gpu.platform.version_get()}
+    except SystemError:
+        if sys.platform == "win32":
+            import ctypes
+            gl = ctypes.WinDLL("opengl32.dll")
+            gl.wglGetCurrentContext.restype = ctypes.c_void_p
+            if gl.wglGetCurrentContext():
+                gl.glGetString.argtypes = [ctypes.c_uint]
+                gl.glGetString.restype = ctypes.c_char_p
+                values = [gl.glGetString(key) for key in (0x1F00, 0x1F01, 0x1F02)]
+                if all(values):
+                    return dict(backend="OPENGL", **dict(zip(("vendor", "renderer", "version"),
+                                                           (value.decode("utf-8", "strict") for value in values))))
+        return {"error": "No initialized headless GPU context; explicit runtime preparation is required"}
+
+
 def probe_devices():
     import bpy
     prefs = bpy.context.preferences.addons["cycles"].preferences
@@ -891,7 +918,8 @@ def probe_devices():
     return {"blender_version": bpy.app.version_string,
             "blender_build_hash": build_hash.decode() if isinstance(build_hash, bytes) else str(build_hash),
             "engines": ["eevee"] + (["cycles"] if optix else []),
-            "cycles_backend": "OPTIX" if optix else None, "devices": devices}
+            "cycles_backend": "OPTIX" if optix else None, "devices": devices,
+            "gpu": probe_gpu_runtime()}
 
 
 def studio_floor_mesh(extent):

@@ -687,8 +687,11 @@ pub(crate) fn run_export_with_budget(
             return Err("choose a fixed build stage or progressive build-up, not both".into());
         }
     }
-    request.selection.validate()?;
-    request.selection.backend.legacy_blender_engine()?;
+    crate::render::requirements::validate_requirements(
+        tools,
+        &crate::render::requirements::requirements_for(&request.selection, request.kind, false),
+    )?;
+    crate::render::backends::blender::validate_legacy_execution(&request.selection)?;
     if !(16..=8000).contains(&request.size) || !(1..=10000).contains(&request.frame_count) {
         return Err("invalid export settings".into());
     }

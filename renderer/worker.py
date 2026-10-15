@@ -202,13 +202,34 @@ def validate_frame_states(states, count):
         raise ValueError("timeline states must match the bounded frame count")
     previous=-1.0
     building=None
+    counted=None
+    previous_count=-1
+    preserve_camera=None
     for state in states:
         if not isinstance(state,dict): raise ValueError("invalid timeline frame")
-        validate_camera(state.get("camera"))
+        preserve=state.get("preserve_scene_camera",False)
+        if type(preserve) is not bool or preserve_camera is not None and preserve_camera!=preserve:
+            raise ValueError("scene camera preservation must be consistent across the sequence")
+        preserve_camera=preserve
+        if preserve:
+            if state.get("camera") is not None:
+                raise ValueError("choose scene camera preservation or an explicit frame camera")
+        else:
+            validate_camera(state.get("camera"))
         angle=state.get("angle_degrees")
         if isinstance(angle,bool) or not isinstance(angle,(float,int)) or not math.isfinite(angle) or abs(angle)>1e9:
             raise ValueError("invalid timeline angle")
         fraction=state.get("buildup_fraction")
+        count=state.get("visible_layers")
+        if count is not None and (type(count) is not int or not 0<=count<=50000 or count<previous_count):
+            raise ValueError("visible layer counts must be monotone integers within 0..50000")
+        if counted is not None and counted!=(count is not None):
+            raise ValueError("exact layer counts must be consistently enabled across timeline")
+        counted=count is not None
+        if counted:
+            if fraction is not None:
+                raise ValueError("choose exact layer counts or build fractions")
+            previous_count=count
         active=fraction is not None
         if building is not None and building!=active:
             raise ValueError("build-up must be consistently enabled across timeline")
@@ -258,6 +279,16 @@ def completion_event(payload, details_path):
     return result
 
 
+def visible_layer_schedule(layers, stage, states, building, count):
+    if stage is not None:
+        return [layer_for_count(layers,stage["visible_layers"])]*count
+    if states is not None and states[0].get("visible_layers") is not None:
+        return [layer_for_count(layers,state["visible_layers"]) for state in states]
+    if states is not None and building:
+        return [layer_for_fraction(layers,state["buildup_fraction"]) for state in states]
+    return buildup_schedule(layers,count) if building else [None]*count
+
+
 def render(request):
     import bpy
     started = time.perf_counter()
@@ -296,7 +327,7 @@ def render(request):
     states=load_frame_states(request,len(angles))
     if states is not None:
         angles=[state["angle_degrees"] for state in states]
-    progressive=mode=="buildup" or states is not None and states[0]["buildup_fraction"] is not None
+    progressive=mode=="buildup" or states is not None and (states[0]["buildup_fraction"] is not None or states[0].get("visible_layers") is not None)
     stage=request.get("build_stage")
     if stage is not None and (not isinstance(stage,dict) or type(stage.get("visible_layers")) is not int or not 0<=stage["visible_layers"]<=50000):
         raise ValueError("invalid fixed build stage")
@@ -323,7 +354,7 @@ def render(request):
     prepare_manifest(output_dir, recipe, reuse)
     render_spec=render_spec_for_mode(spec, mode)
     render_spec["build_up"]=building
-    if states is not None:
+    if states is not None and not states[0].get("preserve_scene_camera",False):
         render_spec["fit_turntable"]=False
         render_spec["camera"]=states[0]["camera"]
     obj, info = build_scene(render_spec, engine, size, samples, transparent, width, height)
@@ -331,9 +362,7 @@ def render(request):
     if info["geometry_hash"] != recipe["geometry_hash"]:
         raise ValueError("geometry changed during scene preparation")
     prepare_seconds = time.perf_counter() - started
-    visible_layers = ([layer_for_count(info["build_layers"],stage["visible_layers"])]*len(angles) if stage is not None
-                      else [layer_for_fraction(info["build_layers"],state["buildup_fraction"]) for state in states] if states is not None and building
-                      else buildup_schedule(info["build_layers"],len(angles)) if building else [None]*len(angles))
+    visible_layers = visible_layer_schedule(info["build_layers"],stage,states,building,len(angles))
     source_mesh=obj.data.copy() if building and (spec["geometry_kind"] == "original" or spec.get("section") is not None) else None
     sources = identical_frame_sources(angles, states, visible_layers)
     batch_count = animation_prefix(mode, states, progressive, reuse, sources)
@@ -395,7 +424,7 @@ def render(request):
                     set_visible_layer(obj,visible_layers[index])
             frame_analysis.append(info.get("section_analysis"))
             frame_build_analysis.append(info.get("build_analysis"))
-            if states is not None:
+            if states is not None and not states[index].get("preserve_scene_camera",False):
                 set_camera_spec(bpy.context.scene.camera,states[index]["camera"])
                 if spec.get("layer_appearance",False) and spec.get("layer_filtering",True):
                     for material in obj.data.materials:
@@ -472,6 +501,34 @@ def render(request):
     emit(request, "complete", completion_event(payload,details_path))
 
 
+def initialize_gpu_runtime():
+    """Explicit preparation only: establish Blender's actual headless context.
+
+    This disposable 16px scene never writes a file or touches source geometry.
+    Its state is removed before build_scene configures the real render.
+    """
+    import bpy
+    previous = bpy.context.window.scene
+    probe = bpy.data.scenes.new("TurninatorRuntimeProbe")
+    camera = bpy.data.cameras.new("TurninatorRuntimeProbeCamera")
+    obj = bpy.data.objects.new("TurninatorRuntimeProbeCamera", camera)
+    probe.collection.objects.link(obj)
+    probe.camera = obj
+    probe.render.engine = "BLENDER_EEVEE_NEXT"
+    probe.render.resolution_x = probe.render.resolution_y = 16
+    probe.render.resolution_percentage = 100
+    probe.eevee.taa_render_samples = 1
+    probe.render.film_transparent = True
+    try:
+        bpy.context.window.scene = probe
+        bpy.ops.render.render(write_still=False)
+    finally:
+        bpy.context.window.scene = previous
+        bpy.data.scenes.remove(probe)
+        bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.cameras.remove(camera)
+
+
 def main():
     emit({}, "ready", {"protocol_version": 1})
     while True:
@@ -490,7 +547,13 @@ def main():
                 request = parsed
             validate_request(parsed)
             if request["kind"] == "probe":
-                emit(request, "probe", probe_devices())
+                initialized=time.perf_counter()
+                if request.get("initialize_gpu", False):
+                    initialize_gpu_runtime()
+                initialization_seconds=time.perf_counter()-initialized
+                info=probe_devices()
+                info["initialization_seconds"]=initialization_seconds
+                emit(request, "probe", info)
             elif request["kind"] == "render":
                 render(request)
             else:
