@@ -14,6 +14,9 @@ pub struct EmbeddedConfig {
     pub selection: RenderSelection,
     pub limits: RenderLimits,
     pub identity: BackendIdentity,
+    /// Existing application-owned cache root. The host resolves and validates
+    /// the directory but cannot establish its ownership. Storage is not pixel identity.
+    pub cache_directory: Option<std::path::PathBuf>,
 }
 pub struct SceneUpload<'a> {
     pub revision: u64,

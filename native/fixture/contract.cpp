@@ -43,6 +43,18 @@ int main() {
         invalid_config("{\"schema_version\":1,\"schema_version\":1}");
         invalid_config(std::string("{\"bad\":\"")+char(-1)+"\"}");
         invalid_config(std::string(1048577,'x'));
+        for(const auto& path:std::vector<nlohmann::json>{nullptr,17,true,nlohmann::json::array(),nlohmann::json::object(),"","relative/cache",R"(C:cache)",R"(\cache)",R"(\\server)",R"(\\server\)",R"(\\.\pipe\cache)",R"(\\?\GLOBALROOT\cache)",R"(\\?\\\server\share)",R"(C:\app\..\cache)",R"(C:\bad|cache)",std::string("C:\\bad\0path",11),std::string("C:\\")+std::string(4094,'x')}) {
+            auto bad=config_document(); bad["cache_directory"]=path;
+            invalid_config(bad.dump());
+        }
+        for(const auto& path:std::vector<std::string>{R"(C:\)",R"(C:\app\cache)",R"(\\server\share\cache)",R"(\\?\C:\app\cache)",R"(\\?\UNC\server\share\cache)",nlohmann::json::parse(R"("C:\\cache\\\u6b6f\u8eca")").get<std::string>(),std::string("C:\\")+std::string(4093,'x')}) {
+            auto document=config_document(); document["cache_directory"]=path;
+            const auto bytes=document.dump();
+            auto with_cache=config; with_cache.json=reinterpret_cast<const uint8_t*>(bytes.data()); with_cache.json_bytes=bytes.size();
+            check(tn_renderer_create(&with_cache,&context,&error)==TN_OK && context);
+            tn_renderer_destroy(context); context=nullptr;
+        }
+        std::cout<<"optional cache directory accepted; invalid type/path rejected\n";
         check(tn_renderer_create(&config,&context,&error)==TN_OK && context);
         uint8_t tiny[4]={73,73,73,73}; uint64_t required=0;
         check(tn_renderer_describe(context,tiny,sizeof(tiny),&required,&error)==TN_CAPACITY);

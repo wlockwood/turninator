@@ -53,7 +53,14 @@ struct Fixture final : tn::Backend {
 namespace tn {
 uint32_t backend_id() noexcept { return TN_BACKEND_FIXTURE; }
 uint32_t backend_flags() noexcept { return TN_FLAG_TEST_FIXTURE; }
-std::unique_ptr<Backend> make_backend(const Config&) {
+std::unique_ptr<Backend> make_backend([[maybe_unused]] const Config& config) {
+#ifdef TN_CACHE_REQUIRED
+    if(!config.document.contains("cache_directory")) throw std::runtime_error("cache fixture requires explicit cache directory");
+    const auto path=config.document.at("cache_directory").get<std::string>();
+    if(!path.starts_with(R"(\\?\)")) throw std::runtime_error("cache fixture requires canonical Windows path");
+    const auto suffix=Json::parse(R"("\\cache-directory-\u6b6f\u8eca")").get<std::string>();
+    if(!path.ends_with(suffix)) throw std::runtime_error("cache fixture requires resolved Unicode directory");
+#endif
 #ifdef TN_DEPENDENT
     if(tn_fixture_dependency_value()!=17) throw std::runtime_error("bad dependency");
 #endif

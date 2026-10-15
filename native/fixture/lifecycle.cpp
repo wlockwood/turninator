@@ -228,6 +228,22 @@ void exceptions_cleanup() {
         tn_renderer_destroy(c); verify_owner();
     }
 }
+void cache_config_before_factory() {
+    for(const auto& value:std::vector<tn::Json>{nullptr,42,"","relative/cache",R"(C:cache)",R"(\cache)",R"(\\server)",R"(\\.\pipe\cache)",std::string("C:\\bad\0path",11),std::string("C:\\")+std::string(4094,'x')}) {
+        reset(); control.throw_factory=true;
+        auto document=config_document(); document["cache_directory"]=value;
+        auto bytes=document.dump();
+        tn_config cfg{sizeof(tn_config),1,reinterpret_cast<const uint8_t*>(bytes.data()),bytes.size(),1048576,1048576,8000,0};
+        tn_context c=nullptr;
+        check(tn_renderer_create(&cfg,&c,&error)==TN_INVALID_ARGUMENT && !c,"invalid cache directory rejected");
+        check(control.threads.empty(),"invalid cache directory must not reach SDK factory");
+    }
+    reset();
+    auto document=config_document(); document["cache_directory"]=R"(\\?\UNC\server\share\cache)";
+    const auto bytes=document.dump();
+    tn_config cfg{sizeof(tn_config),1,reinterpret_cast<const uint8_t*>(bytes.data()),bytes.size(),1048576,1048576,8000,0};
+    check(tn::copy_config(&cfg).document.at("cache_directory")==R"(\\?\UNC\server\share\cache)","cache path copied without rewriting");
+}
 }
 namespace tn {
 uint32_t backend_id() noexcept { return TN_BACKEND_FIXTURE; }
@@ -261,7 +277,7 @@ void before_idle_wait(const std::atomic<bool>& stopping,const std::atomic<bool>&
 }
 int main() {
     error={sizeof(tn_error),1,error_text,sizeof(error_text)};
-    try { pending_cancel_and_bounded_queue(); destroy_joins_pending(); cancellation_during_upload_drains_and_reuploads(); destroy_at_idle_wait_boundary(); exceptions_cleanup();
+    try { cache_config_before_factory(); pending_cancel_and_bounded_queue(); destroy_joins_pending(); cancellation_during_upload_drains_and_reuploads(); destroy_at_idle_wait_boundary(); exceptions_cleanup();
         std::cout<<"worker ownership, bounded queue, cancellation/render/upload drain, reupload, idle shutdown, copies, retry, exceptions and join passed\n"; return 0;
     } catch(const std::exception& e) { release(); std::cerr<<e.what()<<": "<<error_text<<"\n"; return 1; }
 }

@@ -47,6 +47,7 @@ fn config() -> EmbeddedConfig {
     EmbeddedConfig {
         selection: RenderSelection::for_backend(BackendId::Filament, true),
         limits: RenderLimits::default(),
+        cache_directory: None,
         identity: BackendIdentity {
             backend: BackendId::Filament,
             adapter_recipe_version: 1,
@@ -474,4 +475,68 @@ fn context_owns_library_through_pending_work_teardown() {
         drop(context); // Native destructor drains pending work before FreeLibrary.
         assert!(unsafe { GetModuleHandleW(wide.as_ptr()) }.is_null());
     }
+}
+
+#[test]
+fn rejects_invalid_cache_directories_before_native_create_without_creating_them() {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    let library = EmbeddedLibrary::load_fixture(&fixture("tn_fixture_cache.dll")).unwrap();
+    let missing = fixture("cache-directory-must-not-be-created");
+    assert!(!missing.exists());
+    let file = fixture("tn_fixture_cache.dll");
+    for path in [
+        PathBuf::new(),
+        PathBuf::from("relative/cache"),
+        PathBuf::from(r"C:cache"),
+        PathBuf::from(r"\cache"),
+        PathBuf::from(r"\\.\pipe\cache"),
+        PathBuf::from(r"\\?\GLOBALROOT\cache"),
+        PathBuf::from("C:\\bad\0path"),
+        PathBuf::from(format!("C:\\{}", "x".repeat(4094))),
+        PathBuf::from(OsString::from_wide(&[67, 58, 92, 0xd800])),
+        missing.clone(),
+        file,
+    ] {
+        let mut cfg = config();
+        cfg.cache_directory = Some(path.clone());
+        let error = match library.create(&cfg) {
+            Ok(_) => panic!("accepted invalid cache directory: {path:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.starts_with("cache directory"), "{path:?}: {error}");
+    }
+    assert!(!missing.exists());
+}
+
+#[test]
+fn canonical_unicode_cache_directory_crosses_native_parser_without_changing_pixels() {
+    let library = EmbeddedLibrary::load_fixture(&fixture("tn_fixture_cache.dll")).unwrap();
+    // A missing optional field still reaches the factory; this fixture requires
+    // it so dropping the field during serialization cannot silently pass.
+    let absent = match library.create(&config()) {
+        Ok(_) => panic!("cache fixture accepted an absent cache directory"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        absent.contains("cache fixture requires explicit cache directory"),
+        "{absent}"
+    );
+    let root = fixture("cache-directory-歯車");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let mut cfg = config();
+    cfg.cache_directory = Some(child.join(".."));
+    let mut context = library.create(&cfg).unwrap();
+    upload(&mut context, 1);
+    context.begin_frame(&frame(1)).unwrap();
+    wait_for_state(&mut context, EmbeddedState::Ready);
+    let mut pixels = [0; 16];
+    context.read_pixels(&mut pixels).unwrap();
+    assert_eq!(
+        pixels,
+        [255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 0, 0, 0, 0]
+    );
+    drop(context);
+    std::fs::remove_dir(&child).unwrap();
+    std::fs::remove_dir(&root).unwrap();
 }

@@ -105,6 +105,42 @@ mod platform {
             _ => Err("backend does not use the native SDK ABI".into()),
         }
     }
+    fn cache_directory(path: &Path) -> Result<String> {
+        use std::path::{Component, Prefix};
+        let validate_text = |path: &Path| -> Result<String> {
+            let text = path.to_str().ok_or("cache directory must be valid UTF-8")?;
+            if text.is_empty() || text.len() > 4096 || text.contains('\0') {
+                return Err("cache directory must contain 1..=4096 UTF-8 bytes without NUL".into());
+            }
+            Ok(text.to_owned())
+        };
+        validate_text(path)?;
+        if !path.is_absolute()
+            || !matches!(path.components().next(), Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)
+                    | Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _)))
+        {
+            return Err("cache directory must be an absolute drive/UNC path".into());
+        }
+        let resolved = path
+            .canonicalize()
+            .map_err(|e| format!("cache directory must already exist: {e}"))?;
+        if !resolved.is_dir() {
+            return Err("cache directory must be an existing directory".into());
+        }
+        validate_text(&resolved)
+    }
+    fn config_json(config: &EmbeddedConfig) -> Result<Vec<u8>> {
+        let l = &config.limits;
+        let mut document = serde_json::json!({"schema_version":1,"selection":config.selection,"identity":config.identity,
+            "limits":{"max_source_vertices":l.max_source_vertices,"max_source_triangles":l.max_source_triangles,
+                "max_scene_bytes":l.max_scene_bytes,"max_output_side":l.max_output_side,
+                "host_bytes":l.host_bytes,"gpu_bytes":l.gpu_bytes,"scratch_bytes":l.scratch_bytes}});
+        if let Some(path) = &config.cache_directory {
+            document["cache_directory"] = cache_directory(path)?.into();
+        }
+        json(&document, abi::MAX_JSON)
+    }
     // Permanent process policy, intentionally not restored after loading.
     fn restrict_default_search() -> Result<()> {
         static POLICY: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -246,13 +282,7 @@ mod platform {
             {
                 return Err("invalid native renderer limits".into());
             }
-            let bytes = json(
-                &serde_json::json!({"schema_version":1,"selection":config.selection,"identity":config.identity,
-                "limits":{"max_source_vertices":l.max_source_vertices,"max_source_triangles":l.max_source_triangles,
-                    "max_scene_bytes":l.max_scene_bytes,"max_output_side":l.max_output_side,
-                    "host_bytes":l.host_bytes,"gpu_bytes":l.gpu_bytes,"scratch_bytes":l.scratch_bytes}}),
-                abi::MAX_JSON,
-            )?;
+            let bytes = config_json(config)?;
             let cfg = abi::Config {
                 size: size_of::<abi::Config>() as u32,
                 version: abi::VERSION,

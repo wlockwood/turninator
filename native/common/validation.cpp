@@ -48,6 +48,31 @@ std::string text(const Json& j,size_t max=256) {
     }
     return s;
 }
+void cache_directory(const Json& j) {
+    auto path=text(j,4096);
+    const auto separator=[](char c){return c=='\\'||c=='/';};
+    // Inspect UTF-8 syntax only. Never open a path or change filesystem/env state.
+    // Rust canonicalize emits verbatim drive/UNC paths on Windows.
+    bool verbatim_drive=false;
+    if(path.starts_with(R"(\\?\UNC\)")) path=R"(\\)"+path.substr(8);
+    else if(path.starts_with(R"(\\?\)")) { path=path.substr(4); verbatim_drive=true; }
+    const bool drive=path.size()>=3&&((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z'))&&path[1]==':'&&separator(path[2]);
+    const bool unc=path.size()>=5&&separator(path[0])&&separator(path[1]);
+    require((drive||unc)&&(!verbatim_drive||drive),"cache directory must be an absolute drive/UNC path");
+    size_t start=drive?3:2;
+    size_t components=0;
+    for(size_t end=start;end<=path.size();++end) {
+        if(end!=path.size()&&!separator(path[end])) {
+            require(std::string_view("<>\"|?*:").find(path[end])==std::string_view::npos,"invalid cache directory path character");
+            continue;
+        }
+        const auto part=std::string_view(path).substr(start,end-start);
+        require(part!="."&&part!=".."&&(!part.empty()||end==path.size()),"invalid cache directory component");
+        if(!part.empty()) ++components;
+        start=end+1;
+    }
+    require(!unc||components>=2,"cache directory UNC requires server/share");
+}
 void vector3(const Json& j,double min=-std::numeric_limits<double>::max(),double max=std::numeric_limits<double>::max()) {
     require(j.is_array()&&j.size()==3,"expected three components"); for(const auto& n:j) number(n,min,max);
 }
@@ -82,7 +107,8 @@ template<class T> void copy(std::vector<T>& v,const T* p,size_t n) { if(n) v.ass
 Config copy_config(const tn_config* raw) {
     structure(raw); require(raw->reserved==0,"config reserved field");
     Config c; c.document=parse(raw->json,raw->json_bytes); auto& j=c.document;
-    shape(j,{"schema_version","selection","identity","limits"}); schema(j);
+    shape(j,{"schema_version","selection","identity","limits"},{"cache_directory"}); schema(j);
+    if(j.contains("cache_directory")) cache_directory(j.at("cache_directory"));
     const auto& selection=j.at("selection"); shape(selection,{"backend","device","quality"});
     c.backend=text(selection.at("backend")); require(c.backend=="filament"||c.backend=="luxcore","unknown backend");
     require(backend_id()==TN_BACKEND_FIXTURE || static_cast<uint32_t>(c.backend=="filament"?TN_BACKEND_FILAMENT:TN_BACKEND_LUXCORE)==backend_id(),"bridge backend mismatch");
