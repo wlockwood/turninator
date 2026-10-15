@@ -107,7 +107,7 @@ impl ViewportSettings {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     right: [f32; 4],
     up: [f32; 4],
@@ -165,6 +165,9 @@ pub struct Viewport {
     solid_source: Option<std::result::Result<BuildUpSolid, String>>,
     buildup_cap_warning: Option<String>,
     target: Option<Target>,
+    // UI progress/playback repaints can reuse the native texture. Geometry and
+    // target mutations invalidate this; camera/settings use actual shader data.
+    rendered_frame: Option<(Uniforms, bool)>,
     positions: Vec<[f32; 3]>,
     source_triangles: Vec<[u32; 3]>,
     solid_bottom_tops: Vec<f32>,
@@ -377,6 +380,7 @@ impl Viewport {
             solid_source: None,
             buildup_cap_warning: None,
             target: None,
+            rendered_frame: None,
             positions: Vec::new(),
             source_triangles: Vec::new(),
             solid_bottom_tops: Vec::new(),
@@ -465,6 +469,7 @@ impl Viewport {
         self.source_max_z = bounds.max[2] as f32;
         self.display_pose = None;
         self.bounds = None;
+        self.rendered_frame = None;
         Ok(())
     }
     fn upload_geometry(
@@ -540,6 +545,7 @@ impl Viewport {
         self.geometry = Some(geometry);
         self.face_colors = colors.to_vec();
         self.has_face_colors = !colors.is_empty();
+        self.rendered_frame = None;
         Ok(())
     }
     /// Assigns the actual deposited layer top to each original triangle.
@@ -563,6 +569,7 @@ impl Viewport {
         let geometry = self.face_geometry(&self.face_colors, tops)?;
         self.geometry = Some(geometry);
         self.face_layer_tops = tops.to_vec();
+        self.rendered_frame = None;
         Ok(())
     }
     fn face_geometry(&self, colors: &[[f32; 3]], tops: &[f32]) -> Result<Geometry> {
@@ -646,6 +653,7 @@ impl Viewport {
         self.revision = None;
         self.bounds = None;
         self.display_pose = None;
+        self.rendered_frame = None;
     }
     pub fn triangle_count(&self) -> usize {
         self.geometry
@@ -898,6 +906,7 @@ impl Viewport {
             id,
             oit: None,
         });
+        self.rendered_frame = None;
     }
     fn ensure_oit(&mut self) {
         let Some(target) = self.target.as_mut() else {
@@ -1101,6 +1110,10 @@ impl Viewport {
                 u32::from(self.has_face_colors) as f32,
             ],
         };
+        let frame = (parameters, settings.show_edges);
+        if self.rendered_frame == Some(frame) {
+            return;
+        }
         self.state
             .queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&parameters));
@@ -1156,6 +1169,7 @@ impl Viewport {
             }
         }
         self.state.queue.submit([encoder.finish()]);
+        self.rendered_frame = Some(frame);
     }
     fn render_geometry(&self, settings: &ViewportSettings) -> impl Iterator<Item = &Geometry> {
         let empty = self.geometry_kind == "original"
@@ -1352,6 +1366,187 @@ mod tests {
         buffer.unmap();
         result
     }
+    #[test]
+    #[ignore = "requires an actual GPU adapter; run explicitly for viewport cache validation"]
+    fn gpu_static_frames_reuse_target_and_scene_changes_refresh_it() {
+        // Mark the retained texture independently of the renderer. A redundant
+        // render clears this mark, so this observes GPU work rather than a cache
+        // counter that could disagree with actual command submission.
+        fn mark_target(viewport: &Viewport) {
+            let mut encoder = viewport
+                .state
+                .device
+                .create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &viewport.target.as_ref().unwrap().color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 1.,
+                                g: 0.,
+                                b: 1.,
+                                a: 1.,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
+            viewport.state.queue.submit([encoder.finish()]);
+        }
+        fn marked(viewport: &Viewport) -> bool {
+            capture(viewport)
+                .chunks_exact(4)
+                .all(|pixel| pixel == [255, 0, 255, 255])
+        }
+        fn assert_cached(
+            viewport: &mut Viewport,
+            camera: &OrbitCamera,
+            settings: &ViewportSettings,
+        ) {
+            mark_target(viewport);
+            viewport.render(camera, settings);
+            assert!(
+                marked(viewport),
+                "unchanged native frame was rendered again"
+            );
+        }
+        fn assert_refreshed(
+            viewport: &mut Viewport,
+            camera: &OrbitCamera,
+            settings: &ViewportSettings,
+        ) {
+            viewport.display_bounds(settings);
+            mark_target(viewport);
+            viewport.render(camera, settings);
+            assert!(
+                !marked(viewport),
+                "changed native frame retained stale pixels"
+            );
+            assert_cached(viewport, camera, settings);
+        }
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let state = block_on(RenderState::create(
+            &Default::default(),
+            &instance,
+            None,
+            Default::default(),
+        ))
+        .unwrap();
+        eprintln!("viewport cache adapter: {:?}", state.adapter.get_info());
+        let mut viewport = Viewport::new(&state);
+        let mesh = Mesh {
+            positions: vec![
+                [-10., -10., 0.],
+                [10., -10., 0.],
+                [10., 10., 0.],
+                [-10., 10., 0.],
+                [-10., -10., 20.],
+                [10., -10., 20.],
+                [10., 10., 20.],
+                [-10., 10., 20.],
+            ],
+            triangles: vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ],
+        };
+        viewport.set_mesh(&mesh, "original", 1).unwrap();
+        let mut settings = ViewportSettings::default();
+        let mut camera = OrbitCamera::default();
+        camera.canonical(super::super::CanonicalView::Front);
+        camera.fit(&viewport.display_bounds(&settings).unwrap());
+        viewport.resize([96, 96]);
+        assert_refreshed(&mut viewport, &camera, &settings);
+        // Stable progress repaints and redundant accepted-mesh notifications
+        // must leave the native texture alone.
+        viewport.set_mesh(&mesh, "original", 1).unwrap();
+        assert_cached(&mut viewport, &camera, &settings);
+
+        camera.orbit(5., 2.);
+        assert_refreshed(&mut viewport, &camera, &settings);
+        camera.pan(3., 2., 96.);
+        assert_refreshed(&mut viewport, &camera, &settings);
+        camera.zoom(1.);
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.color = [0.9, 0.2, 0.1];
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.roughness = 0.2;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.show_edges = true;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.display_rotation_degrees = [12., 23., 34.];
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.turntable_angle_degrees = 45.;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.section = Some(SectionPlane {
+            axis: 2,
+            position_mm: 8.,
+            keep_positive: false,
+        });
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.buildup_height_mm = Some(10.);
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.buildup_height_mm = Some(12.);
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.inspection_mode = InspectionMode::Ghost;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.opacity = 0.5;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.inspection_mode = InspectionMode::Xray;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.inspection_mode = InspectionMode::Opaque;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.layer_appearance = true;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.first_layer_height_mm = 0.3;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.layer_height_mm = 0.3;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        settings.groove_depth_mm = 0.01;
+        assert_refreshed(&mut viewport, &camera, &settings);
+        viewport
+            .set_triangle_colors(&vec![[0.1, 0.8, 0.3]; mesh.triangles.len()])
+            .unwrap();
+        assert_refreshed(&mut viewport, &camera, &settings);
+        viewport
+            .set_triangle_layer_tops(&vec![15.; mesh.triangles.len()])
+            .unwrap();
+        assert_refreshed(&mut viewport, &camera, &settings);
+        viewport.set_triangle_colors(&[]).unwrap();
+        assert_refreshed(&mut viewport, &camera, &settings);
+        viewport.set_triangle_layer_tops(&[]).unwrap();
+        assert_refreshed(&mut viewport, &camera, &settings);
+        // The aspect ratio stays unchanged: new textures still need pixels.
+        viewport.resize([128, 128]);
+        assert_refreshed(&mut viewport, &camera, &settings);
+        // A new accepted mesh revision with identical bounds and uniforms
+        // invalidates independently of the camera/settings identity.
+        viewport.set_mesh(&mesh, "original", 2).unwrap();
+        assert_refreshed(&mut viewport, &camera, &settings);
+        viewport.set_mesh(&mesh, "beads", 3).unwrap();
+        assert_refreshed(&mut viewport, &camera, &settings);
+        viewport.clear_mesh();
+        assert_refreshed(&mut viewport, &camera, &settings);
+        viewport.set_mesh(&mesh, "original", 4).unwrap();
+        assert_refreshed(&mut viewport, &camera, &settings);
+    }
+
     #[test]
     #[ignore = "requires an actual GPU adapter; run explicitly for viewport validation"]
     fn gpu_render_layers_resize_and_unload() {
