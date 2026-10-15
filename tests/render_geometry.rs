@@ -592,3 +592,252 @@ fn single_frames_do_not_require_sheet_design_edge_capacity() {
             .contains("design-edge budget")
     );
 }
+fn reverse_winding(mesh: &mut Mesh) {
+    for t in &mut mesh.triangles {
+        t.swap(1, 2);
+    }
+}
+fn signed_realized_volume(scene: &RealizedScene) -> f64 {
+    let origin = scene.reference_bounds_mm.min;
+    scene
+        .mesh
+        .triangles
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|i| {
+                std::array::from_fn::<_, 3, _>(|axis| {
+                    scene.mesh.positions[i as usize][axis] - origin[axis]
+                })
+            });
+            (a[0] * (b[1] * c[2] - b[2] * c[1])
+                + a[1] * (b[2] * c[0] - b[0] * c[2])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.
+        })
+        .sum()
+}
+fn assert_consistently_closed(scene: &RealizedScene) {
+    use std::collections::BTreeMap;
+    if scene.mesh.triangles.is_empty() {
+        return;
+    }
+    let mut mesh = Mesh::default();
+    let mut points = BTreeMap::new();
+    for triangle in &scene.mesh.triangles {
+        mesh.triangles.push(triangle.map(|i| {
+            let p = scene.mesh.positions[i as usize];
+            let key = p.map(|v| if v == 0. { 0 } else { v.to_bits() });
+            *points.entry(key).or_insert_with(|| {
+                let id = mesh.positions.len() as u32;
+                mesh.positions.push(p);
+                id
+            })
+        }));
+    }
+    // Source and generated caps can triangulate the same straight boundary
+    // with different exact collinear subdivisions. Compare oriented segments
+    // after splitting at those existing points, never moving or welding nearby
+    // positions and never repairing a gap by tolerance.
+    let mut edges = BTreeMap::<(u32, u32), (usize, i32)>::new();
+    for t in &mesh.triangles {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let p = mesh.positions[a as usize];
+            let q = mesh.positions[b as usize];
+            let delta = std::array::from_fn::<_, 3, _>(|axis| q[axis] - p[axis]);
+            let axis = (0..3)
+                .max_by(|&a, &b| delta[a].abs().total_cmp(&delta[b].abs()))
+                .unwrap();
+            assert_ne!(delta[axis], 0.);
+            let mut splits = vec![(0., a), (1., b)];
+            for (id, r) in mesh.positions.iter().enumerate() {
+                let offset = std::array::from_fn::<_, 3, _>(|axis| r[axis] - p[axis]);
+                let cross = [
+                    delta[1] * offset[2] - delta[2] * offset[1],
+                    delta[2] * offset[0] - delta[0] * offset[2],
+                    delta[0] * offset[1] - delta[1] * offset[0],
+                ];
+                let phase = offset[axis] / delta[axis];
+                if cross == [0.; 3] && phase > 0. && phase < 1. {
+                    splits.push((phase, id as u32));
+                }
+            }
+            splits.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for pair in splits.windows(2) {
+                let a = pair[0].1;
+                let b = pair[1].1;
+                let e = edges.entry((a.min(b), a.max(b))).or_default();
+                e.0 += 1;
+                e.1 += if a < b { 1 } else { -1 };
+            }
+        }
+    }
+    for (edge, (count, balance)) in edges {
+        assert_eq!(
+            (count, balance),
+            (2, 0),
+            "unmatched oriented boundary {:?} -> {:?}",
+            mesh.positions[edge.0 as usize],
+            mesh.positions[edge.1 as usize]
+        );
+    }
+}
+#[test]
+fn inward_cube_sections_normalize_disposable_winding_for_all_axes_and_keep_directions() {
+    let mut mesh = cube([0.; 3], 10.);
+    reverse_winding(&mut mesh);
+    let s = scene(mesh);
+    let before = s.mesh.snapshot_hash().unwrap();
+    for axis in 0..3 {
+        for positive in [false, true] {
+            let mut f = frame(&s);
+            f.section = Some(cut(axis, 5., positive));
+            let r = realize_frame(&s, &f).unwrap();
+            let a = r.analysis.as_ref().unwrap();
+            near(a.legacy["original_volume_mm3"].as_f64().unwrap(), 1000.);
+            near(a.legacy["remaining_volume_mm3"].as_f64().unwrap(), 500.);
+            near(signed_realized_volume(&r), 500.);
+            assert_consistently_closed(&r);
+            near(area_at(&r, axis as usize, 5.), 100.);
+            let cut_material = *r.triangle_materials.iter().max().unwrap();
+            for (t, m) in r.mesh.triangles.iter().zip(&r.triangle_materials) {
+                if *m == cut_material {
+                    near(
+                        r.normals[t[0] as usize][axis as usize] as f64,
+                        if positive { -1. } else { 1. },
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(before, s.mesh.snapshot_hash().unwrap());
+}
+#[test]
+fn inward_cube_exact_boundary_cuts_keep_complete_faces_and_empty_stages() {
+    let mut mesh = cube([0.; 3], 10.);
+    reverse_winding(&mut mesh);
+    let s = scene(mesh);
+    for axis in 0..3 {
+        for positive in [false, true] {
+            for position in [0., 10.] {
+                let complete = if positive {
+                    position == 0.
+                } else {
+                    position == 10.
+                };
+                let mut f = frame(&s);
+                f.section = Some(cut(axis, position, positive));
+                let r = realize_frame(&s, &f).unwrap();
+                assert_eq!(r.mesh.triangles.len(), if complete { 12 } else { 0 });
+                near(
+                    r.analysis.as_ref().unwrap().legacy["remaining_volume_mm3"]
+                        .as_f64()
+                        .unwrap(),
+                    if complete { 1000. } else { 0. },
+                );
+                near(
+                    signed_realized_volume(&r),
+                    if complete { 1000. } else { 0. },
+                );
+                assert_consistently_closed(&r);
+            }
+        }
+    }
+}
+#[test]
+fn inward_original_partial_build_caps_remain_consistently_closed_after_sectioning() {
+    let mut mesh = cube([0.; 3], 10.);
+    reverse_winding(&mut mesh);
+    let mut s = scene(mesh);
+    s.metadata.solid_layer_tops_mm = vec![5., 10.];
+    let before = s.mesh.snapshot_hash().unwrap();
+    let mut f = frame(&s);
+    f.visible_layers = Some(1);
+    let r = realize_frame(&s, &f).unwrap();
+    near(signed_realized_volume(&r), 500.);
+    assert_consistently_closed(&r);
+    for axis in 0..3 {
+        for positive in [false, true] {
+            f.section = Some(cut(axis, 5., positive));
+            let r = realize_frame(&s, &f).unwrap();
+            let expected = if axis == 2 {
+                if positive { 0. } else { 500. }
+            } else {
+                250.
+            };
+            near(
+                r.analysis.as_ref().unwrap().legacy["original_volume_mm3"]
+                    .as_f64()
+                    .unwrap(),
+                500.,
+            );
+            near(
+                r.analysis.as_ref().unwrap().legacy["remaining_volume_mm3"]
+                    .as_f64()
+                    .unwrap(),
+                expected,
+            );
+            near(signed_realized_volume(&r), expected);
+            assert_consistently_closed(&r);
+        }
+    }
+    assert_eq!(before, s.mesh.snapshot_hash().unwrap());
+}
+#[test]
+fn globally_inward_hollow_source_preserves_cavity_winding_relationships() {
+    let mut mesh = cube([0.; 3], 10.);
+    let mut cavity = cube([3.; 3], 4.);
+    reverse_winding(&mut cavity);
+    append(&mut mesh, cavity);
+    reverse_winding(&mut mesh);
+    let s = scene(mesh);
+    let before = s.mesh.snapshot_hash().unwrap();
+    for axis in 0..3 {
+        for positive in [false, true] {
+            let mut f = frame(&s);
+            f.section = Some(cut(axis, 5., positive));
+            let r = realize_frame(&s, &f).unwrap();
+            let a = r.analysis.as_ref().unwrap();
+            near(a.legacy["original_volume_mm3"].as_f64().unwrap(), 936.);
+            near(a.legacy["remaining_volume_mm3"].as_f64().unwrap(), 468.);
+            near(signed_realized_volume(&r), 468.);
+            near(area_at(&r, axis as usize, 5.), 84.);
+        }
+    }
+    assert_eq!(before, s.mesh.snapshot_hash().unwrap());
+}
+#[test]
+fn independently_closed_stepped_layers_of_mixed_winding_have_additive_volumes() {
+    let mut mesh = cube([0.; 3], 2.);
+    let mut second = cube([0., 0., 2.], 2.);
+    reverse_winding(&mut second);
+    append(&mut mesh, second);
+    let mut s = scene(mesh);
+    s.metadata.kind = GeometryKind::Stepped;
+    s.metadata.layer_ranges = vec![
+        LayerRange {
+            start_triangle: 0,
+            end_triangle: 12,
+            layer_index: 0,
+            z_top_mm: 2.,
+        },
+        LayerRange {
+            start_triangle: 12,
+            end_triangle: 24,
+            layer_index: 1,
+            z_top_mm: 4.,
+        },
+    ];
+    let before = s.mesh.snapshot_hash().unwrap();
+    for axis in 0..3 {
+        for positive in [false, true] {
+            let mut f = frame(&s);
+            f.section = Some(cut(axis, if axis == 2 { 2. } else { 1. }, positive));
+            let r = realize_frame(&s, &f).unwrap();
+            let a = r.analysis.as_ref().unwrap();
+            near(a.legacy["original_volume_mm3"].as_f64().unwrap(), 16.);
+            near(a.legacy["remaining_volume_mm3"].as_f64().unwrap(), 8.);
+            near(signed_realized_volume(&r), 8.);
+        }
+    }
+    assert_eq!(before, s.mesh.snapshot_hash().unwrap());
+}

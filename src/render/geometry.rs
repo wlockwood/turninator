@@ -88,7 +88,7 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
     let mut staged = Vec::new();
     let mut section_caps = Vec::new();
     let mut all_closed = !components.is_empty();
-    for (shell, component) in components.into_iter().enumerate() {
+    for (shell, mut component) in components.into_iter().enumerate() {
         let solid = if stage.is_some() || frame.section.is_some() {
             BuildUpSolid::new(&component.mesh).ok()
         } else {
@@ -113,6 +113,21 @@ pub fn realize_frame(scene: &RenderSceneSnapshot, frame: &FrameSpec) -> Result<R
                 material: materials.triangle_materials[index],
                 shell,
             });
+        }
+        // Closure accepts either globally consistent orientation. Normalize only
+        // the disposable closed component, including all of an original solid's
+        // cavity shells together, so caps and coplanar culling have outward
+        // source faces without changing the accepted mesh or cavity relations.
+        if solid.is_some() && signed_volume(&faces, scene.reference_bounds_mm.min) < 0. {
+            for face in &mut faces {
+                face.v.swap(1, 2);
+                for vertex in &mut face.v {
+                    vertex.n = scale(vertex.n, -1.);
+                }
+            }
+            for triangle in &mut component.mesh.triangles {
+                triangle.swap(1, 2);
+            }
         }
         if let Some(plane) = &stage {
             faces = clip_faces(faces, plane, &mut generated)?;
@@ -543,14 +558,23 @@ fn cap_faces(
         .collect())
 }
 fn volume(faces: &[Face], origin: Point) -> f64 {
+    // Deposited components/layers are independently closed and additive. The
+    // original solid remains one component so cavity shells still subtract.
+    let mut components = BTreeMap::<usize, f64>::new();
+    for face in faces {
+        *components.entry(face.shell).or_default() += face_volume(face, origin);
+    }
+    components.values().map(|v| v.abs()).sum()
+}
+fn signed_volume(faces: &[Face], origin: Point) -> f64 {
     faces
         .iter()
-        .map(|f| {
-            let [a, b, c] = f.v.map(|v| sub(v.p, origin));
-            dot(a, cross(b, c)) / 6.
-        })
+        .map(|face| face_volume(face, origin))
         .sum::<f64>()
-        .abs()
+}
+fn face_volume(face: &Face, origin: Point) -> f64 {
+    let [a, b, c] = face.v.map(|v| sub(v.p, origin));
+    dot(a, cross(b, c)) / 6.
 }
 fn face_area(f: &Face) -> f64 {
     let [a, b, c] = f.v.map(|v| v.p);
