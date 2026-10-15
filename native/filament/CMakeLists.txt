@@ -87,6 +87,8 @@ target_link_libraries(tn_renderer_filament PRIVATE ${tn_filament_libraries} gdi3
 target_link_options(tn_renderer_filament PRIVATE "/MAP:${CMAKE_CURRENT_BINARY_DIR}/tn_renderer_filament.map" /MAPINFO:EXPORTS)
 option(TN_FILAMENT_CONFORMANCE "Build real GPU CABI conformance caller" OFF)
 if(TN_FILAMENT_CONFORMANCE)
+  enable_testing()
+  add_subdirectory(tests)
   add_executable(tn_filament_conformance conformance.cpp)
   target_link_libraries(tn_filament_conformance PRIVATE tn_native_core psapi)
   add_dependencies(tn_filament_conformance tn_renderer_filament)

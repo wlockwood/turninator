@@ -223,5 +223,8 @@
     }
   ],
   "license_file": "vendor/LICENSE.apache-2.0",
-  "license_sha256": "f4fe379e2fb014a378b89f5d3f63bfd3fdee9d6e514ded6b6723a1762be65d9e"
+  "license_sha256": "02d70b593dd8e9355dd8e1ca8d13c303bee5bcaf3065b66ff6e4f534e1e6a2c1",
+  "license_source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/LICENSE",
+  "license_size": 11362,
+  "license_git_blob": "73774b41cafc7ca9171fa50ea9fd95da343be320"
 }

@@ -38,6 +38,6 @@
   },
   "layers": {"origin": "fixed reference_bounds_mm.min.z", "position": "preserved build mm after pose", "original_only": true, "fade_pixels": [2, 4], "diagonal_factor": 1.4142135623730951},
   "resin": {"support": "approximate", "reason": "Screen-space refraction, fixed smallest full-bounds optical thickness, scattering as isotropic extinction; no offscreen or multiple volume transport."},
-  "resource_bounds": {"gpu_bytes_per_pixel": 160, "gpu_msaa_bytes_per_pixel_sample": 12, "gpu_shadow_bytes_per_texel": 8, "retained_target_configurations": 3, "gpu_baseline_mib": 64, "host_output_bytes_per_pixel": 12, "host_baseline_mib": 256, "host_driver_backing": "reserve current and retained GPU allocation bound again as host commitment"},
+  "resource_bounds": {"gpu_bytes_per_pixel": 160, "gpu_msaa_bytes_per_pixel_sample": 12, "gpu_shadow_bytes_per_texel": 8, "retained_target_configurations": 3, "gpu_baseline_mib": 64, "gpu_geometry_overhead_mib": 16, "host_output_bytes_per_pixel": 12, "host_baseline_mib": 256, "host_snapshot_bytes_per_vertex": 72, "host_snapshot_bytes_per_triangle": 32, "host_realization_staging_bytes_per_vertex": 88, "host_realization_staging_bytes_per_triangle": 24, "host_driver_backing": "reserve current and retained GPU allocation bound again as host commitment; compose live upload staging before allocation"},
   "unqualified": "MSAA8 fails this pinned SDK/device readback path despite combined sampled HDR/depth support mask15; not attempted by this recipe. Vulkan frame-buffer-fetch MSAA is false, so custom resolve is unavailable."
 }

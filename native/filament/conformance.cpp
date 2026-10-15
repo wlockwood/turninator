@@ -75,6 +75,31 @@ std::vector<uint8_t> render(tn_context c,tn_frame f) {
     return pixels;
 }
 struct Context { tn_context value{}; ~Context(){if(value)tn_renderer_destroy(value);} };
+void asymmetric_readback_oracle(tn_context context,const tn::Json& config,const std::filesystem::path& out) {
+    // Actual CABI/SDK image: red upper-left, green upper-right, blue lower-right,
+    // transparent lower-left. Analytic orthographic projection puts sample
+    // centers at (176,176), (336,176), (336,336), (176,336), respectively.
+    const std::vector<float> positions{1,0,6, 4,0,6, 4,0,9, 1,0,9,
+                                       6,0,6, 9,0,6, 9,0,9, 6,0,9,
+                                       6,0,1, 9,0,1, 9,0,4, 6,0,4};
+    std::vector<float> normals(positions.size());for(size_t i=1;i<normals.size();i+=3)normals[i]=-1;
+    const std::vector<uint32_t> indices{0,1,2,0,2,3, 4,5,6,4,6,7, 8,9,10,8,10,11},slots{0,0,1,1,2,2};
+    auto scene=scene_document();scene["appearance"]["studio_preset"]="diagram";scene["reference_bounds_mm"]["max"]={10,1,10};
+    const auto original=scene["materials"][0];scene["materials"]={original,original,original};
+    const std::array<std::array<float,3>,3> colors{{{0.7f,0.02f,0.01f},{0.01f,0.6f,0.02f},{0.01f,0.02f,0.8f}}};
+    for(size_t i=0;i<3;++i){scene["materials"][i]["base_color_linear"]=colors[i];scene["materials"][i]["unlit"]=true;}
+    auto metadata=scene.dump();tn_scene input{sizeof(input),1,1,positions.data(),normals.data(),positions.data(),indices.data(),slots.data(),12,6,reinterpret_cast<const uint8_t*>(metadata.data()),metadata.size()};
+    ok(tn_renderer_upload_scene(context,&input,&error),"asymmetric readback upload");
+    const auto quality=tn::Json{{"schema_version",1},{"quality",config["selection"]["quality"]}}.dump();auto frame=frame_input(1,quality);
+    frame.width=frame.height=512;frame.projection=1;frame.vertical=16;frame.near_mm=0.01;frame.far_mm=100;frame.camera_position_mm[0]=5;frame.camera_position_mm[1]=-25;frame.camera_position_mm[2]=5;frame.camera_target_mm[0]=5;frame.camera_target_mm[2]=5;
+    const auto pixels=render(context,frame);save(out/"asymmetric-row-channel-512.rgba",pixels);
+    const std::array<std::array<size_t,3>,3> points{{{176,176,0},{336,176,1},{336,336,2}}};
+    tn::Json samples=tn::Json::array();
+    for(const auto& p:points){const auto offset=(p[1]*512+p[0])*4;samples.push_back({{"x",p[0]},{"y",p[1]},{"dominant_channel",p[2]},{"rgba",{pixels[offset],pixels[offset+1],pixels[offset+2],pixels[offset+3]}}});check(pixels[offset+3]==255,"asymmetric marker opaque alpha");for(size_t channel=0;channel<3;++channel)if(channel!=p[2])check(int(pixels[offset+p[2]])>int(pixels[offset+channel])+20,"actual SDK top-first RGBA channel orientation");}
+    check(pixels[(336*512+176)*4+3]==0,"asymmetric lower-left remains transparent");
+    std::ofstream(out/"asymmetric-readback-oracle.json")<<samples.dump(2);
+    std::cout<<"PASS actual SDK asymmetric top-first RGBA markers\n";
+}
 }
 int main(int argc,char** argv) try {
     std::filesystem::path out=argc>1?argv[1]:"."; std::filesystem::create_directories(out);
@@ -92,6 +117,7 @@ int main(int argc,char** argv) try {
     uint64_t required=0;check(tn_renderer_describe(c.value,nullptr,0,&required,&error)==TN_CAPACITY,"describe query");
     std::string info(size_t(required),' ');ok(tn_renderer_describe(c.value,reinterpret_cast<uint8_t*>(info.data()),info.size(),&required,&error),"describe");
     std::cout<<info<<'\n'; std::ofstream(out/"identity.json")<<info;
+    asymmetric_readback_oracle(c.value,config,out);
     for(const auto* name:{"cube","hollow"}) {
         std::ifstream input(std::filesystem::path(TN_FIXTURES)/(std::string(name)+"-10mm.mesh.bin"),std::ios::binary);
         check(bool(input),"fixture open");char magic[8];uint32_t version,nv,nt;input.read(magic,8);input.read(reinterpret_cast<char*>(&version),4);input.read(reinterpret_cast<char*>(&nv),4);input.read(reinterpret_cast<char*>(&nt),4);

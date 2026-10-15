@@ -1,4 +1,6 @@
 #include "backend.hpp"
+#include "reservation.hpp"
+#include "readback.hpp"
 #include <Windows.h>
 #include <filament/Engine.h>
 #include <filament/Renderer.h>
@@ -42,6 +44,7 @@ using namespace filament;
 using namespace filament::math;
 constexpr float mm_to_m=0.001f;
 struct Vertex { float3 position; quatf tangents; float4 build; };
+static_assert(sizeof(Vertex)==44);
 float3 vector3(const Json& j) {return {j.at(0).get<float>(),j.at(1).get<float>(),j.at(2).get<float>()};}
 double3 meters(const double* v) {return {v[0]*0.001,v[1]*0.001,v[2]*0.001};}
 std::string device_id(VkPhysicalDevice device) {
@@ -93,7 +96,6 @@ class FilamentBackend final : public tn::Backend {
     std::vector<IndexBuffer*> index_buffers;
     tn::Scene prepared;
     bool dirty=true;
-    uint64_t geometry_bytes=0;
     std::string description;
     VkPhysicalDeviceProperties properties{};
     VkSampleCountFlags target_samples{};
@@ -115,6 +117,13 @@ class FilamentBackend final : public tn::Backend {
     void budget(uint64_t host,uint64_t gpu) const {
         if(host>config.host_bytes)throw std::runtime_error("Filament expansion exceeds host byte budget");
         if(gpu>config.gpu_bytes)throw std::runtime_error("Filament expansion exceeds GPU byte budget");
+    }
+    uint64_t retained_target_bytes() const {
+        uint64_t bytes=0;for(const auto& target:recent_targets)bytes=filament_detail::add_bytes(bytes,target.bytes);return bytes;
+    }
+    void geometry_budget(const tn::Scene& input) const {
+        const auto peak=filament_detail::reserve(input.positions_mm.size()/3,input.triangles.size()/3,input.metadata.dump().size(),sizeof(Vertex),retained_target_bytes(),0,true);
+        budget(peak.host,peak.gpu);
     }
     MaterialInstance* material(const Json& physical,bool diagram,bool floor_material=false) {
         const bool unlit=physical.value("unlit",false);
@@ -173,10 +182,9 @@ class FilamentBackend final : public tn::Backend {
         return primitives.empty()?utils::Entity{}:renderable(vb,ib,bounds,primitives,true);
     }
     void realize(Work& work) {
-        if(!dirty)return;clear_geometry();if(work.cancelled())return;
+        if(!dirty)return;clear_geometry();drain();if(work.cancelled())return;
         const uint64_t n=prepared.positions_mm.size()/3,t=prepared.triangles.size()/3;
-        geometry_bytes=n*sizeof(Vertex)+t*3*sizeof(uint32_t)+uint64_t(16)*1024*1024;
-        budget(n*(sizeof(Vertex)*2+72)+t*48+uint64_t(32)*1024*1024,geometry_bytes);
+        geometry_budget(prepared);
         const auto& a=prepared.metadata.at("appearance");const bool diagram=a.at("studio_preset")=="diagram";
         if(t){
             std::vector<Vertex> vertices;vertices.reserve(size_t(n));
@@ -265,25 +273,25 @@ public:
     }
     std::string describe() override{return description;}
     void upload(const tn::Scene& input,Work&) override {
-        const uint64_t n=input.positions_mm.size()/3,t=input.triangles.size()/3;
-        budget(n*(sizeof(Vertex)*2+72)+t*48+input.metadata.dump().size()+uint64_t(32)*1024*1024,n*sizeof(Vertex)+t*12+uint64_t(16)*1024*1024);
-        clear_geometry();drain();prepared=tn::Scene{};prepared=input;dirty=true;
-        geometry_bytes=n*sizeof(Vertex)+t*12+uint64_t(16)*1024*1024;
+        // Release the prior scene/buffers before charging and copying the new
+        // snapshot, retaining only SDK target-cache reservations. This avoids
+        // retaining large vector capacities after a large-to-small replacement.
+        clear_geometry();drain();prepared=tn::Scene{};dirty=true;
+        geometry_budget(input);prepared=input;
     }
     std::vector<uint8_t> render(const Frame& frame,Work& work) override {
         const auto& f=frame.parameters;const auto& quality=frame.quality.at("quality");const auto aa=quality.at("aa").get<std::string>(),shadow=quality.at("shadows").get<std::string>();
         const uint8_t samples=aa=="low"?1:4;const uint32_t shadow_size=shadow=="low"?1024:shadow=="medium"?2048:4096;
         if(!(target_samples&samples))throw std::runtime_error("Requested Filament MSAA"+std::to_string(samples)+" is unsupported by actual HDR16F/depth32F formats (sample mask="+std::to_string(target_samples)+")");
         const uint64_t pixels=uint64_t(f.width)*f.height;
-        const uint64_t target_bytes=pixels*(160+uint64_t(samples)*12)+uint64_t(shadow_size)*shadow_size*8;
+        const uint64_t target_bytes=filament_detail::add_bytes(filament_detail::multiply_bytes(pixels,160+uint64_t(samples)*12),filament_detail::multiply_bytes(uint64_t(shadow_size)*shadow_size,8));
         uint64_t retained_bytes=0;
-        for(const auto& target:recent_targets)if(target.width!=f.width||target.height!=f.height||target.shadow!=shadow_size||target.samples!=samples)retained_bytes+=target.bytes;
-        const uint64_t host_scene_bytes=uint64_t(prepared.positions_mm.size()/3)*72+uint64_t(prepared.triangles.size()/3)*32+uint64_t(prepared.metadata.dump().size())*2;
+        for(const auto& target:recent_targets)if(target.width!=f.width||target.height!=f.height||target.shadow!=shadow_size||target.samples!=samples)retained_bytes=filament_detail::add_bytes(retained_bytes,target.bytes);
         // WDDM/SDK host commitment substantially exceeds explicit CPU vectors
         // at4096. Conservatively reserve the GPU allocation bound again as host
         // backing, in addition to source/readback/CPU staging and baseline.
-        const uint64_t target_reservation=geometry_bytes+target_bytes+retained_bytes+uint64_t(64)*1024*1024;
-        budget(host_scene_bytes+pixels*12+target_reservation+uint64_t(256)*1024*1024,target_reservation);
+        const auto reservation=filament_detail::reserve(prepared.positions_mm.size()/3,prepared.triangles.size()/3,prepared.metadata.dump().size(),sizeof(Vertex),filament_detail::add_bytes(target_bytes,retained_bytes),pixels,dirty);
+        budget(reservation.host,reservation.gpu);
         work.total=4;work.completed=0;realize(work);work.completed=1;if(work.cancelled())return {};
         const bool diagram=prepared.metadata.at("appearance").at("studio_preset")=="diagram";
         const auto cp=meters(f.camera_position_mm),ct=meters(f.camera_target_mm);const double3 up{f.camera_up[0],f.camera_up[1],f.camera_up[2]};camera->lookAt(cp,ct,up);
@@ -321,7 +329,7 @@ public:
         // in that same documented producer domain; never encode sRGB twice.
         auto& result=readback->pixels;
         if(!f.transparent)for(size_t i=3;i<result.size();i+=4)if(result[i]!=255)throw std::runtime_error("Filament opaque readback has invalid alpha (requested MSAA="+std::to_string(samples)+", combined sampled HDR/depth support mask="+std::to_string(target_samples)+")");
-        for(size_t i=0;i<result.size();i+=4){const unsigned alpha=result[i+3];if(!alpha)result[i]=result[i+1]=result[i+2]=0;else if(alpha<255)for(size_t j=0;j<3;++j)result[i+j]=uint8_t(std::min(255u,(unsigned(result[i+j])*255u+alpha/2)/alpha));}
+        filament_detail::normalize_readback(result);
         work.completed=4;return std::move(result);
     }
 };

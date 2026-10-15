@@ -19,6 +19,8 @@ in `native/filament/vendor-manifest.json`. The official SDK omits BlueVK/Vulkan
 headers required by its public VulkanPlatform API; these are exact files from
 the same Filament commit. Their source URLs, byte counts, SHA256 and Apache 2.0
 license are retained. No system Vulkan SDK headers replace them.
+The license is the exact pinned root `LICENSE`: 11,362 LF bytes, with its
+upstream source URL and Git blob recorded in the vendor manifest.
 
 Only the build launches matc/cmgen. Surface, resin and unlit material packages are
 embedded in the DLL; rendering requires no shader-tool executable, subprocess,
@@ -112,6 +114,26 @@ is much larger than the explicit CPU pixel arrays. Conservative reservations
 are not exact driver VRAM measurements. The 4096 High qualification used 8 GiB host
 and 10 GiB GPU budgets; a 1 GiB GPU budget fails explicitly. There is no resolution or quality reduction and no
 internal tile renderer.
+
+One checked estimator composes these reservations before upload copies,
+realization staging and frame allocations. During realization, two scene
+snapshots plus staging and callback copies charge 160 bytes per vertex and
+56 bytes per triangle, alongside current/retained GPU backing and baselines.
+Transform-only frames omit the drained upload staging. Old scene capacities
+and buffers are released before reserving a replacement scene.
+
+CPU-only checks run independently of SDK/GPU work:
+
+```powershell
+cmake -S native/filament/tests -B artifacts/renderers/task7a/cpu -G "Visual Studio 17 2022" -A x64
+cmake --build artifacts/renderers/task7a/cpu --config Release --parallel 4
+ctest --test-dir artifacts/renderers/task7a/cpu -C Release --output-on-failure
+```
+
+The tests cover peak allocation arithmetic without allocating the maximum mesh
+and compare production alpha normalization with an independent asymmetric
+3-by-2 literal pixel oracle. A real CABI asymmetric colored-marker fixture also
+checks actual SDK top-first row order and RGBA channels.
 
 The real CABI caller qualifies frozen 512-square cube/hollow silhouettes, 4096 High,
 Low/Medium/High settings, posed/negative-origin/first-layer/fade behavior,
