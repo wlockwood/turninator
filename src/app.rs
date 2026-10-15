@@ -1,4 +1,5 @@
 //! Native studio. Import and rendering run independently of the UI thread.
+mod build_orientation;
 mod comparison;
 mod controls;
 mod help;
@@ -172,6 +173,7 @@ pub struct Studio {
     importing: bool,
     import_active: bool,
     pending_import: Option<(u64, PathBuf, ImportSettings)>,
+    pending_build_orientation: Option<build_orientation::PendingBuildOrientation>,
     debounced_import: Option<(PathBuf, Instant)>,
     selected_source: Option<PathBuf>,
     model: Option<ImportedModel>,
@@ -284,6 +286,7 @@ impl Studio {
             importing: false,
             import_active: false,
             pending_import: None,
+            pending_build_orientation: None,
             debounced_import: None,
             selected_source: None,
             model: None,
@@ -462,18 +465,43 @@ impl Studio {
         self.timeline_angle = 0.;
         self.fit();
         self.changed();
-        self.status = if self
-            .model
-            .as_ref()
-            .is_some_and(|model| hit.triangle_index >= model.mesh.triangles.len())
-        {
-            "Build-up cut face now points down. Print layers retain their build orientation.".into()
+        if self.scene.import.stepped_envelope {
+            self.prepare_stepped_down()?;
+            self.restore_camera = true;
+            let path = self
+                .model
+                .as_ref()
+                .ok_or("open a model first")?
+                .path
+                .clone();
+            self.import(path);
+            self.status = "Rebuilding stepped layers from the selected face down…".into();
         } else {
-            format!(
-                "Face {} now points down. Print layers retain their build orientation.",
-                hit.triangle_index + 1
-            )
-        };
+            self.status = if self
+                .model
+                .as_ref()
+                .is_some_and(|model| hit.triangle_index >= model.mesh.triangles.len())
+            {
+                "Build-up cut face now points down. Print layers retain their build orientation."
+                    .into()
+            } else {
+                format!(
+                    "Face {} now points down. Print layers retain their build orientation.",
+                    hit.triangle_index + 1
+                )
+            };
+        }
+        Ok(())
+    }
+    fn prepare_stepped_down(&mut self) -> Result<()> {
+        if self.pending_build_orientation.is_some() {
+            return Err("Wait for the current build-orientation import to finish.".into());
+        }
+        self.pending_build_orientation = Some(build_orientation::PendingBuildOrientation::prepare(
+            &mut self.scene,
+        )?);
+        self.timeline_playing = false;
+        self.settle_face = false;
         Ok(())
     }
     fn settle_pointer(
@@ -907,12 +935,33 @@ impl Studio {
                                 self.import(model.path.clone());
                                 continue;
                             }
+                            let accepted_display = match self
+                                .pending_build_orientation
+                                .as_ref()
+                                .map(|pending| {
+                                    pending.accepted_display_rotation(
+                                        self.scene.display_rotation_degrees,
+                                    )
+                                })
+                                .transpose()
+                            {
+                                Ok(rotation) => rotation,
+                                Err(error) => {
+                                    self.restore_accepted_import();
+                                    self.error = Some(error.to_string());
+                                    continue;
+                                }
+                            };
                             match self.viewport.set_mesh(
                                 &model.mesh,
                                 &model.geometry_kind,
                                 generation,
                             ) {
                                 Ok(()) => {
+                                    if let Some(rotation) = accepted_display {
+                                        self.scene.display_rotation_degrees = rotation;
+                                        self.pending_build_orientation = None;
+                                    }
                                     if !self.restore_camera {
                                         self.buildup = false;
                                         self.buildup_playing = false;
@@ -1178,6 +1227,7 @@ impl Studio {
         }
     }
     fn restore_project(&mut self, project: ProjectFile) {
+        self.pending_build_orientation = None;
         let options = project.output_options;
         self.still_size = options.still_size;
         self.still_engine = options.still_engine;
@@ -1222,6 +1272,7 @@ impl Studio {
         self.import(project.source_path);
     }
     fn restore_accepted_import(&mut self) {
+        self.pending_build_orientation = None;
         self.restored_stage = None;
         self.restore_camera = false;
         if let Some(model) = &self.model {
@@ -1416,6 +1467,8 @@ impl Studio {
         }
         let before = serde_json::to_string(&self.scene).unwrap_or_default();
         let import_before = serde_json::to_string(&self.scene.import).unwrap_or_default();
+        let was_stepped = self.scene.import.stepped_envelope;
+        let mut rebuild_current_down = false;
         if has_model && !sheet {
             ui.heading("Print appearance");
             let mut material = self.scene.material_preset.clone();
@@ -1520,7 +1573,10 @@ impl Studio {
             if !beads {
             ui.label("Build rotation (changes print layers)");
             rotation_editor(ui, &mut self.scene.import.build_rotation_degrees, "Change the physical STL build orientation and rebuild its printed layers. The lowest point is placed on the build bed.");
-            ui.checkbox(&mut self.scene.import.stepped_envelope,"Experimental STL stepped solid").help("Sample a closed STL at each layer midpoint and stack closed layer solids at the chosen heights. This changes the silhouette and may miss features between samples. Internal layer interfaces can show through transparent materials. Source files are unchanged.");
+            if ui.add_enabled(!self.importing, egui::Checkbox::new(&mut self.scene.import.stepped_envelope,"Experimental STL stepped solid")).help("Build stepped layers from the model's current down, including a pose chosen with Settle on face. Enabling uses that pose as the print orientation; later presentation rotations keep layers attached. Sampled layer solids change the silhouette and may miss small features. For fixed four-view sheets, set the print direction with Build rotation. Finish the current import before switching. Source files are unchanged.").changed()
+                && self.scene.import.stepped_envelope && !sheet { rebuild_current_down = true; }
+            if self.scene.import.stepped_envelope && !sheet
+                && ui.add_enabled(!self.importing,egui::Button::new("Use current down for layers")).help("Rebuild the stepped solid from the part's current pose. This combines display and build rotations, moves the lowest point to the bed, and clears the baked display rotation only after a successful import. Use after manually changing the presentation pose; settling on a face rebuilds stepped layers automatically. Finish any current import first.").clicked() { rebuild_current_down = true; }
             if self.scene.import.stepped_envelope { ui.small("Sampled layer solids change the silhouette. Transparent materials may reveal internal layer interfaces."); }
             }
             if beads {
@@ -1573,7 +1629,7 @@ impl Studio {
                             } else {
                                 "Settle on face…"
                             }),
-                        ).help("Click a visible triangle in Native inspection to point its normal down. Click this button again to cancel. This aligns a face rather than simulating stability, and requires a loaded model with no import in progress.")
+                        ).help("Click a visible triangle in Native inspection to point its normal down. With stepped STL, selecting the face also rebuilds layers from that down. Click this button again to cancel. This aligns a face rather than simulating stability, and requires a loaded model with no import in progress.")
                         .clicked()
                     {
                         self.settle_face = !self.settle_face;
@@ -1589,13 +1645,19 @@ impl Studio {
                     ui.small(
                 "Uses the chosen triangle's normal; this does not simulate physical stability.",
             );
-                }).help("Rotate or settle the displayed part while keeping its physical print layers attached. Use STL build rotation to change which direction the layers were printed.");
+                }).help("Rotate the displayed part while keeping its physical print layers attached. Enabling stepped STL or choosing Use current down for layers makes this pose the print direction; settling a face while stepped mode is active rebuilds from that face. G-code keeps its original print direction.");
             }
+        }
+        if rebuild_current_down && let Err(error) = self.prepare_stepped_down() {
+            self.scene.import.stepped_envelope = was_stepped;
+            rebuild_current_down = false;
+            self.error = Some(error.to_string());
         }
         if serde_json::to_string(&self.scene).unwrap_or_default() != before {
             self.changed();
         }
-        if serde_json::to_string(&self.scene.import).unwrap_or_default() != import_before
+        if (rebuild_current_down
+            || serde_json::to_string(&self.scene.import).unwrap_or_default() != import_before)
             && let Some(path) = &self.selected_source
         {
             self.restore_camera = true;
@@ -2401,6 +2463,123 @@ impl Studio {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "comparison-wide",
             )));
+            if self
+                .model
+                .as_ref()
+                .is_some_and(|m| m.geometry_kind == "original")
+            {
+                self.scene.display_rotation_degrees = [0., 90., 0.];
+                let model = self.model.as_ref().unwrap();
+                let expected = crate::presentation::make_build_mesh(&model.mesh, [0., 90., 0.])
+                    .unwrap()
+                    .bounds()
+                    .unwrap()
+                    .max[2];
+                self.smoke_checks["current_down_expected_height"] = serde_json::json!(expected);
+                let path = model.path.clone();
+                self.buildup = false;
+                self.section = false;
+                self.show_output = false;
+                self.prepare_stepped_down().unwrap();
+                self.restore_camera = true;
+                self.import(path);
+                self.smoke_stage = 101;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                    "complete",
+                )));
+                self.smoke_stage = 9;
+            }
+        }
+
+        if self.smoke_stage == 101 && !self.importing {
+            self.smoke_checks["stepped_enable_uses_current_down"] = serde_json::json!(
+                self.pending_build_orientation.is_none()
+                    && self.scene.display_rotation_degrees == [0.; 3]
+                    && self
+                        .model
+                        .as_ref()
+                        .is_some_and(|m| m.geometry_kind == "stepped"
+                            && (m.bounds_mm.max[2]
+                                - self.smoke_checks["current_down_expected_height"]
+                                    .as_f64()
+                                    .unwrap())
+                            .abs()
+                                < 1e-4)
+            );
+            self.start_export(
+                ExportKind::Still,
+                directory.join("current-down-preview.png"),
+                true,
+            );
+            self.smoke_stage = 102;
+        }
+        if self.smoke_stage == 102
+            && self.preview_revision == Some(self.revision)
+            && self.busy.is_none()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                "stepped-current-down",
+            )));
+            self.smoke_checks["before_stepped_settle_build"] =
+                serde_json::json!(self.scene.import.build_rotation_degrees);
+            let mut picked = None;
+            if let Some(rect) = self.native_rect {
+                'search: for y in 2..=8 {
+                    for x in 2..=8 {
+                        let point =
+                            rect.min + rect.size() * egui::vec2(x as f32 / 10., y as f32 / 10.);
+                        if let Some(hit) = self.settle_pointer(rect, point) {
+                            picked = Some(hit);
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            self.smoke_checks["stepped_face_triggers_rebuild"] = serde_json::json!(
+                picked.is_some() && self.importing && self.pending_build_orientation.is_some()
+            );
+            self.smoke_checks["stepped_selected_normal"] =
+                serde_json::json!(picked.map(|h| h.normal_mm));
+            self.smoke_stage = 103;
+        }
+        if self.smoke_stage == 103 && !self.importing {
+            let before: [f64; 3] =
+                serde_json::from_value(self.smoke_checks["before_stepped_settle_build"].clone())
+                    .unwrap();
+            let aligned = self.smoke_checks["stepped_selected_normal"]
+                .as_array()
+                .and_then(|_| {
+                    let normal: [f64; 3] = serde_json::from_value(
+                        self.smoke_checks["stepped_selected_normal"].clone(),
+                    )
+                    .ok()?;
+                    let relative = crate::model::orientation::relative_rotation(
+                        self.scene.import.build_rotation_degrees,
+                        before,
+                    )
+                    .ok()?;
+                    let matrix = crate::model::orientation::rotation_matrix(relative).ok()?;
+                    Some(crate::model::orientation::apply(matrix, normal))
+                });
+            self.smoke_checks["stepped_selected_face_becomes_build_down"] = serde_json::json!(
+                self.scene.display_rotation_degrees == [0.; 3]
+                    && self.pending_build_orientation.is_none()
+                    && aligned.is_some_and(|n| n[0].abs() < 1e-8
+                        && n[1].abs() < 1e-8
+                        && (n[2] + 1.).abs() < 1e-8)
+            );
+            self.start_export(
+                ExportKind::Still,
+                directory.join("resettled-stepped-preview.png"),
+                true,
+            );
+            self.smoke_stage = 104;
+        }
+        if self.smoke_stage == 104
+            && self.preview_revision == Some(self.revision)
+            && self.busy.is_none()
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "complete",
             )));

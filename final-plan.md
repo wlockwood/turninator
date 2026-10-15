@@ -181,7 +181,7 @@ Use meaningful tests before substantive implementation, watch their expected fai
 
 - [x] Explicit H.264/AV1 output controls with actual codec/timing verification and verified-frame reuse.
 - [x] Paired full-model/section PNG and turntable outputs with actual deposited gaps, bounded caps and honest geometric metrics.
-- [x] Click a visible triangle to align its normal down through presentation rotation, retaining the physical build frame; validate nearest picking and rotated rendered surfaces.
+- [x] Click a visible triangle to align its normal down; original STL/G-code retain their physical build frame. Enabling stepped STL uses current down, active stepped face alignment rebuilds slices, and Use current down for layers applies manual pose changes. Commit the baked pose only after successful import, preserve intervening display edits and project roundtrips, and use explicit Build rotation for fixed sheets. Validate actual picking, slicing and rendered surfaces.
 - [x] Authored camera keyframes with transition times, orbit/pan, signed whole-turn spirals, easing, duration and loop closure; shared native/export sampling and saved projects.
 - [x] Basic turntable speed and duration controls with total turns, partial rotations, saved preferences and exact-pose frame reuse across repeated turns. Matching camera/rotation/deposited geometry renders once; all ordered frames retain the selected GIF/MP4 timing (default 20 fps).
 - [x] Framerate control with tooltip, visible only for animation outputs; saved preferences, rate-aware counts/turns/timelines/build-up, paired sections, cache identities and validated GIF/MP4 timing from 1 to 100 fps.

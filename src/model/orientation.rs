@@ -17,6 +17,28 @@ pub fn rotation_matrix(degrees: [f64; 3]) -> Result<[[f64; 3]; 3]> {
     ])
 }
 
+/// Apply `before`, then `after`, returning Euler XYZ degrees for their composition.
+pub fn compose_rotations(after: [f64; 3], before: [f64; 3]) -> Result<[f64; 3]> {
+    let after_matrix = rotation_matrix(after)?;
+    let before_matrix = rotation_matrix(before)?;
+    if after == [0.; 3] {
+        return Ok(before);
+    }
+    Ok(matrix_to_euler(multiply(after_matrix, before_matrix)))
+}
+
+/// Preserve the current world orientation after `baked` is applied to the mesh.
+/// The returned rotation maps baked coordinates into the current displayed pose.
+pub fn relative_rotation(current: [f64; 3], baked: [f64; 3]) -> Result<[f64; 3]> {
+    let current_matrix = rotation_matrix(current)?;
+    let baked_matrix = rotation_matrix(baked)?;
+    if current == baked {
+        return Ok([0.; 3]);
+    }
+    let inverse_baked = std::array::from_fn(|i| std::array::from_fn(|j| baked_matrix[j][i]));
+    Ok(matrix_to_euler(multiply(current_matrix, inverse_baked)))
+}
+
 /// Compose the shortest world-space rotation placing the selected face's
 /// winding normal down (-Z). Returns Euler XYZ degrees, leaving mesh/build
 /// coordinates unchanged. The same pure helper can orient a physical STL build
@@ -46,9 +68,16 @@ pub fn settled_display_rotation(old_euler: [f64; 3], build_normal: [f64; 3]) -> 
     } else {
         [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]
     };
-    let matrix = std::array::from_fn::<_, 3, _>(|i| {
-        std::array::from_fn::<_, 3, _>(|j| (0..3).map(|k| alignment[i][k] * old[k][j]).sum::<f64>())
-    });
+    Ok(matrix_to_euler(multiply(alignment, old)))
+}
+
+fn multiply(after: [[f64; 3]; 3], before: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    std::array::from_fn(|i| {
+        std::array::from_fn(|j| (0..3).map(|k| after[i][k] * before[k][j]).sum())
+    })
+}
+
+fn matrix_to_euler(matrix: [[f64; 3]; 3]) -> [f64; 3] {
     // atan2 retains the tiny cosine near a pole; asin can turn roundoff in a
     // nominal unit sine into an artificial ~1e-8 radian tilt.
     let y = (-matrix[2][0]).atan2(matrix[0][0].hypot(matrix[1][0]));
@@ -60,7 +89,7 @@ pub fn settled_display_rotation(old_euler: [f64; 3], build_normal: [f64; 3]) -> 
     } else {
         (0., (-matrix[0][1]).atan2(matrix[1][1]))
     };
-    Ok([x.to_degrees(), y.to_degrees(), z.to_degrees()])
+    [x.to_degrees(), y.to_degrees(), z.to_degrees()]
 }
 
 fn axis_angle(axis: [f64; 3], angle: f64) -> [[f64; 3]; 3] {
