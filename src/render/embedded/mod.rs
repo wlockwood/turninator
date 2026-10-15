@@ -1,4 +1,6 @@
 //! Optional in-process renderer boundary. Loading is lazy and never runs tools.
+mod package;
+pub(crate) use package::validate_installation;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod abi;
 pub mod backend;

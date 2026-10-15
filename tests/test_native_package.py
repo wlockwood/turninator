@@ -192,6 +192,36 @@ class NativePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lock"):
             self.module.filament_receipt(bridge, ROOT / "native/sdk-lock.json", attestation)
 
+    def test_luxcore_receipt_requires_exact_sdk_runtime_and_qualification(self):
+        bridge = self.root / "renderers/filament/tn_renderer_filament.dll"
+        contract = json.loads((ROOT / "native/luxcore/package-contract.json").read_text())
+        attestation = {"schema_version": 1, "backend": "luxcore", "source_revision": "a" * 40,
+                       "sdk_lock_sha256": self.manifest["sdk_lock_sha256"], "bridge_sha256": hashlib.sha256(bridge.read_bytes()).hexdigest(),
+                       "compiler": self.lock["toolchain"]["compiler"], "source_files": {"native/luxcore/bridge.cpp": "b" * 64},
+                       "static_inputs": [{"path": "sdk/luxcore.lib", "sha256": "c" * 64}],
+                       "assets": [{"path": "native/common/agx.cpp", "sha256": "d" * 64}], "build_commands": [["cmake", "--build", "<owned-build>"]],
+                       "tool_versions": {"cmake": self.lock["toolchain"]["cmake"]}, "imports": sorted(self.module.pe_imports(bridge.read_bytes())),
+                       "runtime_files": contract["runtime_files"], "policies": contract["policies"],
+                       "qualification": {name: {"result": "pass", "sha256": "e" * 64} for name in ("native-conformance", "host-pipeline", "owner-lifecycle")},
+                       "approximations": ["transparent-resin-rgba", "denoised-fine-layer-animation"]}
+        receipt = self.module.luxcore_receipt(bridge, ROOT / "native/sdk-lock.json", attestation)
+        self.assertEqual(receipt["runtime_files"], contract["runtime_files"])
+        self.assertEqual(receipt["bridge_sha256"], attestation["bridge_sha256"])
+        for mutate in (lambda a: a["runtime_files"].update({"luxcore.dll":"0"*64}),
+                       lambda a: a["policies"].update({"sdk_owner_policy":"unqualified"}),
+                       lambda a: a["qualification"].pop("host-pipeline"),
+                       lambda a: a["qualification"]["native-conformance"].update(result="pending"),
+                       lambda a: a.update(approximations=[])):
+            changed = copy.deepcopy(attestation); mutate(changed)
+            with self.assertRaises(ValueError):
+                self.module.luxcore_receipt(bridge, ROOT / "native/sdk-lock.json", changed)
+
+    def test_full_package_rejects_unqualified_metadata_even_with_both_names(self):
+        self.manifest["backends"] = {name: {"status": "pending"} for name in ("filament", "luxcore")}
+        self.manifest["package_variant"] = "full"
+        with self.assertRaisesRegex(ValueError, "qualified"):
+            self.module.validate_full(self.manifest, self.root, ROOT / "native/sdk-lock.json")
+
 
 if __name__ == "__main__":
     unittest.main()

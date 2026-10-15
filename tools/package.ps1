@@ -78,7 +78,7 @@ try {
     }
     $executable = if ($ExecutablePath) { [IO.Path]::GetFullPath($ExecutablePath) } else { Join-Path $metadata.target_directory "$Profile/turninator.exe" }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Missing executable: $executable" }
-    $resources = @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'docs/runtime-support.md', 'docs/renderers/qualification-matrix.md')
+    $resources = @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'docs/runtime-support.md', 'docs/renderers/qualification-matrix.md', 'docs/renderers/filament.md', 'docs/renderers/luxcore.md', 'docs/renderers/luxcore-native.md', 'docs/performance.md')
     foreach ($resource in ($resources + @('README.md'))) {
         if (-not (Test-Path -LiteralPath (Join-Path $workspace $resource) -PathType Leaf)) { throw "Missing runtime resource: $resource" }
     }
@@ -112,6 +112,9 @@ Blender EEVEE/Cycles use a separate Blender installation. GIF/MP4 encoding needs
 separately installed FFmpeg/ffprobe. Configure full executable paths in Tools /
 storage. Missing tools are reported and are not downloaded. See the runtime
 documentation for device qualification, approximations and output requirements.
+For 4096-pixel LuxCore output with denoising, increase the host memory maximum
+from 8 GiB to 16 GiB in Tools / storage before rendering. This is an allocation
+ceiling, not a claim about installed or free memory.
 
 By default settings and retained jobs live in %LOCALAPPDATA%/Turninator. A fresh,
 self-contained data location can be selected from PowerShell:

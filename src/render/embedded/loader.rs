@@ -242,6 +242,12 @@ mod platform {
                 return Err("renderer DLL path must be absolute".into());
             }
             let exe = std::env::current_exe()?.canonicalize()?;
+            if !fixture {
+                crate::render::embedded::validate_installation(
+                    exe.parent().ok_or("missing executable directory")?,
+                    directory,
+                )?;
+            }
             let root = exe
                 .parent()
                 .ok_or("missing executable directory")?

@@ -209,9 +209,34 @@ def validate_full(manifest, runtime, lock_path):
     validate_inventory(manifest, runtime, lock_path)
     if set(manifest["backends"]) != {"filament", "luxcore"}:
         raise ValueError("full packaging requires both filament and luxcore")
-    # LuxCore receipt/attestation must come from the reviewed Task8b contract.
-    # Until integrated, refusing full mode is intentional; no invented receipt.
-    raise ValueError("full packaging awaits reviewed LuxCore receipt contract and qualification closure")
+    if manifest.get("package_variant") != "full":
+        raise ValueError("full packaging requires the full variant")
+    entries = {entry["path"]: entry for entry in manifest["files"]}
+    for backend, metadata in manifest["backends"].items():
+        if metadata.get("status") != "qualified":
+            raise ValueError(f"{backend}: full packaging requires qualified backend metadata")
+        prefix = f"renderers/{backend}/"
+        paths = {"receipt": prefix + backend + "-package.json", "build_attestation": prefix + "build-attestation.json"}
+        for key, path in paths.items():
+            if metadata.get(key) != path or entries.get(path, {}).get("role") != "receipt":
+                raise ValueError(f"{backend}: missing owned {key}")
+        bridge = prefix + f"tn_renderer_{backend}.dll"
+        if entries.get(bridge, {}).get("role") != "bridge":
+            raise ValueError(f"{backend}: missing production bridge")
+        attestation = json.loads((Path(runtime) / paths["build_attestation"]).read_text(encoding="utf-8"))
+        portable_metadata(attestation)
+        qualification(attestation, backend)
+        generator = filament_receipt if backend == "filament" else luxcore_receipt
+        expected = generator(Path(runtime) / bridge, lock_path, attestation)
+        actual = json.loads((Path(runtime) / paths["receipt"]).read_text(encoding="utf-8"))
+        if actual != expected:
+            raise ValueError(f"{backend}: stale or unqualified package receipt")
+        if backend == "luxcore":
+            for filename, digest in expected["runtime_files"].items():
+                entry = entries.get(prefix + filename, {})
+                if entry.get("sha256") != digest or entry.get("role") != "runtime":
+                    raise ValueError(f"LuxCore: unqualified owned runtime {filename}")
+    return manifest
 
 
 def filament_receipt(bridge, lock_path, attestation):
@@ -244,6 +269,56 @@ def filament_receipt(bridge, lock_path, attestation):
         raise ValueError("ambiguous Filament SDK archive")
     return {"schema_version": 1, "sdk_version": version, "sdk_archive_sha256": archives[0]["sha256"],
             "native_recipe": "turninator-filament-native-v1", "bridge_sha256": attestation["bridge_sha256"]}
+
+
+def qualification(attestation, backend):
+    for name in ("native-conformance", "host-pipeline", "owner-lifecycle"):
+        evidence = attestation.get("qualification", {}).get(name, {})
+        if evidence.get("result") != "pass" or not re.fullmatch("[a-f0-9]{64}", evidence.get("sha256", "")):
+            raise ValueError(f"{backend}: missing qualified {name} evidence")
+
+
+def luxcore_receipt(bridge, lock_path, attestation):
+    """Bind the reviewed host contract to actual bridge bytes and SDK provenance.
+
+    Qualification references are reviewed assertions, not signatures. Functional
+    proof and redistribution evidence must be collected before authoring them.
+    """
+    contract = json.loads((Path(__file__).resolve().parents[1] / "native/luxcore/package-contract.json").read_text())
+    lock = json.loads(Path(lock_path).read_text(encoding="utf-8-sig"))
+    if attestation.get("schema_version") != 1 or attestation.get("backend") != "luxcore":
+        raise ValueError("LuxCore requires a schema-1 reviewed build attestation")
+    if attestation.get("sdk_lock_sha256") != sha256(lock_path):
+        raise ValueError("build attestation SDK lock mismatch")
+    if attestation.get("bridge_sha256") != sha256(bridge):
+        raise ValueError("build attestation bridge identity mismatch")
+    if attestation.get("compiler") != lock["toolchain"]["compiler"]:
+        raise ValueError("build attestation compiler mismatch")
+    if not re.fullmatch("[a-f0-9]{40}", attestation.get("source_revision", "")):
+        raise ValueError("build attestation requires a source revision")
+    for key in ("source_files", "static_inputs", "assets", "build_commands", "tool_versions"):
+        if not attestation.get(key):
+            raise ValueError(f"build attestation missing {key}")
+    if attestation.get("imports") != sorted(pe_imports(Path(bridge).read_bytes())):
+        raise ValueError("build attestation imports mismatch")
+    for key in ("runtime_files", "policies"):
+        if attestation.get(key) != contract[key]:
+            raise ValueError(f"LuxCore build attestation unqualified {key}")
+    sdk = lock["source_builds"]["luxcore"]
+    for actual, expected in ((sdk["version"], contract["sdk_version"]),
+                             (sdk["source_commit"], contract["sdk_source_commit"]),
+                             (sdk["source_archive_sha256"], contract["sdk_source_archive_sha256"]),
+                             (sdk["compiler_identity"], contract["compiler_pair_sha256"]),
+                             (sdk["dll_sha256"], contract["runtime_files"]["luxcore.dll"])):
+        if actual != expected:
+            raise ValueError("LuxCore compiled contract differs from SDK lock")
+    qualification(attestation, "luxcore")
+    if attestation.get("approximations") != ["transparent-resin-rgba", "denoised-fine-layer-animation"]:
+        raise ValueError("LuxCore build attestation must disclose qualified approximations")
+    receipt = {key: value for key, value in contract.items()
+               if key not in ("policies", "runtime_artifacts", "driver_artifacts")}
+    receipt["bridge_sha256"] = attestation["bridge_sha256"]
+    return receipt
 
 
 def core_manifest():

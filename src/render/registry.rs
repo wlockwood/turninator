@@ -161,6 +161,13 @@ impl BackendRegistry {
                 return Err("request selection differs from renderer preparation".into());
             }
             let started = Instant::now();
+            super::embedded::validate_installation(
+                std::env::current_exe()?
+                    .canonicalize()?
+                    .parent()
+                    .ok_or("missing executable directory")?,
+                selection.backend.as_str(),
+            )?;
             let cache_directory = if selection.backend == BackendId::LuxCore {
                 let parent = request
                     .job_dir
@@ -456,10 +463,17 @@ fn native_package_files(backend: BackendId) -> Result<Vec<std::path::PathBuf>> {
         .ok_or("missing executable directory")?
         .join("renderers")
         .join(name);
+    let manifest = exe
+        .parent()
+        .ok_or("missing executable directory")?
+        .join("native-sdk-manifest.json");
     let mut files = vec![
         root.join(format!("{name}-package.json")),
         root.join(format!("tn_renderer_{name}.dll")),
     ];
+    if manifest.try_exists()? {
+        files.push(manifest);
+    }
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries {
             let path = entry?.path();
