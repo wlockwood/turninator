@@ -1055,6 +1055,9 @@ fn render_section(
                             }
                         ),
                     });
+                    if let Some(path) = event["payload"]["path"].as_str() {
+                        callback(JobEvent::Frame(path.into()));
+                    }
                 } else if event["kind"] == "log"
                     && let Some(message) = event["payload"]["message"].as_str()
                 {

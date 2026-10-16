@@ -3,6 +3,7 @@ mod build_orientation;
 mod comparison;
 mod controls;
 mod help;
+mod playback;
 mod renderer_smoke;
 pub mod renderer_view;
 pub mod renderers;
@@ -30,6 +31,7 @@ use crate::{
 };
 use eframe::egui;
 use help::HelpResponse;
+use playback::{DecodedOutput, LivePreview, Playback, decode_output};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -102,7 +104,7 @@ enum Message {
         engine: BackendId,
         generation: u64,
         preview: bool,
-        result: std::result::Result<Vec<PlaybackFrame>, String>,
+        result: std::result::Result<Box<DecodedOutput>, String>,
     },
 }
 #[derive(Clone)]
@@ -117,58 +119,6 @@ impl UiSender {
         result
     }
 }
-struct PlaybackFrame {
-    image: egui::ColorImage,
-    duration: Duration,
-}
-struct Playback {
-    frames: Vec<PlaybackFrame>,
-    texture: egui::TextureHandle,
-    index: usize,
-    next: Instant,
-    playing: bool,
-}
-impl Playback {
-    fn new(ctx: &egui::Context, frames: Vec<PlaybackFrame>) -> Option<Self> {
-        let first = frames.first()?;
-        let texture = ctx.load_texture(
-            "encoded-output",
-            first.image.clone(),
-            egui::TextureOptions::LINEAR,
-        );
-        let next = Instant::now() + first.duration;
-        Some(Self {
-            frames,
-            texture,
-            index: 0,
-            next,
-            playing: true,
-        })
-    }
-    fn advance(&mut self, ctx: &egui::Context) {
-        if self.playing && self.frames.len() > 1 {
-            let now = Instant::now();
-            // Catch up without accumulating drift when the window is briefly obstructed.
-            let mut changed = false;
-            for _ in 0..self.frames.len() {
-                if now < self.next {
-                    break;
-                }
-                self.index = (self.index + 1) % self.frames.len();
-                self.next += self.frames[self.index].duration;
-                changed = true;
-            }
-            if changed {
-                self.texture.set(
-                    self.frames[self.index].image.clone(),
-                    egui::TextureOptions::LINEAR,
-                );
-            }
-            ctx.request_repaint_after(self.next.saturating_duration_since(now));
-        }
-    }
-}
-
 pub struct Studio {
     active_tab: workspace::Tab,
     viewport: Viewport,
@@ -222,6 +172,7 @@ pub struct Studio {
     display_job: u64,
     preview_decode_pending: Option<u64>,
     output: Option<Playback>,
+    live_preview: LivePreview,
     show_output: bool,
     error: Option<String>,
     status: String,
@@ -351,6 +302,7 @@ impl Studio {
             display_job: 0,
             preview_decode_pending: None,
             output: None,
+            live_preview: LivePreview::new(cc.egui_ctx.clone()),
             show_output: false,
             error,
             status: "Open an STL or G-code file to begin.".into(),
@@ -482,12 +434,14 @@ impl Studio {
             self.queued_render = None;
             self.busy = None;
         }
+        self.live_preview.stop();
         self.revision += 1;
         self.view_generation += 1;
         self.renderer_warnings.clear();
         self.changed_at = Instant::now();
     }
     fn import(&mut self, path: PathBuf) {
+        self.live_preview.stop();
         self.settle_face = false;
         self.timeline_playing = false;
         if !self.restore_camera {
@@ -825,6 +779,7 @@ impl Studio {
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             self.busy = Some(self.next_job);
             self.display_job = self.next_job;
+            self.live_preview.start(self.next_job, self.revision);
             if preview {
                 self.show_output = false;
             }
@@ -865,6 +820,7 @@ impl Studio {
                 Ok(()) => {
                     self.busy = Some(self.next_job);
                     self.display_job = self.next_job;
+                    self.live_preview.start(self.next_job, revision);
                     if preview {
                         self.latest_preview_job = self.next_job;
                     } else {
@@ -1272,11 +1228,14 @@ impl Studio {
                     {
                         continue;
                     }
+                    if id == self.display_job {
+                        self.live_preview.stop();
+                    }
                     match result {
-                        Ok(frames) => {
+                        Ok(decoded) => {
                             if preview {
                                 if revision == self.revision {
-                                    self.preview = Playback::new(ctx, frames);
+                                    self.preview = Some(Playback::new(ctx, *decoded));
                                     self.preview_revision = Some(revision);
                                     self.preview_identity = Some(renderer_view::FrameIdentity {
                                         job: id,
@@ -1286,7 +1245,7 @@ impl Studio {
                                     });
                                 }
                             } else {
-                                self.output = Playback::new(ctx, frames);
+                                self.output = Some(Playback::new(ctx, *decoded));
                                 self.output_identity = Some(renderer_view::FrameIdentity {
                                     job: id,
                                     revision,
@@ -1348,7 +1307,9 @@ impl Studio {
                     } => self.progress = (completed, total, stage),
                     JobEvent::Log(line) => self.status = line,
                     JobEvent::Analysis(value) => self.analysis = Some(value),
-                    JobEvent::Frame(_) => {}
+                    JobEvent::Frame(path) => {
+                        self.live_preview.submit(id, self.revision, path);
+                    }
                 },
                 RenderEvent::Completed {
                     id,
@@ -1371,6 +1332,7 @@ impl Studio {
                         self.last_output = Some(result.clone());
                     }
                     if result.path.extension().is_some_and(|v| v == "mp4") {
+                        self.live_preview.stop();
                         self.output = None;
                         self.show_output = false;
                         continue;
@@ -1380,8 +1342,9 @@ impl Studio {
                         self.preview_decode_pending = Some(id);
                     }
                     thread::spawn(move || {
-                        let decoded =
-                            decode_output(&result.path).map_err(|error| error.to_string());
+                        let decoded = decode_output(&result.path, sender.context.clone())
+                            .map(Box::new)
+                            .map_err(|error| error.to_string());
                         let _ = sender.send(Message::Image {
                             id,
                             revision,
@@ -1400,6 +1363,7 @@ impl Studio {
                     generation,
                 } if self.render_event_matches(id, revision, engine, generation) => {
                     self.busy = None;
+                    self.live_preview.stop();
                     self.record_result("failed", Some(message.clone()));
                     self.error = Some(message);
                 }
@@ -1443,6 +1407,22 @@ impl Studio {
                     ctx.load_texture("render-progress", pixels, egui::TextureOptions::LINEAR),
                 ));
             }
+        }
+        match self.live_preview.receive(ctx, self.revision) {
+            Ok(true) if self.smoke_output.is_some() => {
+                let count = self.smoke_checks["live_render_images_displayed"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    + 1;
+                self.smoke_checks["live_render_images_displayed"] = serde_json::json!(count);
+                if count == 1 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                        "live-render",
+                    )));
+                }
+            }
+            Err(error) => self.status = error,
+            _ => {}
         }
     }
     fn restore_project(&mut self, project: ProjectFile) {
@@ -1907,7 +1887,11 @@ impl Studio {
         }
         if self.smoke_stage == 32
             && self.busy.is_none()
-            && self.output.as_ref().is_some_and(|p| p.frames.len() == 12)
+            && self.output.as_ref().is_some_and(Playback::animated)
+            && self
+                .last_output
+                .as_ref()
+                .is_some_and(|o| o.frame_count == 12)
         {
             self.smoke_checks["basic_turntable_timing_exported"] = serde_json::json!(
                 self.error.is_none()
@@ -2146,7 +2130,11 @@ impl Studio {
         }
         if self.smoke_stage == 81
             && self.busy.is_none()
-            && self.output.as_ref().is_some_and(|p| p.frames.len() == 4)
+            && self.output.as_ref().is_some_and(Playback::animated)
+            && self
+                .last_output
+                .as_ref()
+                .is_some_and(|o| o.frame_count == 4)
         {
             self.smoke_checks["timeline_export_decoded"] = serde_json::json!(
                 self.last_task.as_ref().is_some_and(|t| t.0.frame_count == 4
@@ -2281,7 +2269,7 @@ impl Studio {
             && self
                 .output
                 .as_ref()
-                .is_some_and(|output| output.frames.len() == 1)
+                .is_some_and(|output| !output.animated())
         {
             self.smoke_checks["sheet_export_uses_visible_quality"] =
                 serde_json::json!(self.last_task.as_ref().is_some_and(|task| {
@@ -2771,13 +2759,15 @@ impl eframe::App for Studio {
                 ui.small(format!("{} · job {} · scene {}{}", renderers::label(identity.backend), identity.job, identity.revision,
                     if identity.revision != self.revision || identity.generation != self.view_generation { " · previous result" } else { " · completed" }));
             }
-            let display = if self.show_output { &self.output } else { &self.preview };
+            let rendering = self.live_preview.current(self.revision).is_some();
+            let display = self.live_preview.current(self.revision)
+                .or(if self.show_output { self.output.as_ref() } else { self.preview.as_ref() });
             let partial = self.partial_image.as_ref().filter(|(tag,_)| self.render_event_matches(tag.job,tag.revision,tag.backend,tag.generation)).map(|(_,texture)|texture.clone());
             let image_size = partial.as_ref().map(|texture| texture.size_vec2()).unwrap_or_else(|| display.as_ref().map_or(egui::vec2(1.,1.),|p| p.texture.size_vec2()));
-            let animated = display.as_ref().is_some_and(|p| p.frames.len()>1);
-            let status = (!self.show_output && self.model.is_some() && self.preview_revision != Some(self.revision))
+            let animated = display.as_ref().is_some_and(|p| p.animated());
+            let status = (!rendering && partial.is_none() && !self.show_output && self.model.is_some() && self.preview_revision != Some(self.revision))
                 .then_some(if self.busy.is_some() { "Updating…" } else if self.preview.is_none() { "Not rendered" } else { "Needs refresh" });
-            let panes = comparison::layout_renderer(ui, if route.backend == BackendId::Filament { "Filament viewport" } else { "Native inspection" },if self.show_output { "Encoded output" } else { "Rendered preview" },status,image_size,animated);
+            let panes = comparison::layout_renderer(ui, if route.backend == BackendId::Filament { "Filament viewport" } else { "Native inspection" },if rendering { if self.busy.is_some() { "Rendering — latest completed image" } else { "Loading saved output…" } } else if self.show_output { "Encoded output" } else { "Rendered preview" },status,image_size,animated);
             let before = self.camera.camera_spec();
             let settings = self.viewport_settings();
             let mut native_ui = ui.new_child(egui::UiBuilder::new()
@@ -2813,12 +2803,12 @@ impl eframe::App for Studio {
             {
                 self.status = "No visible face under that point; click the model surface.".into();
             }
-            let display = if self.show_output { &mut self.output } else { &mut self.preview };
+            let display = if rendering { self.live_preview.current_mut(self.revision) } else if self.show_output { self.output.as_mut() } else { self.preview.as_mut() };
             if let Some(texture) = partial {
                 ui.put(panes.preview,egui::Image::new(&texture).fit_to_exact_size(panes.preview.size()));
                 ui.painter().text(panes.preview.left_top()+egui::vec2(8.,8.),egui::Align2::LEFT_TOP,"Rendering · partial image",egui::FontId::proportional(13.),egui::Color32::YELLOW);
             } else if let Some(playback) = display {
-                playback.advance(&ctx);
+                if let Err(error) = playback.advance(&ctx) { self.error = Some(error); }
                 let image = ui.put(panes.preview,egui::Image::new(&playback.texture)
                     .fit_to_exact_size(panes.preview.size()))
                     .help("The latest rendered preview or decoded image/GIF output. Both panels scale together to this image's aspect ratio; resizing does not change the render camera or output resolution. Open saved output shows the full exported file. A stale preview needs refreshing after edits.");
@@ -2827,7 +2817,7 @@ impl eframe::App for Studio {
                         .help("Play or pause the decoded animation in this panel using its saved frame delays. This does not change export speed or camera keys.")
                         .changed() && playback.playing
                 {
-                    playback.next = Instant::now() + playback.frames[playback.index].duration;
+                    playback.resume();
                 }
                 if self.smoke_output.is_some() {
                     let matched = (response.rect.size()-image.rect.size()).length()<0.01
@@ -2910,56 +2900,38 @@ fn open_path(path: &Path) {
         let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
 }
-fn decode_output(path: &Path) -> Result<Vec<PlaybackFrame>> {
-    use image::AnimationDecoder;
-    if path.extension().is_some_and(|v| v == "gif") {
-        let decoder =
-            image::codecs::gif::GifDecoder::new(std::io::BufReader::new(fs::File::open(path)?))?;
-        let mut frames = Vec::new();
-        let mut bytes = 0usize;
-        for frame in decoder.into_frames() {
-            let frame = frame?;
-            let (n, d) = frame.delay().numer_denom_ms();
-            let buffer = display_buffer(frame.into_buffer());
-            bytes = bytes
-                .checked_add(buffer.len())
-                .ok_or("playback memory overflow")?;
-            if bytes > 512 * 1024 * 1024 {
-                return Err(
-                    "Animation exceeds 512 MiB playback budget; use Open saved output.".into(),
-                );
+#[cfg(test)]
+mod playback_regression_tests {
+    use super::*;
+
+    #[test]
+    fn playback_starts_when_total_decoded_gif_exceeds_512_mib() {
+        let scratch = crate::export::encode::Scratch::new(&std::env::temp_dir()).unwrap();
+        let path = scratch.0.join("large-decoded.gif");
+        {
+            let mut encoder = gif::Encoder::new(
+                fs::File::create(&path).unwrap(),
+                960,
+                960,
+                &[255, 0, 0, 0, 255, 0],
+            )
+            .unwrap();
+            encoder.set_repeat(gif::Repeat::Infinite).unwrap();
+            let mut frame = gif::Frame {
+                width: 960,
+                height: 960,
+                delay: 5,
+                buffer: vec![0; 960 * 960].into(),
+                ..Default::default()
+            };
+            for index in 0..160 {
+                frame.buffer.to_mut().fill(index % 2);
+                encoder.write_frame(&frame).unwrap();
             }
-            frames.push(PlaybackFrame {
-                image: egui::ColorImage::from_rgba_unmultiplied(
-                    [buffer.width() as usize, buffer.height() as usize],
-                    buffer.as_raw(),
-                ),
-                duration: Duration::from_secs_f64((n as f64 / d.max(1) as f64 / 1000.).max(0.01)),
-            });
         }
-        Ok(frames)
-    } else {
-        let buffer = display_buffer(image::open(path)?.to_rgba8());
-        Ok(vec![PlaybackFrame {
-            image: egui::ColorImage::from_rgba_unmultiplied(
-                [buffer.width() as usize, buffer.height() as usize],
-                buffer.as_raw(),
-            ),
-            duration: Duration::from_secs(1),
-        }])
-    }
-}
-fn display_buffer(buffer: image::RgbaImage) -> image::RgbaImage {
-    let largest = buffer.width().max(buffer.height());
-    if largest <= 1280 {
-        buffer
-    } else {
-        let scale = 1280. / largest as f64;
-        image::imageops::resize(
-            &buffer,
-            (buffer.width() as f64 * scale).round().max(1.) as u32,
-            (buffer.height() as f64 * scale).round().max(1.) as u32,
-            image::imageops::FilterType::Triangle,
-        )
+        // This small compressed file expands to 562.5 MiB across all 160 frames.
+        assert!(fs::metadata(&path).unwrap().len() < 1024 * 1024);
+        let result = decode_output(&path, egui::Context::default());
+        assert!(result.is_ok(), "playback should stream: {:?}", result.err());
     }
 }

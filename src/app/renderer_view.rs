@@ -319,6 +319,7 @@ impl super::Studio {
         }
     }
     pub(super) fn cancel_render(&mut self) {
+        self.live_preview.stop();
         if self.queued_render.take().is_some() {
             self.busy = None;
             self.error = Some("cancelled before renderer preparation".into());

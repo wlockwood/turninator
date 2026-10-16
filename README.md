@@ -1,6 +1,28 @@
 # Turninator
 
-A local Windows studio for STL and supported G-code, configurable print layers, and studio exports. The native wgpu viewport works independently of Blender. Design: [final-plan.md](final-plan.md). Evidence: [docs/progress.md](docs/progress.md) and reports under reviews/.
+> **Turn raw 3D models and toolpaths into photorealistic, publication-grade 3D print showcases.**
+
+Every 3D printed object carries a physical story written into its layer lines, toolpaths, and surface finishes. Yet conventional CAD viewports render parts as sterile, mathematically smooth solids—and slicers show diagnostic toolpath noodles without realistic lighting or materials.
+
+**Turninator gives 3D prints the presentation studio they deserve.** It transforms raw STL models and planar G-code into photorealistic renderings that look, reflect, and cast light exactly like real physical prints.
+
+---
+
+### Key Capabilities
+
+| Pillar | What Turninator Delivers |
+|---|---|
+| **Authentic Layer Aesthetics** | Simulate real print strata with micro-ridge displacement, alternating $\pm 45^\circ$ top-surface infill lines, and bead roundness. Toggle between instant shader-perturbed **Shaded** mode or true stepped-envelope **Sliced** geometry. |
+| **Physical G-code Beads** | Turn planar toolpaths into actual extruded 3D stadium beads. Accurately simulates nozzle deposit volumes, retraction debt, travel moves, and multi-tool/feature colorways. |
+| **Decoupled Posing** | Separate how the part was *printed* from how it is *displayed*. Orient the model on the build plate (min $Z = 0$, $XY$ centered) to physically anchor layer strata, then freely tumble, tilt, or click **"Settle on face"** to balance the model on the turntable. |
+| **Studio Lighting & Color** | Calibrated studio environments with softbox lighting, floor sweep backdrops, realistic PBR materials (matte PLA, PETG, metallic, translucent resin), and **AgX filmic tone mapping** to preserve vibrant specular highlights without clipping. |
+| **Zero-Flicker Turntables** | Export infinite-loop GIF animations that remain temporally stable across rotations using global palette quantization (PnnQuant) and ordered Bayer $8 \times 8$ dithering—no color crawl, no palette pop. |
+| **Versatile Production Deliverables** | One-click export of high-bitrate MP4/WebM videos (H.264/AV1), tiled 4096² transparent PNG stills, dimensioned orthographic 4-view engineering drawings, and layer-by-layer animated build-up sequences. |
+| **Dual Engine Architecture** | An ultra-fast, zero-dependency native **wgpu** viewport for 60 fps interactive staging and inspection, paired with high-end raytraced paths via Blender (Cycles/OptiX) and in-browser WebGPU path tracing with OIDN denoising. |
+
+*Design: [final-plan.md](final-plan.md) · Progress & Evidence: [docs/progress.md](docs/progress.md) · Runtime Support: [docs/runtime-support.md](docs/runtime-support.md) · Architecture Reviews: [reviews/](reviews/)*
+
+---
 
 ## Run
 

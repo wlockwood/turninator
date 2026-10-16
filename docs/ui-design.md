@@ -17,6 +17,10 @@ File actions use a conventional menu and keyboard shortcuts: Ctrl+O opens a mode
 
 The animation-keyframe toggle is always visible on Export; active timeline controls appear beneath it. Simple turntables show speed, duration and resulting turns. Fixed-camera build-up explains how to enable camera movement. Source and section diagnostics remain available through disclosure controls rather than raw diagnostic data occupying the primary form.
 
+Completed render images appear in the comparison panel as they become available, including animation frames, section views and four-view panels. A background loader keeps the latest pending image when rendering outpaces display. Scene edits, cancellation and replacement jobs invalidate late images. The last render image stays visible while the saved output loads, then the panel switches to the actual encoded output.
+
+GIF playback decodes from disk on a background thread with at most three display frames queued. Pausing applies backpressure; looping rewinds the same open file and resets the GIF compositor. Playback retains encoded delays, transparency and disposal behavior without loading the entire animation into RAM. Display images keep the existing 1280-pixel maximum dimension; exported files remain at their requested resolution.
+
 ## Design guidance
 
 - [Microsoft: Forms](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/forms) recommends clear labels above fields, grouped related controls, responsive layouts and logical keyboard order. The native desktop controls use compact mouse-oriented sizing rather than copying the XAML examples' touch dimensions.
