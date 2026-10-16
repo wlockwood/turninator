@@ -78,7 +78,7 @@ try {
     }
     $executable = if ($ExecutablePath) { [IO.Path]::GetFullPath($ExecutablePath) } else { Join-Path $metadata.target_directory "$Profile/turninator.exe" }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Missing executable: $executable" }
-    $resources = @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'docs/runtime-support.md', 'docs/renderers/qualification-matrix.md', 'docs/renderers/filament.md', 'docs/renderers/luxcore.md', 'docs/renderers/luxcore-native.md', 'docs/performance.md')
+    $resources = @('renderer/worker.py', 'renderer/scene.py', 'renderer/frame_pipeline.py', 'docs/runtime-support.md', 'docs/renderers/qualification-matrix.md', 'docs/renderers/filament.md', 'docs/renderers/luxcore.md', 'docs/renderers/luxcore-native.md', 'docs/renderers/implementation-decisions.md', 'docs/performance.md')
     foreach ($resource in ($resources + @('README.md'))) {
         if (-not (Test-Path -LiteralPath (Join-Path $workspace $resource) -PathType Leaf)) { throw "Missing runtime resource: $resource" }
     }

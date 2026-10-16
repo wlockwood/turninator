@@ -28,4 +28,4 @@ Native functional qualification includes canonical worlds/shadows, opaque Beer-L
 
 A 4096-square,524288-triangle,64-requested-sample OIDN render completed with actual minimum80 samples, approximately4.58 GB peak private memory and661 MB measured WDDM residency. It used explicit16 GiB host/GPU allowances; those allowances are not physical VRAM claims. Large-to-small release, final CPU RGBA handoff and actual DLL unload passed. These are functional diagnostics, not controlled benchmark timings. The conservative host reservation for4096 OIDN requires a higher host allowance than the application's default8 GiB.
 
-The Rust adapter, common-format exports, application UI and final extracted-package/process/benchmark qualification are downstream work; native C ABI proof alone does not establish those gates.
+The Rust adapter, common-format exports, painted desktop UI, extracted-package process audit and matched matrix have now passed on the recorded machine. Native C ABI proof remains separate from those gates; see [the qualification report](qualification-matrix.md).

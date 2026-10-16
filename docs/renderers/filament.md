@@ -254,3 +254,7 @@ common PNG/sheet/paired/GIF/MP4 publication with retained reruns. PNG and sheet
 tests supply missing Blender/FFmpeg/ffprobe paths; video tests supply only the
 encoders. This establishes the Rust CPU boundary and common pipeline, not a
 painted egui view, UI upload timing, or installed application availability.
+
+Subsequent desktop and extracted-package qualification now covers the painted
+Filament viewport, renderer switching and export handoff; see
+[the qualification matrix](qualification-matrix.md).
