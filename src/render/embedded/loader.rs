@@ -24,8 +24,15 @@ mod platform {
             }
         }
     }
+    struct Dependencies(Vec<Module>);
+    impl Drop for Dependencies {
+        fn drop(&mut self) {
+            while self.0.pop().is_some() {}
+        }
+    }
     struct Api {
         _module: Module,
+        _dependencies: Dependencies,
         create: abi::Create,
         describe: abi::Describe,
         upload: abi::Upload,
@@ -225,6 +232,64 @@ mod platform {
         wide.push(0);
         wide
     }
+    fn preload_dependencies(root: &Path, directory: &str) -> Result<Dependencies> {
+        // Frozen normal-import closure for the qualified SDKs, in dependency
+        // order. Nested imports then resolve against retained modules instead
+        // of depending on inherited directory search state.
+        let names: &[&str] = match directory {
+            "filament" => &[
+                "vcruntime140.dll",
+                "vcruntime140_1.dll",
+                "msvcp140.dll",
+                "msvcp140_2.dll",
+            ],
+            "luxcore" => &[
+                "vcruntime140.dll",
+                "vcruntime140_1.dll",
+                "msvcp140.dll",
+                "tbb12.dll",
+                "embree4.dll",
+                "LuxOpenImageDenoise_core.dll",
+                "LuxOpenImageDenoise.dll",
+                "msvcp140_atomic_wait.dll",
+                "tbbmalloc.dll",
+                "vcomp140.dll",
+                "luxcore.dll",
+                "msvcp140_2.dll",
+            ],
+            _ => &[],
+        };
+        let mut modules = Dependencies(Vec::new());
+        for name in names {
+            let path = root.join(name);
+            let (wide, flags) = if path.try_exists()? {
+                if path.canonicalize()? != path {
+                    return Err(format!("redirected renderer dependency: {name}").into());
+                }
+                (
+                    loader_path(&path),
+                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+                )
+            } else if name.starts_with("msvcp140") || name.starts_with("vcruntime140") {
+                // Legacy source qualification may use the installed CRT. Full
+                // packages have already required and hashed their local files.
+                (
+                    name.encode_utf16().chain(Some(0)).collect(),
+                    LOAD_LIBRARY_SEARCH_SYSTEM32,
+                )
+            } else {
+                return Err(format!("missing renderer dependency: {name}").into());
+            };
+            // SAFETY: terminated explicit owned path or a System32-only CRT name.
+            let handle = unsafe { LoadLibraryExW(wide.as_ptr(), ptr::null_mut(), flags) };
+            if handle.is_null() {
+                let error = std::io::Error::last_os_error();
+                return Err(format!("cannot load {directory} dependency {name}: {error}").into());
+            }
+            modules.0.push(Module(handle));
+        }
+        Ok(modules)
+    }
     impl EmbeddedLibrary {
         /// Only exe_dir/renderers/{backend}/tn_renderer_{backend}.dll is accepted.
         /// First valid-path load permanently restricts process default DLL search
@@ -273,6 +338,7 @@ mod platform {
                 return Err("unexpected selected renderer DLL name/directory".into());
             }
             restrict_default_search()?;
+            let dependencies = preload_dependencies(&trusted, directory)?;
             let wide = loader_path(&canonical);
             // SAFETY: canonical absolute NUL-terminated path; transitive search restricted.
             let handle = unsafe {
@@ -325,6 +391,7 @@ mod platform {
                 );
             }
             let api = Api {
+                _dependencies: dependencies,
                 create: symbol!("tn_renderer_create", abi::Create),
                 describe: symbol!("tn_renderer_describe", abi::Describe),
                 upload: symbol!("tn_renderer_upload_scene", abi::Upload),

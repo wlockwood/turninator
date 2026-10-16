@@ -222,6 +222,26 @@ class NativePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "qualified"):
             self.module.validate_full(self.manifest, self.root, ROOT / "native/sdk-lock.json")
 
+    def test_declared_latin1_notice_preserves_text_and_original_bytes(self):
+        spec = importlib.util.spec_from_file_location("notices", ROOT / "tools/generate-notices.py")
+        notices = importlib.util.module_from_spec(spec); spec.loader.exec_module(notices)
+        data = b"RPly license: Copyright \xa9 Diego Nehab. Full grant and disclaimer."
+        (self.root / "notices/filament.txt").write_bytes(data)
+        self.manifest["files"][0].update(sha256=hashlib.sha256(data).hexdigest(),size_bytes=len(data),text_encoding="latin-1")
+        self.manifest["package_variant"] = "full"
+        validated = self.validate()
+        text = notices.render_native_notices(validated,self.root)
+        self.assertIn("Copyright \u00a9 Diego Nehab. Full grant and disclaimer.",text)
+        self.assertEqual((self.root / "notices/filament.txt").read_bytes(),data)
+
+    def test_notice_encoding_is_explicit_bounded_and_notice_only(self):
+        for index,encoding in ((0,"unknown"),(0,"utf-16"),(1,"latin-1")):
+            original = copy.deepcopy(self.manifest)
+            self.manifest["files"][index]["text_encoding"] = encoding
+            with self.subTest(index=index,encoding=encoding),self.assertRaisesRegex(ValueError,"encoding"):
+                self.validate()
+            self.manifest = original
+
 
 if __name__ == "__main__":
     unittest.main()

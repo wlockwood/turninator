@@ -36,7 +36,7 @@ pub struct BackendRegistry {
     statuses: RefCell<BTreeMap<BackendId, BackendStatus>>,
 }
 
-fn descriptor() -> CapabilityDescriptor {
+fn descriptor(backend: BackendId) -> CapabilityDescriptor {
     CapabilityDescriptor {
         usages: vec![
             RenderUsage::Preview,
@@ -45,7 +45,14 @@ fn descriptor() -> CapabilityDescriptor {
             RenderUsage::Sheet,
         ],
         alpha: FeatureSupport::Supported,
-        material_volume: FeatureSupport::Supported,
+        material_volume: if matches!(
+            backend,
+            BackendId::Wgpu | BackendId::Filament | BackendId::BlenderEevee
+        ) {
+            FeatureSupport::Approximate { reason: "Raster surface approximation; multiple-interface refraction and volume scattering are not path traced.".into() }
+        } else {
+            FeatureSupport::Supported
+        },
         sections: FeatureSupport::Supported,
         layer_appearance: FeatureSupport::Supported,
         maximum_output_side: 8000,
@@ -143,7 +150,7 @@ impl BackendRegistry {
                 BackendStatus {
                     backend: selection.backend,
                     availability: BackendAvailability::Available,
-                    capabilities: Some(descriptor()),
+                    capabilities: Some(descriptor(selection.backend)),
                 },
             );
             return Ok(PreparedBackend {
@@ -386,7 +393,7 @@ impl BackendRegistry {
                         },
                     },
                     capabilities: if prepared.is_ok() {
-                        Some(descriptor())
+                        Some(descriptor(selection.backend))
                     } else {
                         None
                     },
@@ -493,4 +500,28 @@ fn native_package_files(backend: BackendId) -> Result<Vec<std::path::PathBuf>> {
         }
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn raster_status_does_not_claim_traced_material_volume() {
+        for backend in [
+            BackendId::Wgpu,
+            BackendId::Filament,
+            BackendId::BlenderEevee,
+        ] {
+            assert!(matches!(
+                descriptor(backend).material_volume,
+                FeatureSupport::Approximate { .. }
+            ));
+        }
+        for backend in [BackendId::LuxCore, BackendId::BlenderCycles] {
+            assert_eq!(
+                descriptor(backend).material_volume,
+                FeatureSupport::Supported
+            );
+        }
+    }
 }

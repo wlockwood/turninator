@@ -124,7 +124,10 @@ def render_native_notices(manifest, root):
             data = path.read_bytes()
             if entry["role"] != "notice" or len(data) != entry["size_bytes"] or digest(data) != entry["sha256"]:
                 raise ValueError(f"native notice identity mismatch: {name}")
-            text = data.decode("utf-8-sig")
+            encoding = entry.get("text_encoding", "utf-8-sig")
+            if encoding not in ("utf-8-sig", "latin-1"):
+                raise ValueError(f"unsupported native notice encoding: {name}")
+            text = data.decode(encoding)
             fence = "~" * max(4, max((len(match[0]) + 1 for match in re.finditer(r"~+", text)), default=4))
             parts.append(f"\n### {name}\n\nSHA-256: `{entry['sha256']}`.\n\n{fence}text\n{text.rstrip()}\n{fence}\n")
     return "\n".join(line.rstrip() for line in "\n".join(parts).splitlines()) + "\n"

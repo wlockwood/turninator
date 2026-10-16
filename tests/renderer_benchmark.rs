@@ -61,6 +61,15 @@ impl RenderBackend for Measured<'_> {
 #[test]
 #[ignore = "exclusive GPU; requires qualified production package and installed Blender/encoders"]
 fn matched_production_case() -> Result<()> {
+    let result = production_case();
+    if let Err(error) = &result
+        && let Ok(output) = std::env::var("TN_BENCH_OUTPUT")
+    {
+        let _ = std::fs::write(PathBuf::from(output).join("failure.txt"), error.to_string());
+    }
+    result
+}
+fn production_case() -> Result<()> {
     let output = PathBuf::from(std::env::var("TN_BENCH_OUTPUT")?);
     std::fs::create_dir_all(&output)?;
     let backend = BackendId::parse_legacy(&std::env::var("TN_BENCH_BACKEND")?)?;
@@ -204,6 +213,15 @@ fn matched_production_case() -> Result<()> {
         &cancel,
     )?;
     let prepare_seconds = preparing.elapsed().as_secs_f64();
+    if std::env::var_os("TN_BENCH_PREPARE_ONLY").is_some() {
+        std::fs::write(
+            output.join("prepared.json"),
+            serde_json::to_vec_pretty(&prepared.identity)?,
+        )?;
+        drop(prepared);
+        drop(registry);
+        return Ok(());
+    }
     let key = turninator::export::identity::pixel_recipe_key(
         &value,
         &snapshot.mesh.snapshot_hash()?,

@@ -148,16 +148,28 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             use std::os::windows::ffi::OsStrExt;
             let source: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
             let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            let ok = unsafe {
-                windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-                    source.as_ptr(),
-                    target.as_ptr(),
-                    windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
-                        | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-                )
-            };
-            if ok == 0 {
-                return Err(std::io::Error::last_os_error().into());
+            for attempt in 0..=15 {
+                // SAFETY: both paths are terminated and valid for this call.
+                let ok = unsafe {
+                    windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                        source.as_ptr(),
+                        target.as_ptr(),
+                        windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                            | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+                    )
+                };
+                if ok != 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if attempt == 15 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+                    return Err(
+                        format!("cannot atomically replace {}: {error}", path.display()).into(),
+                    );
+                }
+                // Readers such as indexers can briefly omit FILE_SHARE_DELETE.
+                // Keep the old manifest intact, and never retry permanently.
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
         #[cfg(not(windows))]

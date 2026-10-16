@@ -169,6 +169,8 @@ def validate_inventory(manifest, runtime, lock_path):
             raise ValueError(f"duplicate Windows destination: {name}")
         if entry["component"] not in components or entry["role"] not in ("bridge", "runtime", "asset", "notice", "source", "receipt"):
             raise ValueError(f"invalid component or role: {name}")
+        if "text_encoding" in entry and (entry["role"] != "notice" or entry["text_encoding"] not in ("utf-8-sig", "latin-1")):
+            raise ValueError(f"unsupported native notice encoding: {name}")
         namespace = "notices/" if entry["role"] == "notice" else "sources/" if entry["role"] == "source" else "renderers/"
         if not name.startswith(namespace):
             raise ValueError(f"native file outside its package namespace: {name}")
