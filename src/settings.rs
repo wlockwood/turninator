@@ -9,6 +9,34 @@ use std::{
 
 static WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Application allocation ceilings, independent of installed physical memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderMemoryAllowance {
+    pub host_gib: u32,
+    pub gpu_gib: u32,
+}
+impl Default for RenderMemoryAllowance {
+    fn default() -> Self {
+        Self {
+            host_gib: 8,
+            gpu_gib: 6,
+        }
+    }
+}
+impl RenderMemoryAllowance {
+    pub fn limits(self) -> Result<crate::render::contract::RenderLimits> {
+        if !(1..=64).contains(&self.host_gib) || !(1..=48).contains(&self.gpu_gib) {
+            return Err("Render memory maximum must be 1–64 GiB host and 1–48 GiB GPU".into());
+        }
+        Ok(crate::render::contract::RenderLimits {
+            host_bytes: u64::from(self.host_gib) * 1024 * 1024 * 1024,
+            gpu_bytes: u64::from(self.gpu_gib) * 1024 * 1024 * 1024,
+            ..Default::default()
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -17,6 +45,8 @@ pub struct AppSettings {
     pub recent_files: Vec<PathBuf>,
     pub cache_budget_bytes: u64,
     pub auto_preview: bool,
+    pub renderers: crate::render::RendererPreferences,
+    pub render_memory: RenderMemoryAllowance,
 }
 impl Default for AppSettings {
     fn default() -> Self {
@@ -26,6 +56,8 @@ impl Default for AppSettings {
             recent_files: Vec::new(),
             cache_budget_bytes: 20 * 1024 * 1024 * 1024,
             auto_preview: false,
+            renderers: Default::default(),
+            render_memory: Default::default(),
         }
     }
 }
@@ -41,6 +73,8 @@ impl AppSettings {
         if settings.schema_version != 1 {
             return Err("unsupported settings version".into());
         }
+        settings.renderers.validate()?;
+        settings.render_memory.limits()?;
         let recents = std::mem::take(&mut settings.recent_files);
         for path in recents.into_iter().rev() {
             settings.remember(path);
@@ -48,6 +82,8 @@ impl AppSettings {
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.renderers.validate()?;
+        self.render_memory.limits()?;
         let bytes = serde_json::to_vec_pretty(self)?;
         if bytes.len() > 1024 * 1024 {
             return Err("settings exceed 1 MiB reload budget".into());
@@ -112,16 +148,28 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             use std::os::windows::ffi::OsStrExt;
             let source: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
             let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            let ok = unsafe {
-                windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-                    source.as_ptr(),
-                    target.as_ptr(),
-                    windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
-                        | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-                )
-            };
-            if ok == 0 {
-                return Err(std::io::Error::last_os_error().into());
+            for attempt in 0..=15 {
+                // SAFETY: both paths are terminated and valid for this call.
+                let ok = unsafe {
+                    windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                        source.as_ptr(),
+                        target.as_ptr(),
+                        windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                            | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+                    )
+                };
+                if ok != 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if attempt == 15 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+                    return Err(
+                        format!("cannot atomically replace {}: {error}", path.display()).into(),
+                    );
+                }
+                // Readers such as indexers can briefly omit FILE_SHARE_DELETE.
+                // Keep the old manifest intact, and never retry permanently.
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
         #[cfg(not(windows))]

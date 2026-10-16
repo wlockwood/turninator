@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "sdk_version": "2.11.2",
+  "sdk_source_commit": "b872186d2fe995a762f73708c606847eed55843e",
+  "sdk_source_archive_sha256": "31a82d87c1f912864e7b039620747507d2b0ce9db70648656d41d0ebc4636cda",
+  "compiler_pair_sha256": "4cbf85c6afdf0092be563772ec2cd142336d933d4c57b18fba584bb73514ea9c",
+  "native_recipe": "turninator-luxcore-native-v1",
+  "runtime_files": {
+    "nvrtc-builtins64_128.dll": "a7afa2a40cbd3f922a33d8bf71c13cb26ca707c7016a9bc5fcde36759ba668f5",
+    "nvrtc64_120_0.dll": "02d2d7ef4690bf1a55dda1d3ac94c86ce8d16920071c87bcd3e70e94ef346e93",
+    "luxcore.dll": "63e96b108e5007c6d378e2ac0b575d5db6b9e9e8b7b9a69a5b7cef3856f457b5",
+    "LuxOpenImageDenoise.dll": "3251dcdb742493a7d86b2daf6dd6fb02c7aa2279b688a041d3b65733d0641270",
+    "LuxOpenImageDenoise_core.dll": "de4668a98e437ea27dd599c028fd1b270335320ce3c2b6c7d184718bac2da9b7",
+    "LuxOpenImageDenoise_device_cpu.dll": "f4630884ee83a18f4fa2818153361e5caa4a130e5ccfcedd0e9a648e72954fca",
+    "embree4.dll": "f477315fe0c2e6cf05dffb90ee45bfc24959d8f15714aa2cadd3c2931bd53c86",
+    "tbb12.dll": "992b9b0d049d6ec37a5dafade96d838d5aea123b510fdeee140ae358e436665f",
+    "tbbmalloc.dll": "a31901f7c544ba3168d8897966b3e4f029157611ec80fb990fd4193bce1a67a9",
+    "vcomp140.dll": "55aba23cdcd6484fbb06f4155b8ca75adfce7a881f10afd0c49457165e677164"
+  },
+  "runtime_artifacts": {
+    "nvrtc-builtins64_128.dll": "nvrtc_builtins",
+    "nvrtc64_120_0.dll": "nvrtc",
+    "luxcore.dll": "sdk",
+    "LuxOpenImageDenoise.dll": "oidn",
+    "LuxOpenImageDenoise_core.dll": "oidn_core",
+    "LuxOpenImageDenoise_device_cpu.dll": "oidn_cpu",
+    "embree4.dll": "embree",
+    "tbb12.dll": "tbb",
+    "tbbmalloc.dll": "tbbmalloc",
+    "vcomp140.dll": "openmp"
+  },
+  "policies": {
+    "sdk_owner_policy": "leased-shared-owner-v1",
+    "sampling_policy": "tile-aa-ceil-sqrt-plus-one-minimum-v1",
+    "scene_units": "millimeters",
+    "cpu_task_policy": "cpu-openmp-serial-v1",
+    "denoiser": "OIDN 2.5.0 CPU RT High HDR auxiliary-prefilter-v1 maxMemoryMB=1024",
+    "color": "turninator-agx-v1",
+    "studio_recipe": "canonical-world-disk64-floor16-v1",
+    "material_recipe": "physical-disney-volume-delta-equal-ior-v3-canonical-studio",
+    "output_recipe": "camera-black-premult-oidn-linear-unpremultiply-agx-v2",
+    "session_recipe": "dimensions-aa-seed-transparency-reuse-v2",
+    "compiler_pair_sha256": "4cbf85c6afdf0092be563772ec2cd142336d933d4c57b18fba584bb73514ea9c",
+    "layer_denoise_motion": "approximate-v1-disable-denoise-for-stable-fine-layers"
+  },
+  "driver_artifacts": {
+    "cuda_driver": "nvcuda64.dll",
+    "optix_driver": "nvoptix.dll"
+  }
+}

@@ -128,7 +128,7 @@ fn annotated_sheet_renders_requested_quadrants_at_shared_scale() {
         destination: dir.join("annotated-sheet.png"),
         kind: ExportKind::Diagram,
         size: 1024,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         ..Default::default()
     };
     let result = run_export(
@@ -224,7 +224,7 @@ fn supplied_model_exports_an_annotated_4k_sheet() {
         destination: dir.join("four-view.png"),
         kind: ExportKind::Diagram,
         size: 4096,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         ..Default::default()
     };
     let result = run_export(

@@ -10,6 +10,52 @@ import struct
 from fractions import Fraction
 
 
+def read_prepared_geometry(path, material_count, expected_sha256=None):
+    """TNPRP001: build-mm positions/normals/build positions, indexed materials, edges.
+
+    Counts and exact length are checked before allocating. Empty stages are legal;
+    this is deliberately separate from the immutable nonempty TNMESH01 source.
+    """
+    path = Path(path)
+    if not path.is_absolute() or type(material_count) is not int or not 1 <= material_count <= 258:
+        raise ValueError("invalid prepared geometry path/material count")
+    with path.open('rb') as stream:
+        header = stream.read(24)
+        if len(header) != 24:
+            raise ValueError("truncated prepared header")
+        magic, version, nv, nt, ne = struct.unpack('<8sIIII', header)
+        if magic != b'TNPRP001' or version != 1:
+            raise ValueError("unsupported prepared geometry version")
+        if nv > 2_000_000 or nt > 4_000_000 or ne > 200_000 or bool(nv) != bool(nt):
+            raise ValueError("prepared geometry exceeds count budget")
+        expected = 24 + nv*36 + nt*16 + ne*24
+        if path.stat().st_size != expected:
+            raise ValueError("prepared geometry size differs from declared counts")
+        payload = stream.read(expected)
+        if len(payload) != expected-24:
+            raise ValueError("prepared geometry changed while reading")
+    if expected_sha256 is not None and hashlib.sha256(header+payload).hexdigest()!=expected_sha256:
+        raise ValueError("prepared geometry hash mismatch")
+    rows = list(struct.iter_unpack('<9f', payload[:nv*36]))
+    faces = list(struct.iter_unpack('<4I', payload[nv*36:nv*36+nt*16]))
+    edges = list(struct.iter_unpack('<6f', payload[nv*36+nt*16:]))
+    if any(not all(math.isfinite(v) for v in row) for row in rows+edges):
+        raise ValueError("nonfinite prepared attributes")
+    if any(abs(sum(v*v for v in row[3:6])-1) > 0.0001 for row in rows):
+        raise ValueError("invalid prepared normal")
+    if any(max(face[:3]) >= nv or face[3] >= material_count for face in faces):
+        raise ValueError("prepared vertex/material index outside arrays")
+    vertices = [row[:3] for row in rows]
+    for face in faces:
+        a,b,c = (vertices[i] for i in face[:3])
+        u,v = tuple(b[i]-a[i] for i in range(3)),tuple(c[i]-a[i] for i in range(3))
+        if (u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]) == (0,0,0):
+            raise ValueError("degenerate prepared triangle")
+    return dict(material_count=material_count,vertices=vertices,normals=[row[3:6] for row in rows],
+                build_positions=[row[6:] for row in rows],triangles=[face[:3] for face in faces],
+                materials=[face[3] for face in faces],edges=[(e[:3],e[3:]) for e in edges])
+
+
 def read_mesh(path, max_vertices=2_000_000, max_triangles=4_000_000):
     path = Path(path)
     with path.open("rb") as stream:
@@ -738,9 +784,9 @@ def crease_edges(vertices, triangles, crease_degrees=35):
     return [edge for edge, (_, count, sharp) in edges.items() if count != 2 or sharp]
 
 
-def add_design_edges(vertices, triangles, displayed_positions, pixel_mm, scene):
+def add_design_edges(vertices, triangles, displayed_positions, pixel_mm, scene, prepared_edges=None):
     import bpy
-    edges = crease_edges(vertices, triangles)
+    edges = crease_edges(vertices, triangles) if prepared_edges is None else prepared_edges
     if len(edges) > 200_000:
         raise ValueError("diagram design-edge budget exceeded (200000); simplify input before diagram export")
     curves = bpy.data.curves.new("DesignEdges", "CURVE")
@@ -766,12 +812,12 @@ def add_design_edges(vertices, triangles, displayed_positions, pixel_mm, scene):
     curves.materials.append(material)
 
 
-def apply_layer_appearance(material, mesh, source_positions_mm, spec):
+def apply_layer_appearance(material, mesh, source_positions_mm, spec, source_minimum=None):
     """Physical bump appearance; keeps source silhouette and does not add beads."""
     tree = material.node_tree
     nodes, links = tree.nodes, tree.links
     build_z = mesh.attributes.new("turninator_build_z_m", "FLOAT", "POINT")
-    minimum = min(point[2] for point in source_positions_mm)
+    minimum = min((point[2] for point in source_positions_mm), default=0) if source_minimum is None else source_minimum
     build_z.data.foreach_set("value", [(point[2] - minimum) * 0.001 for point in source_positions_mm])
     attribute = nodes.new("ShaderNodeAttribute")
     attribute.attribute_name = "turninator_build_z_m"
@@ -873,6 +919,33 @@ def apply_layer_filter(material,camera,resolution_x,resolution_y,pitch_mm):
             node.name="TurninatorFootprint"
 
 
+def probe_gpu_runtime():
+    """Read the actual current renderer context, including headless WGL.
+
+    Blender disables the Python drawing API in background mode. After explicit
+    preparation has initialized Eevee, its current WGL context still exposes the
+    hardware/driver strings directly. Never substitute OS inventory or guesses.
+    """
+    import gpu
+    import sys
+    try:
+        return {"backend": gpu.platform.backend_type_get(), "vendor": gpu.platform.vendor_get(),
+                "renderer": gpu.platform.renderer_get(), "version": gpu.platform.version_get()}
+    except SystemError:
+        if sys.platform == "win32":
+            import ctypes
+            gl = ctypes.WinDLL("opengl32.dll")
+            gl.wglGetCurrentContext.restype = ctypes.c_void_p
+            if gl.wglGetCurrentContext():
+                gl.glGetString.argtypes = [ctypes.c_uint]
+                gl.glGetString.restype = ctypes.c_char_p
+                values = [gl.glGetString(key) for key in (0x1F00, 0x1F01, 0x1F02)]
+                if all(values):
+                    return dict(backend="OPENGL", **dict(zip(("vendor", "renderer", "version"),
+                                                           (value.decode("utf-8", "strict") for value in values))))
+        return {"error": "No initialized headless GPU context; explicit runtime preparation is required"}
+
+
 def probe_devices():
     import bpy
     prefs = bpy.context.preferences.addons["cycles"].preferences
@@ -891,7 +964,8 @@ def probe_devices():
     return {"blender_version": bpy.app.version_string,
             "blender_build_hash": build_hash.decode() if isinstance(build_hash, bytes) else str(build_hash),
             "engines": ["eevee"] + (["cycles"] if optix else []),
-            "cycles_backend": "OPTIX" if optix else None, "devices": devices}
+            "cycles_backend": "OPTIX" if optix else None, "devices": devices,
+            "gpu": probe_gpu_runtime()}
 
 
 def studio_floor_mesh(extent):
@@ -910,7 +984,85 @@ def studio_floor_mesh(extent):
     return vertices, faces
 
 
-def build_scene(spec, engine, size, samples, transparent, width=None, height=None):
+def apply_prepared_materials(obj, base, spec, material_count):
+    """Same stable base/tool/cap slots as shared resolve_materials()."""
+    seen = set()
+    for group in spec.get('face_groups', []):
+        # GeometryMetadata stores f32 colors. Match resolve_materials' rounded
+        # values, signed-zero equivalence and first-use naming/slot order.
+        color = tuple(0.0 if v == 0.0 else v for v in struct.unpack('<3f',struct.pack('<3f',*group['color'])))
+        key = (group['tool'], color)
+        if key in seen:
+            continue
+        seen.add(key)
+        material = base.copy()
+        material.name = f"Tool{group['tool']}_{group['label']}"
+        material.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (*color,1)
+        for node in material.node_tree.nodes:
+            if node.type == 'VOLUME_ABSORPTION':
+                node.inputs['Color'].default_value = (*color,1)
+        obj.data.materials.append(material)
+    section_cap_material(obj)
+    if len(obj.data.materials) != material_count:
+        raise ValueError('prepared material slots differ from canonical manifest table')
+
+
+def apply_prepared_attributes(obj, prepared, rotation, minimum):
+    from mathutils import Vector
+    mesh = obj.data
+    for polygon, material in zip(mesh.polygons, prepared['materials']):
+        polygon.material_index = material
+        polygon.use_smooth = True
+    if prepared['normals']:
+        mesh.normals_split_custom_set_from_vertices([tuple(rotation @ Vector(n)) for n in prepared['normals']])
+    attribute = mesh.attributes.get('turninator_build_z_m')
+    if attribute is None:
+        attribute = mesh.attributes.new('turninator_build_z_m','FLOAT','POINT')
+    attribute.data.foreach_set('value',[(p[2]-minimum)*0.001 for p in prepared['build_positions']])
+
+
+def add_prepared_edges(obj, prepared, spec, envelope):
+    import bpy
+    from mathutils import Euler, Vector
+    old = bpy.data.objects.get('DesignEdges')
+    if old is not None:
+        curve = old.data
+        bpy.data.objects.remove(old,do_unlink=True)
+        if not curve.users:
+            bpy.data.curves.remove(curve)
+    if not prepared['edges']:
+        return
+    rotation = Euler(tuple(math.radians(v) for v in spec['display_rotation_degrees']),'XYZ').to_matrix()
+    offset = Vector((*envelope['center'][:2],envelope['bottom']))
+    points = [tuple(rotation @ Vector(tuple(v*0.001 for v in p))-offset) for edge in prepared['edges'] for p in edge]
+    extent = max(envelope['radius']*2,envelope['height'],0.001)
+    pixel_mm = spec.get('camera',{}).get('ortho_span_mm',extent*1000)/bpy.context.scene.render.resolution_y
+    add_design_edges([],[],points,pixel_mm,bpy.context.scene,[(i,i+1) for i in range(0,len(points),2)])
+    bpy.data.objects['DesignEdges'].parent = obj
+
+
+def replace_prepared_geometry(obj, prepared, spec, info):
+    """Geometry revisions only; keep camera/studio/materials and immutable envelope."""
+    import bpy
+    from mathutils import Euler, Vector
+    rotation = Euler(tuple(math.radians(v) for v in spec['display_rotation_degrees']),'XYZ').to_matrix()
+    envelope = info['bounds_m']
+    offset = Vector((*envelope['center'][:2],envelope['bottom']))
+    points = [tuple(rotation @ Vector(tuple(v*0.001 for v in p))-offset) for p in prepared['vertices']]
+    old = obj.data
+    mesh = bpy.data.meshes.new('TurninatorPreparedGeometry')
+    mesh.from_pydata(points,[],prepared['triangles'])
+    for material in old.materials:
+        mesh.materials.append(material)
+    mesh.update()
+    obj.data = mesh
+    apply_prepared_attributes(obj,prepared,rotation,info['source_minimum_mm'])
+    add_prepared_edges(obj,prepared,spec,envelope)
+    if not old.users:
+        bpy.data.meshes.remove(old)
+
+
+def build_scene(spec, engine, size, samples, transparent, width=None, height=None, denoise=True, prepared=None):
     import bpy
     from mathutils import Euler, Vector, Matrix
     vertices, triangles = read_mesh(spec["mesh_path"])
@@ -944,7 +1096,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
             raise RuntimeError("Cycles requires an available OPTIX device; no silent CPU fallback")
         scene.cycles.device = "GPU"
         scene.cycles.samples = samples
-        scene.cycles.use_denoising = True
+        scene.cycles.use_denoising = denoise
         scene.cycles.seed = 0
         scene.cycles.use_animated_seed = False
         scene.render.use_persistent_data = True
@@ -968,15 +1120,19 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
     envelope = rotation_envelope(points)
     cx, cy, _ = envelope["center"]
     bottom = envelope["bottom"]
+    source_minimum = min(v[2] for v in vertices)
+    if prepared is not None:
+        vertices, triangles = prepared["vertices"], prepared["triangles"]
+        points = [tuple(rotation @ Vector(tuple(v * 0.001 for v in point))) for point in vertices]
     points = [(x-cx, y-cy, z-bottom) for x, y, z in points]
     mesh = bpy.data.meshes.new("TurninatorGeometry")
     mesh.from_pydata(points, [], triangles)
     mesh.update()
     obj = bpy.data.objects.new("PrintedPart", mesh)
     scene.collection.objects.link(obj)
-    if spec["geometry_kind"]=="stepped":
+    if spec["geometry_kind"]=="stepped" and prepared is None:
         assign_layer_indices(obj,spec.get("layer_face_ranges"),"stepped")
-    if smooth_flags is not None:
+    if smooth_flags is not None and prepared is None:
         for polygon, smooth in zip(mesh.polygons, smooth_flags):
             polygon.use_smooth = smooth
     material = bpy.data.materials.new("MattePLA")
@@ -1003,11 +1159,14 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         material.node_tree.links.new(volume.outputs["Volume"], material.node_tree.nodes.get("Material Output").inputs["Volume"])
     obj.data.materials.append(material)
     if spec.get("layer_appearance", False):
-        apply_layer_appearance(material, mesh, vertices, spec)
-    if spec.get("face_groups"):
+        apply_layer_appearance(material, mesh, vertices if prepared is None else prepared["build_positions"], spec, source_minimum)
+    if spec.get("face_groups") and prepared is None:
         apply_face_groups(obj,material,spec["face_groups"])
+    if prepared is not None:
+        apply_prepared_materials(obj, material, spec, prepared['material_count'])
+        apply_prepared_attributes(obj, prepared, rotation, source_minimum)
     build_layers = None
-    if spec.get("build_up",False):
+    if spec.get("build_up",False) and prepared is None:
         if spec["geometry_kind"] == "original":
             build_layers = validate_solid_layer_tops(spec.get("solid_layer_tops_mm"))
         else:
@@ -1015,7 +1174,7 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
                             if spec.get("section") is not None
                             else apply_buildup(obj,spec.get("layer_face_ranges"),spec["geometry_kind"]))
     section_analysis = None
-    if spec.get("section") is not None and not spec.get("build_up",False):
+    if spec.get("section") is not None and not spec.get("build_up",False) and prepared is None:
         section_analysis = apply_section(obj,spec["section"],rotation,(cx,cy),bottom,
                                          max(envelope["radius"]*2,envelope["height"],0.001),spec["geometry_kind"])
     radius = envelope["radius"]
@@ -1067,7 +1226,9 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
             apply_layer_filter(layer_material,camera,scene.render.resolution_x,scene.render.resolution_y,
                                min(spec["layer_height_mm"],spec.get("first_layer_height_mm",spec["layer_height_mm"])))
     studio = spec.get("studio_preset", "light")
-    if studio == "diagram" and spec["geometry_kind"] == "original" and not spec.get("build_up",False):
+    if prepared is not None:
+        add_prepared_edges(obj, prepared, spec, envelope)
+    elif studio == "diagram" and spec["geometry_kind"] == "original" and not spec.get("build_up",False):
         pixel_mm = spec.get("camera", {}).get("ortho_span_mm", extent * 1000) / scene.render.resolution_y
         add_design_edges(vertices, triangles, points, pixel_mm, scene)
     if not transparent and studio != "diagram":
@@ -1115,4 +1276,5 @@ def build_scene(spec, engine, size, samples, transparent, width=None, height=Non
         warnings.append("Stepped solids retain closed layer interfaces; resin transmission is an optical illustration and may show internal layer surfaces.")
     return obj, {"geometry_hash": digest.hexdigest(), "vertices": len(vertices),
                  "triangles": len(triangles), "bounds_m": envelope,
-                 "device": device_info, "warnings": warnings,"section_analysis":section_analysis,"build_layers":build_layers}
+                 "device": device_info, "warnings": warnings,"section_analysis":section_analysis,"build_layers":build_layers,
+                 "source_minimum_mm":source_minimum}

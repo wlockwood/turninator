@@ -45,6 +45,7 @@ impl Default for ToolPaths {
     }
 }
 impl ToolPaths {
+    /// Validate every configured tool. Operations should use `validate_requirements`.
     pub fn validate(&self) -> Result<()> {
         for (label, path) in [
             ("Blender", &self.blender),
@@ -56,6 +57,31 @@ impl ToolPaths {
             }
         }
         Ok(())
+    }
+}
+
+/// Object-safe worker transport. The adapter owns this transport on its actor;
+/// the production implementation retains WorkerClient's owned-process cancellation.
+pub trait WorkerTransport {
+    fn request(
+        &mut self,
+        request: Value,
+        cancel: &AtomicBool,
+        on_event: &mut dyn FnMut(Value),
+    ) -> Result<Value>;
+    fn cancel(&mut self);
+}
+impl WorkerTransport for WorkerClient {
+    fn request(
+        &mut self,
+        request: Value,
+        cancel: &AtomicBool,
+        on_event: &mut dyn FnMut(Value),
+    ) -> Result<Value> {
+        WorkerClient::request(self, request, cancel, on_event)
+    }
+    fn cancel(&mut self) {
+        WorkerClient::cancel(self);
     }
 }
 
@@ -313,9 +339,13 @@ pub struct WorkerClient {
 }
 impl WorkerClient {
     pub fn spawn(tools: &ToolPaths) -> Result<Self> {
-        if !tools.blender.is_file() {
-            return Err("Blender executable does not exist".into());
-        }
+        super::requirements::validate_requirements(
+            tools,
+            &super::requirements::ToolRequirements {
+                blender: true,
+                ..Default::default()
+            },
+        )?;
         let script = renderer_script("worker.py");
         let args = [
             "--background",

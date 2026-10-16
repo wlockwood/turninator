@@ -1,0 +1,410 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-15",
+  "qualification": "corrected-sdk-functional-only",
+  "production_adapter_qualified": false,
+  "source_commit": "b872186d2fe995a762f73708c606847eed55843e",
+  "source_archive_sha256": "31a82d87c1f912864e7b039620747507d2b0ce9db70648656d41d0ebc4636cda",
+  "deps_archive_sha256": "069a1eace7e8f192b07629d6318eca9e0ad970f8c7db39a0919b10eddc2345d0",
+  "compiler_identity": "4cbf85c6afdf0092be563772ec2cd142336d933d4c57b18fba584bb73514ea9c",
+  "sdk_identity": "63e96b108e5007c6d378e2ac0b575d5db6b9e9e8b7b9a69a5b7cef3856f457b5",
+  "nvrtc_sha256": "02d2d7ef4690bf1a55dda1d3ac94c86ce8d16920071c87bcd3e70e94ef346e93",
+  "builtins_sha256": "a7afa2a40cbd3f922a33d8bf71c13cb26ca707c7016a9bc5fcde36759ba668f5",
+  "toolchain": {
+    "msvc": "19.44.35215.0",
+    "precompiled_dependencies_msvc": "19.44.35228",
+    "cpp_standard": 20,
+    "crt": "/MD",
+    "iterator_debug_level": 0,
+    "boost": "1.88.0"
+  },
+  "outputs": [
+    {
+      "path": "build/src/luxcore/Release/luxcore.dll",
+      "size": 39561728,
+      "sha256": "63e96b108e5007c6d378e2ac0b575d5db6b9e9e8b7b9a69a5b7cef3856f457b5"
+    },
+    {
+      "path": "build/src/luxcore/Release/luxcore.lib",
+      "size": 16076140,
+      "sha256": "ce8e2f0e786d78a4b77673f63fd5f1578e03a7c2a4f07e6079eb4e77b9f18c67"
+    },
+    {
+      "path": "runtime/direct_consumer.exe",
+      "size": 32256,
+      "sha256": "d0bb4dc0e3a31b2c3302bbc05b162aea86d34be43e794fff43014c4038455ed9"
+    },
+    {
+      "path": "runtime/render_probe.exe",
+      "size": 106496,
+      "sha256": "8fcc500d8efec58135946c456965e6d172cf264f141ae238677aed7de5803405"
+    },
+    {
+      "path": "runtime/cache_tests.exe",
+      "size": 97280,
+      "sha256": "498904f8e867fd26bffce1b54bd97730dea7d1d87e80e6bab6a995d7c257648a"
+    },
+    {
+      "path": "runtime/loader_tests.exe",
+      "size": 39936,
+      "sha256": "0617f1a25706a7be1980a56cf95493fa4a6fc06a99d8e9f97df0718aec91d1ae"
+    }
+  ],
+  "inputs": [
+    {
+      "path": "native/patches/luxcore/.gitattributes",
+      "size": 148,
+      "sha256": "de981df694bb7223d96f00dc919fe11e825c4a9966137db8164c44493da54c99"
+    },
+    {
+      "path": "native/patches/luxcore/0001-owned-cache-exports-native.patch",
+      "size": 18623,
+      "sha256": "2aefa8cdb5d8844b0f25c0ba02a24ca61516be5c1b0d6213eade16bba212fd7b"
+    },
+    {
+      "path": "native/patches/luxcore/cache-tests.cpp",
+      "size": 4529,
+      "sha256": "4c8b3edbabdb587626e501ad8c2db7c81ebaec8f0ccbf911885a46d3062008e8"
+    },
+    {
+      "path": "native/patches/luxcore/conan-profile",
+      "size": 348,
+      "sha256": "63d18dc7164f567006dbd852f788d8831c0ce4d059783fddc13595a0d0be3703"
+    },
+    {
+      "path": "native/patches/luxcore/direct-consumer.cpp",
+      "size": 2778,
+      "sha256": "069e7227942905c98a8ffd122244b462b0dd36da6f7dde3b5d54eeb39b593485"
+    },
+    {
+      "path": "native/patches/luxcore/extract-source.py",
+      "size": 1425,
+      "sha256": "f55b78831c35fc1d59a3f17b5f239bd78b40d4d9bf7455cc001354567cd46055"
+    },
+    {
+      "path": "native/patches/luxcore/getopt-archive.sha256",
+      "size": 65,
+      "sha256": "e3cad40fbf16f2225414ce2e5b93787582b0b875fd34cfa30c7eee096d25b81a"
+    },
+    {
+      "path": "native/patches/luxcore/host-tools.json",
+      "size": 594,
+      "sha256": "1e6fc03a97562e19d30d700a4634e6ca35c8056ca33fd79a6dd6d73adbbaebad"
+    },
+    {
+      "path": "native/patches/luxcore/inspect-cache.py",
+      "size": 1499,
+      "sha256": "19c894f04a8bb03cd19e4cf89a66519524fcc8837e4c81d292177813ddf7e1a9"
+    },
+    {
+      "path": "native/patches/luxcore/loader-tests.cpp",
+      "size": 2008,
+      "sha256": "7e3dcdd0b1ee19441e1be94ae4f87038203b7358586d2781ca44c787acdd099c"
+    },
+    {
+      "path": "native/patches/luxcore/normalize-patched-source.py",
+      "size": 332,
+      "sha256": "4a783e04682bc5af263b3124b6ca8f920041f94f39a3f1d689860ed7844fb1c1"
+    },
+    {
+      "path": "native/patches/luxcore/owned_ptx_cache.h",
+      "size": 10273,
+      "sha256": "fe8abf7adf1806cf5abe01018938afe2a70e8bd1e1c382646e9b2d8dbe4ffd96"
+    },
+    {
+      "path": "native/patches/luxcore/qualify.ps1",
+      "size": 4707,
+      "sha256": "1d1571450e1310c1e24d88d2d7a514123f35894f90329304a24553dda7d9b26c"
+    },
+    {
+      "path": "native/patches/luxcore/render-probe.cpp",
+      "size": 13163,
+      "sha256": "2dc1b8c1265cc72b7df428810a476083c4297202879fb9af5bb7ed0488cce953"
+    },
+    {
+      "path": "native/patches/luxcore/tests-CMakeLists.txt",
+      "size": 1255,
+      "sha256": "31200c9bfc8ed94731a2fd0ffd3b24fe1b2e40d04ec9e3804b6f9f1a4caf218e"
+    },
+    {
+      "path": "native/patches/luxcore/tools-lock.json",
+      "size": 5818,
+      "sha256": "168eb1b7b1991da0c1d112072ffe3dde8dd85cf4c5e05b9d13cfecf4154d9deb"
+    },
+    {
+      "path": "tools/build-luxcore-sdk.ps1",
+      "size": 7512,
+      "sha256": "b7ebbf3962e2916fcfafe0775986085469ae169d1b56d2f59d0941987cd37e7e"
+    },
+    {
+      "path": "native/patches/luxcore/materialize-inputs.ps1",
+      "size": 2538,
+      "sha256": "a131d508b843d8d33741eda751611b1381bf38a24c8d0ad4bcd88d7e35402e16"
+    },
+    {
+      "path": "native/patches/luxcore/test-build-inputs.ps1",
+      "size": 3300,
+      "sha256": "32d66ea61ac4c89427e2893859556532bcd176f7d4bf9237db634fe2b088c476"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "source-verification.json",
+      "sha256": "0ad828b99b75998ec3a045ce3167211862a7bbc7fa4b7596a0893af072bc7925"
+    },
+    {
+      "path": "loaded-modules-final.json",
+      "sha256": "50c6a9e52529f6a970369c55ba35206c7ad795d9610d7b9371b831d719fd6193"
+    },
+    {
+      "path": "direct-consumer.log",
+      "sha256": "438659cf0998c083674faf15aa9fef3d80152d7772dfb79d0367e3c79cd6bd4b"
+    },
+    {
+      "path": "cache-qualified.log",
+      "sha256": "36ce81f69264caaa8808c4d16cd80e5c224dbc23f0815ec255ba18026c32a93f"
+    },
+    {
+      "path": "cache-red.log",
+      "sha256": "5183caf3bd490a917c17ec237ccb68f79528084900d7780b92c1af8160c6ea0e"
+    },
+    {
+      "path": "cache-reparse.log",
+      "sha256": "763e1a0beaa4fe7936fe1a227664bad3738100bab507df53655e77f2f0c6e5f5"
+    },
+    {
+      "path": "red-consumer.log",
+      "sha256": "d0dffc39c7ea14b94a55a16cadc9474364a3cdd90f6c63e52ec19cabbaebb583"
+    },
+    {
+      "path": "config-red.log",
+      "sha256": "eb02859c7882cc57365b26e906fd1abc3e4c60f1a4470e6c5c85b1cf480e675d"
+    },
+    {
+      "path": "loader-red.log",
+      "sha256": "a4057371c09a44bd0a70aee19cc4833244ad4f2959fb003b48b432b5bdb13b5e"
+    },
+    {
+      "path": "ptx-red.log",
+      "sha256": "a0a36ecb535b4224fedbe277e99bce5eeb2a319e23e9b993cc0005220247eb8c"
+    },
+    {
+      "path": "consumer-final-build.log",
+      "sha256": "fec800e63d81f8c2c53a27b149c83e41e0df3b68896002bdb24c943a4bfd16ac"
+    },
+    {
+      "path": "build-final.log",
+      "sha256": "21e3516285ab86f2e4284eeec10d39cf8f291b6ebbecf7ec30557df22a9ef2fa"
+    },
+    {
+      "path": "build-config-correction.log",
+      "sha256": "43ac38e81dbf5cdbd765350bec084e9ef2f715bcaa00b09ed21faf860f56a976"
+    },
+    {
+      "path": "build-loader-correction.log",
+      "sha256": "8f894aeaf66f8bd3c113783b3baf44eec3ac12331e46ebc8d2b079f6353cd66b"
+    },
+    {
+      "path": "exports-final.txt",
+      "sha256": "3665f6a7589db836019a8eb409a450704c10dbc8d0eda67e0f742c7b628a517e"
+    },
+    {
+      "path": "dependents-final.txt",
+      "sha256": "7f58e06451837069e416314edf758214bbe1f513e7659d227d94d77033a016d5"
+    },
+    {
+      "path": "consumer-imports-final.txt",
+      "sha256": "e5e4aed9cbed3a8eb607448e3a8c26e136eecf8775bcd83469d88fdaf016a0de"
+    },
+    {
+      "path": "warm-records-check.log",
+      "sha256": "4b90079bb00487db28bc71af1944e5f05c1391a64c444db16e278ab8e10e6af4"
+    },
+    {
+      "path": "loader-green-missing.log",
+      "sha256": "95727901e04b02172cf3d89e11685111f724cafe7e4f60f18244edce7343d3b5"
+    },
+    {
+      "path": "loader-green-missing-builtins.log",
+      "sha256": "95727901e04b02172cf3d89e11685111f724cafe7e4f60f18244edce7343d3b5"
+    },
+    {
+      "path": "loader-green-wrong-builtins.log",
+      "sha256": "95727901e04b02172cf3d89e11685111f724cafe7e4f60f18244edce7343d3b5"
+    },
+    {
+      "path": "loader-green-preloaded.log",
+      "sha256": "dccca6749b815ac04a42b60dca4db13c3f6392be7fa709568bdcb55ba50d8c6b"
+    },
+    {
+      "path": "loader-green-ambient.log",
+      "sha256": "dccca6749b815ac04a42b60dca4db13c3f6392be7fa709568bdcb55ba50d8c6b"
+    },
+    {
+      "path": "render-cold.log",
+      "sha256": "ffecccb85ab784221b47ba85937edddd8f0f33e21796ee3c5ac4fa5844bb6591"
+    },
+    {
+      "path": "render-warm.log",
+      "sha256": "9e2d301f1ba8bae779944de4d0d73cbdf5b7e907d326b707db61716bbfafafec"
+    },
+    {
+      "path": "render-edits.log",
+      "sha256": "0badda06a47929fa5c13002a1ab78fe83628ea84705be4b153ff49bbc9718eb9"
+    },
+    {
+      "path": "render-cancel.log",
+      "sha256": "695215ca5a92525de6ce18974eeb3e61c36dbcd5211cf1fb9724651ef51ac967"
+    },
+    {
+      "path": "render-bounded64.log",
+      "sha256": "b27896e4dcd8abdb6a36ac8d20352ed163047149a44ae259d9cd71ba12f4be61"
+    },
+    {
+      "path": "render-edge-diag.log",
+      "sha256": "59b7aef6874658c0b2dee878a139ac62cf8b029f8e2c57fc472700db03494a35"
+    },
+    {
+      "path": "render-parallel.log",
+      "sha256": "029b67659585447a2cbf7071bd7a6696abbe33a77fda0472263d87a2d6bd06e1"
+    },
+    {
+      "path": "cache-cold.json",
+      "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "cache-warm.json",
+      "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "cache-edits.json",
+      "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "cache-cancel.json",
+      "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "cache-bounded64.json",
+      "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "cache-edge-diag.json",
+      "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "cache-parallel.json",
+      "sha256": "18b2d6aaad41ebaa717ec58dcd9ea1dda2c50a9ed17aa79e0609d978fa34adab"
+    },
+    {
+      "path": "fixround1/poison-red.json",
+      "sha256": "df3f57443549ed6e5b7c15dc1b7fa322bb28a3c6114a73a01b2175465fa503d7"
+    },
+    {
+      "path": "fixround1/poison-red.log",
+      "sha256": "440bbb8767997513c31a2c43ba16d349a05b3e30004a546d5da021419339b6fa"
+    },
+    {
+      "path": "fixround1/inputs-green.log",
+      "sha256": "f229aa48ba4902569b67dc2a40bf04edef7093135f7eab75e81b59549d4de6f7"
+    },
+    {
+      "path": "fixround1/getopt-red.log",
+      "sha256": "c2cf5d9b142fa8355abb4753d0391ebf076a8f6993f24fd3ad5b049318951c4a"
+    },
+    {
+      "path": "fixround1/configure-rehearsal.log",
+      "sha256": "aae0824c0d760ed5bccc20305890746a041ba1d6f89da82de9af7cc88e54ca06"
+    },
+    {
+      "path": "fixround1/installed-tools.json",
+      "sha256": "c79e1735000e9401330337e635e253ad04306edad91cf1d426ceea25ba2be801"
+    },
+    {
+      "path": "fixround1/rehearsal-tool-install.log",
+      "sha256": "a0bccbf81b967488c6f6fa01d0112a65dd34909044e33286465b0119302b15f9"
+    },
+    {
+      "path": "fixround1/rehearsal-tool-check.log",
+      "sha256": "672aec65a45bed50e70229c70934a7eebf0462595c459b83023027645d57cccf"
+    },
+    {
+      "path": "fixround1/rehearsal-bootstrap.log",
+      "sha256": "bb0bcac9a92f66dee080ea041769957ecdd49cc2ba5f8826f668130eed22ee0e"
+    },
+    {
+      "path": "fixround1/rehearsal-resolve.log",
+      "sha256": "d0c784b807fa450af72e448d5f6f0d12416b5c299c765c8ade690ca22318dd6c"
+    },
+    {
+      "path": "fixround1/rehearsal-configure.log",
+      "sha256": "71431b7ee2225e8d68eead28b00935291e81912f34689cb649cce192775fc258"
+    },
+    {
+      "path": "fixround1/rehearsal-getopt-restore.log",
+      "sha256": "41d0c33821cae63397c43ed5599f386d791a45ef38b1c4043044b2b467d42da4"
+    }
+  ],
+  "checks": {
+    "direct_import_library": true,
+    "private_utf8_context_roundtrip": true,
+    "loader_exact_function_binding": true,
+    "ambient_13_1_rejected": true,
+    "cache_mutation_red": true,
+    "foreign_actual_ptx_rejected": true,
+    "unicode_cold_warm": true,
+    "warm_record_hash_and_mtime_unchanged": true,
+    "emitted_ptx_compiler": "12.8.93",
+    "rgba_finite": true,
+    "parallel_contexts": 2,
+    "edit_reset_max_abs_error": 1.19209e-07,
+    "cancel_observed_active": true,
+    "cancel_drain_ms": 3.3017,
+    "requested_minimum64_observed": [
+      80,
+      82
+    ],
+    "nominal64_edge_diagnostic_observed": [
+      63,
+      65
+    ],
+    "edge_diagnostic_expected_exit": 21
+  },
+  "cold_ptx_records": [
+    {
+      "key": "11e0b3d6440602efc8c0ff4ee83fbb70cb79a34b36b2c97f19a03402a9fe82a7",
+      "ptx_sha256": "d4c339339679e8c05fc8458a9d3ff8fcabe3cb8ca0e721872cff14fb62ebcf2e",
+      "size": 6148459,
+      "record_sha256": "d19ee5a237dfc25d5c93110cf73a5cf23b8af51fe604d537089117a2fd0a6fe6",
+      "mtime_ns": 1792084183405624900,
+      "compiler_header": "//\n// Generated by NVIDIA NVVM Compiler\n//\n// Compiler Build ID: CL-35583870\n// Cuda compilation tools, release 12.8, V12.8.93\n// Based on NVVM 7.0.1\n//\n\n.version 8.7\n.target sm_89\n.address_size 64\n\n."
+    },
+    {
+      "key": "94764575b96784bf1c31efa1036242149bbf20ce513d60aaee774478fb77ff0e",
+      "ptx_sha256": "158c4e21e30969d174ad7758221e52a0110e83d6fa78fd29d8bf6f3b3c5c7ede",
+      "size": 2816,
+      "record_sha256": "cac4f7dee9f0dd2a8f3a14e17a7e7d4aeefd9f570136f3b0eba2c98c85e73e77",
+      "mtime_ns": 1792084176906589500,
+      "compiler_header": "//\n// Generated by NVIDIA NVVM Compiler\n//\n// Compiler Build ID: CL-35583870\n// Cuda compilation tools, release 12.8, V12.8.93\n// Based on NVVM 7.0.1\n//\n\n.version 8.7\n.target sm_89\n.address_size 64\n\n\t"
+    }
+  ],
+  "limitations": [
+    "Not a production adapter or redistribution qualification",
+    "No bit-identical PE reproduction guarantee",
+    "Sampling/jitter unchanged; use verified minimum-per-pixel guard",
+    "Observed cancellation drain is not a worst-case bound",
+    "Caller must attest canonical compiler/builtins paths and hashes before Init",
+    "Trusted app-owned cache root; not an ACL sandbox against concurrent hostile directory mutation",
+    "Driver-managed OptiX/JIT caches remain separate"
+  ],
+  "recipe_correction": {
+    "base_commit": "7466398ce012152a257948a561fa3389481e12dd",
+    "previous_qualification_manifest_sha256": "5a2dfe6b0fc407790150f3e0a602bad41bc57ff383c207ef5f219dc817325a5f",
+    "original_build_recipe_sha256": "6d99ff13508f37d0d03065021813fbb0b58e845c709f6993246b604340a601fc",
+    "validation": "recipe-only offline ConfigureOnly with unlocked compatible wheel present; all16 locked installed versions and pip check passed",
+    "native_rebuild": false,
+    "gpu_repeat": false,
+    "sdk_outputs_unchanged": true,
+    "getopt_acquisition": "verified offline archive required; AllowToolDownload applies only to locked PyPI tools"
+  }
+}

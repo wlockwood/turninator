@@ -38,7 +38,7 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
     let mut request = ExportRequest {
         kind: ExportKind::Gif,
         size: 64,
-        samples: 4,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 4).unwrap(),
         frame_count: 4,
         ..Default::default()
     };
@@ -67,6 +67,8 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
                 preview: false,
                 tools: tools.clone(),
                 cache_budget_bytes: budget,
+                memory: Default::default(),
+                generation: 0,
             })
             .unwrap();
         let mut reused = 0;
@@ -100,19 +102,23 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
     let render_dir = fs::read_dir(&first_job)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .find(|p| p.join("frames/render-result.json").exists())
+        .find(|p| p.join("job.json").exists())
         .unwrap();
-    let frame = render_dir.join("frames/frame_0000.png");
+    let frame = render_dir.join("host-frames/Single-0000.png");
     let bytes = fs::read(&frame).unwrap();
     let modified = fs::metadata(&frame).unwrap().modified().unwrap();
-    let details = fs::read(render_dir.join("frames/render-result.json")).unwrap();
+    let details: Value = serde_json::from_slice::<Value>(
+        &fs::read(render_dir.join("job.json")).unwrap(),
+    )
+    .unwrap()["report"]
+        .clone();
     request.kind = ExportKind::Mp4;
     request.destination = root.join("second.mp4");
     assert_eq!(submit(&service, 2, &scene, &mut request, 1), 4); // Re-encoding needs no new-frame quota.
     assert_eq!(request.job_dir, first_job);
     assert_eq!(fs::metadata(&frame).unwrap().modified().unwrap(), modified);
     assert_eq!(
-        fs::read(render_dir.join("frames/render-result.json")).unwrap(),
+        serde_json::from_slice::<Value>(&fs::read(render_dir.join("job.json")).unwrap()).unwrap()["report"],
         details
     );
     drop(service);
@@ -121,13 +127,12 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
     request.destination = root.join("after-restart.gif");
     assert_eq!(submit(&service, 3, &scene, &mut request, 1), 4);
     assert_eq!(fs::read(&frame).unwrap(), bytes);
-    fs::write(render_dir.join("frames/frame_0001.png"), b"broken").unwrap();
+    fs::write(render_dir.join("host-frames/Single-0001.png"), b"broken").unwrap();
     request.destination = root.join("repaired.gif");
     submit(&service, 4, &scene, &mut request, 1_000_000_000);
     let repaired: Value =
-        serde_json::from_slice(&fs::read(render_dir.join("frames/render-result.json")).unwrap())
-            .unwrap();
-    assert_eq!(repaired["rendered_frame_count"], 1);
+        serde_json::from_slice(&fs::read(render_dir.join("job.json")).unwrap()).unwrap();
+    assert_eq!(repaired["report"]["rendered_frame_count"], 1);
     assert_eq!(fs::metadata(&frame).unwrap().modified().unwrap(), modified);
     scene["color"] = json!([0.7, 0.1, 0.05]);
     request.destination = root.join("changed-material.gif");
@@ -140,9 +145,9 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
     let still_dir = fs::read_dir(&still_job)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .find(|p| p.join("frames/still.png").exists())
+        .find(|p| p.join("host-frames/Single-0000.png").exists())
         .unwrap();
-    let still_modified = fs::metadata(still_dir.join("frames/still.png"))
+    let still_modified = fs::metadata(still_dir.join("host-frames/Single-0000.png"))
         .unwrap()
         .modified()
         .unwrap();
@@ -150,7 +155,7 @@ fn separate_exports_reuse_frames_across_formats_and_restart() {
     assert_eq!(submit(&service, 7, &scene, &mut request, 1), 1);
     assert_eq!(request.job_dir, still_job);
     assert_eq!(
-        fs::metadata(still_dir.join("frames/still.png"))
+        fs::metadata(still_dir.join("host-frames/Single-0000.png"))
             .unwrap()
             .modified()
             .unwrap(),

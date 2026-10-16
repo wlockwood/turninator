@@ -1,2 +1,17 @@
+pub mod backends;
+pub mod capabilities;
+pub mod contract;
+pub mod embedded;
+pub mod registry;
+pub mod requirements;
+pub mod selection;
+pub mod sequence;
 pub mod worker;
+pub use selection::{BackendId, BackendQuality, RenderSelection, RendererPreferences};
 pub use worker::{ToolPaths, WorkerClient};
+pub mod color;
+pub mod geometry;
+mod ink;
+pub mod materials;
+pub mod prepared;
+pub mod wgpu_studio;

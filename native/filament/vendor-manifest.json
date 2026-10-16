@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "c1dc4e444784850d6dc891a1fb38747c30b85463",
+  "source_tree": "libs/bluevk/include",
+  "build_only": true,
+  "files": [
+    {
+      "path": "bluevk/BlueVK.h",
+      "size": 79034,
+      "sha256": "a015af17b3cac987df35fb0896f4bd92497a5937e515db817203baac034ca424",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/bluevk/BlueVK.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_av1std_decode.h",
+      "size": 4250,
+      "sha256": "96f923dc01cd3e266c081d88fa020525a20d63ffe4ce09a4c807a04ef3aaf97e",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_av1std_decode.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_av1std.h",
+      "size": 16507,
+      "sha256": "f3ab53dbfdeb36a349f674656d50bd507f2e4b3c883343da74aace0df4f02a02",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_av1std.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_h264std_decode.h",
+      "size": 2722,
+      "sha256": "e1708b3996a740eeedb79f51d0f0e379f9bcae13566538375acaf73301023b58",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_h264std_decode.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_h264std_encode.h",
+      "size": 6878,
+      "sha256": "052a6e357be8d88bf4be0db1b3da5a9cc1a6011cf4b3533759ff588e1e26f9f1",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_h264std_encode.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_h264std.h",
+      "size": 13853,
+      "sha256": "072ee6eac80e73d93bb4bfe0059f99e581fc8b55b1437236185bb4ff377914b1",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_h264std.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_h265std_decode.h",
+      "size": 2428,
+      "sha256": "800946aa19d83d305d504e2e4141bc938f989e0cf8872cef97480238eefef1ea",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_h265std_decode.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_h265std_encode.h",
+      "size": 7462,
+      "sha256": "7239f9f4e811546639111e562a8be1ec73ad5bef1c23d5fad80889f35e125e9c",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_h265std_encode.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codec_h265std.h",
+      "size": 23416,
+      "sha256": "0cbdfd6c45ee8ca902e9c961cd7e49a4d601d443ea0ef2a60a8496b127ed397c",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codec_h265std.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vk_video/vulkan_video_codecs_common.h",
+      "size": 660,
+      "sha256": "78cf3c99d3d57afa7ab1782ec6018b4bcdbe273f2843d76e3375282db875b71e",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vk_video/vulkan_video_codecs_common.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vk_icd.h",
+      "size": 8164,
+      "sha256": "6c80200a7fcc4c7da3170ef9dc674eab142c92767bfc9733c98649bce78aecb9",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vk_icd.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vk_layer.h",
+      "size": 7073,
+      "sha256": "861cd0ea24c7d81b935e5726520d184dbbc00e571f9089e17a723ccbbc1944e2",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vk_layer.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vk_platform.h",
+      "size": 2828,
+      "sha256": "c4cabbcf699c90cde344095ae54da9435d117951aad114ba3a540c5997d7906f",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vk_platform.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_android.h",
+      "size": 6201,
+      "sha256": "f815593b7d20f291850b8d85e21e3d47fb123932805ba3606df631bdff4cb1e7",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_android.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_beta.h",
+      "size": 10381,
+      "sha256": "fd7eaa882fb01dd0b798f3d11aeba0f20fc7de1b27dff50cae0a2b8ceb3ed373",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_beta.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_core.h",
+      "size": 1038013,
+      "sha256": "50af5a157c8aab7d90dcd929a05758b4dc3e78a619f46552bfd5cde67b2d46c1",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_core.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_directfb.h",
+      "size": 1866,
+      "sha256": "dad1fe7c78d6d3113bc4416ee85530da221708bc2d505609e118115bf03b903f",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_directfb.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_fuchsia.h",
+      "size": 12470,
+      "sha256": "780e5d646ecc21e8884e8860be3c1afc0ac4aa165f5aaeca7cbd6238061d4a36",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_fuchsia.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_ggp.h",
+      "size": 1896,
+      "sha256": "fe67e4ff5d3442f4749096391a30bd4b7866f6ebf773739b06fe99a435013da5",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_ggp.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_ios.h",
+      "size": 1309,
+      "sha256": "341027604524623c7c8d9433b75d75e520f151fe691bd1bd92b212989391173b",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_ios.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_macos.h",
+      "size": 1341,
+      "sha256": "5a2ac88f5ac809dab80a6353240302fac1d2fd7010eb377560996a12d392b030",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_macos.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_metal.h",
+      "size": 5907,
+      "sha256": "ed0fb6ba231ec5e363487c062255667371914d7b79eb12eb39649bce0757b0d7",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_metal.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_screen.h",
+      "size": 4064,
+      "sha256": "71bff61ec120bb60efdccf2fe7d40e64b52336232c32fbd85ae435ad23b43e54",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_screen.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_vi.h",
+      "size": 1282,
+      "sha256": "73f34c7d87515ad6caf6d91bfad17d5d11959261f99386c14978ec7aba4d1f5a",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_vi.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_wayland.h",
+      "size": 1866,
+      "sha256": "ebf1981d5b6cf3119f9945759e11f900918d911724bdd25ddf1706f1e323ac09",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_wayland.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_win32.h",
+      "size": 15112,
+      "sha256": "fa3a9263d1764b82b634180ec5d3010adc216108bae11c02b157f733073f87f8",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_win32.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_xcb.h",
+      "size": 1880,
+      "sha256": "3d9c38165d2ffa24f585ae1b287ee89e32b54cc49bc28ac142f3ab92d00c8818",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_xcb.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_xlib_xrandr.h",
+      "size": 1411,
+      "sha256": "b33d51ee2feb28890cb5b2db3cd4c8b0553553d81c71d6057ed91bb5029d844e",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_xlib_xrandr.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan_xlib.h",
+      "size": 1861,
+      "sha256": "e8878c1efe85ce965d3e5019c1ca48043671e1a782804c4ec68eb460d45f7042",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan_xlib.h",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "vulkan/vulkan.cppm",
+      "size": 230780,
+      "sha256": "402fc0a3407feb107210da6af028bde0424a33c1b304efcc8d6262a5d90dfbdd",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan.cppm",
+      "license": "Apache-2.0 OR MIT"
+    },
+    {
+      "path": "vulkan/vulkan.h",
+      "size": 1555,
+      "sha256": "52297513cc6b6cc8db2921aa849f72e3f55d678b3a58a2c3eb297c02ded7a837",
+      "source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/libs/bluevk/include/vulkan/vulkan.h",
+      "license": "Apache-2.0"
+    }
+  ],
+  "license_file": "vendor/LICENSE.apache-2.0",
+  "license_sha256": "02d70b593dd8e9355dd8e1ca8d13c303bee5bcaf3065b66ff6e4f534e1e6a2c1",
+  "license_source": "https://raw.githubusercontent.com/google/filament/c1dc4e444784850d6dc891a1fb38747c30b85463/LICENSE",
+  "license_size": 11362,
+  "license_git_blob": "73774b41cafc7ca9171fa50ea9fd95da343be320"
+}

@@ -107,15 +107,15 @@ pub struct SectionSpec {
 pub struct BuildStage {
     pub visible_layers: u32,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ExportRequest {
+    pub schema_version: u32,
     pub job_dir: PathBuf,
     pub scene_path: PathBuf,
     pub destination: PathBuf,
     pub kind: ExportKind,
-    pub engine: String,
+    pub selection: crate::render::RenderSelection,
     pub size: u32,
-    pub samples: u32,
     pub frame_count: u32,
     #[serde(default = "crate::animation::default_frame_rate")]
     pub frame_rate: u32,
@@ -137,6 +137,82 @@ pub struct ExportRequest {
     #[serde(default)]
     pub start_angle_degrees: f64,
 }
+#[derive(Deserialize)]
+#[serde(remote = "ExportRequest")]
+struct RequestV2 {
+    pub schema_version: u32,
+    pub job_dir: PathBuf,
+    pub scene_path: PathBuf,
+    pub destination: PathBuf,
+    pub kind: ExportKind,
+    pub selection: crate::render::RenderSelection,
+    pub size: u32,
+    pub frame_count: u32,
+    #[serde(default = "crate::animation::default_frame_rate")]
+    pub frame_rate: u32,
+    pub transparent: bool,
+    #[serde(default)]
+    pub video_codec: VideoCodec,
+    #[serde(default)]
+    pub layout: ExportLayout,
+    #[serde(default)]
+    pub section: Option<SectionSpec>,
+    #[serde(default)]
+    pub animation: AnimationMode,
+    #[serde(default)]
+    pub timeline: Option<crate::animation::Timeline>,
+    #[serde(default)]
+    pub turntable_timing: Option<crate::animation::TurntableTiming>,
+    #[serde(default)]
+    pub build_stage: Option<BuildStage>,
+    #[serde(default)]
+    pub start_angle_degrees: f64,
+}
+// Unversioned requests are read once through this explicit compatibility DTO.
+#[derive(Deserialize)]
+struct LegacyRequestRenderer {
+    engine: String,
+    samples: u32,
+}
+impl<'de> Deserialize<'de> for ExportRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut value = Value::deserialize(deserializer)?;
+        match value.get("schema_version") {
+            None => {
+                if value.get("selection").is_some() {
+                    return Err(D::Error::custom(
+                        "unversioned requests require legacy engine/samples",
+                    ));
+                }
+                let legacy: LegacyRequestRenderer =
+                    serde_json::from_value(value.clone()).map_err(D::Error::custom)?;
+                let selection =
+                    crate::render::RenderSelection::from_legacy(&legacy.engine, legacy.samples)
+                        .map_err(D::Error::custom)?;
+                value["schema_version"] = json!(2);
+                value["selection"] = serde_json::to_value(selection).map_err(D::Error::custom)?;
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| D::Error::custom("request must be object"))?
+                    .remove("engine");
+                value.as_object_mut().unwrap().remove("samples");
+            }
+            Some(v) if v == 2 => {
+                if value.get("engine").is_some() || value.get("samples").is_some() {
+                    return Err(D::Error::custom(
+                        "schema-2 request uses selection, not legacy renderer fields",
+                    ));
+                }
+            }
+            _ => return Err(D::Error::custom("unsupported retained request version")),
+        }
+        RequestV2::deserialize(value).map_err(D::Error::custom)
+    }
+}
+
 impl Default for ExportRequest {
     fn default() -> Self {
         Self {
@@ -144,9 +220,9 @@ impl Default for ExportRequest {
             scene_path: PathBuf::new(),
             destination: PathBuf::new(),
             kind: ExportKind::Gif,
-            engine: "eevee".into(),
+            schema_version: 2,
+            selection: Default::default(),
             size: 960,
-            samples: 32,
             frame_count: 80,
             frame_rate: crate::animation::DEFAULT_FRAME_RATE,
             transparent: false,
@@ -398,7 +474,10 @@ fn reset_incompatible_frames(request: &mut Value, job_dir: &Path) -> Result<()> 
 /// The enclosing native recipe binds geometry, scene, renderer scripts and the
 /// Blender executable. Check the worker metadata and decode every PNG before
 /// bypassing Blender; malformed or partial entries use its verified retry path.
-fn inspect_retained_frames(request: &Value, cancel: &AtomicBool) -> Result<(Option<Value>, u32)> {
+pub(crate) fn inspect_retained_frames(
+    request: &Value,
+    cancel: &AtomicBool,
+) -> Result<(Option<Value>, u32)> {
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -611,11 +690,12 @@ pub(crate) fn run_export_with_budget(
             return Err("choose a fixed build stage or progressive build-up, not both".into());
         }
     }
-    if !(16..=8000).contains(&request.size)
-        || !(1..=4096).contains(&request.samples)
-        || !(1..=10000).contains(&request.frame_count)
-        || !matches!(request.engine.as_str(), "eevee" | "cycles")
-    {
+    crate::render::requirements::validate_requirements(
+        tools,
+        &crate::render::requirements::requirements_for(&request.selection, request.kind, false),
+    )?;
+    crate::render::backends::blender::validate_legacy_execution(&request.selection)?;
+    if !(16..=8000).contains(&request.size) || !(1..=10000).contains(&request.frame_count) {
         return Err("invalid export settings".into());
     }
     if !request.job_dir.is_absolute()
@@ -691,7 +771,7 @@ pub(crate) fn run_export_with_budget(
     } else {
         1
     };
-    let mut recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":rendered_count,"frame_rate":if animated{Some(request.frame_rate)}else{None},"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"turntable_timing":request.turntable_timing,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"frame_pipeline_hash":hash(&crate::render::worker::renderer_script("frame_pipeline.py"))?,"blender_hash":hash(&tools.blender)?});
+    let mut recipe = json!({"schema_version":2,"scene_hash":hash(&request.scene_path)?,"mesh_hash":hash(&mesh)?,"engine":request.selection.backend.legacy_blender_engine()?,"size":request.size,"samples":request.selection.blender_samples()?,"frame_count":rendered_count,"frame_rate":if animated{Some(request.frame_rate)}else{None},"transparent":request.transparent&&!animated,"section":request.section,"layout":request.layout,"animation":request.animation,"timeline":request.timeline,"turntable_timing":request.turntable_timing,"build_stage":request.build_stage,"start_angle_degrees":request.start_angle_degrees,"kind":if animated{"animation"}else if request.kind==ExportKind::Diagram{"diagram"}else{"still"},"worker_hash":hash(&crate::render::worker::renderer_script("worker.py"))?,"scene_script_hash":hash(&crate::render::worker::renderer_script("scene.py"))?,"frame_pipeline_hash":hash(&crate::render::worker::renderer_script("frame_pipeline.py"))?,"blender_hash":hash(&tools.blender)?});
     if request.kind == ExportKind::Diagram {
         recipe["diagram_recipe"] = json!({"version":2,"views":["TOP","ISO","FRONT","RIGHT"],"dimension":"largest_visible_projected_extent_mm","framing_padding":1.4});
     }
@@ -773,7 +853,7 @@ pub(crate) fn run_export_with_budget(
                 total: count,
                 stage: format!(
                     "Rendering with {}",
-                    if request.engine == "eevee" {
+                    if request.selection.backend == crate::render::BackendId::BlenderEevee {
                         "Eevee"
                     } else {
                         "Cycles / OptiX"
@@ -782,7 +862,7 @@ pub(crate) fn run_export_with_budget(
             });
             let complete = render_or_reuse(
                 worker,
-                json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"samples":request.samples,"frame_count":count,"frame_rate":request.frame_rate,"seconds_per_turn":request.turntable_timing.map(|timing| timing.seconds_per_turn),"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),
+                json!({"request_id":format!("export-{}",&fingerprint[..20]),"scene_revision":1,"kind":"render","scene_path":request.scene_path,"output_dir":frames,"mode":if animation{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.selection.backend.legacy_blender_engine()?,"size":request.size,"samples":request.selection.blender_samples()?,"frame_count":count,"frame_rate":request.frame_rate,"seconds_per_turn":request.turntable_timing.map(|timing| timing.seconds_per_turn),"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animation,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),
                 &storage,
                 |event| {
                     if event["kind"] == "frame" {
@@ -797,7 +877,9 @@ pub(crate) fn run_export_with_budget(
                             } else if event["payload"]["reused"] == true {
                                 "Reusing verified frames"
                             } else {
-                                if request.engine == "eevee" {
+                                if request.selection.backend
+                                    == crate::render::BackendId::BlenderEevee
+                                {
                                     "Rendering with Eevee"
                                 } else {
                                     "Rendering with Cycles / OptiX"
@@ -952,7 +1034,7 @@ fn render_section(
             .map(|_| directory.join("frame-states.json"));
         let complete = render_or_reuse(
             worker,
-            json!({"request_id":format!("section-{panel}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":if animated{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.engine,"size":request.size,"width":request.size,"height":panel_height,"samples":request.samples,"frame_count":count,"frame_rate":request.frame_rate,"seconds_per_turn":request.turntable_timing.map(|timing| timing.seconds_per_turn),"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animated,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),
+            json!({"request_id":format!("section-{panel}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":if animated{if request.animation==AnimationMode::BuildUp{"buildup"}else{"turntable"}}else{"still"},"engine":request.selection.backend.legacy_blender_engine()?,"size":request.size,"width":request.size,"height":panel_height,"samples":request.selection.blender_samples()?,"frame_count":count,"frame_rate":request.frame_rate,"seconds_per_turn":request.turntable_timing.map(|timing| timing.seconds_per_turn),"build_stage":request.build_stage,"frame_states_path":frame_states_path,"start_angle_degrees":request.start_angle_degrees,"transparent":request.transparent&&!animated,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),
             storage,
             |event| {
                 if event["kind"] == "frame" {
@@ -1169,7 +1251,7 @@ mod retained_frame_tests {
     }
 }
 
-fn preflight_storage(directory: &Path, estimated: u64) -> Result<()> {
+pub(crate) fn preflight_storage(directory: &Path, estimated: u64) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -1391,7 +1473,7 @@ fn diagram_point_measurements(
     Ok(output)
 }
 
-fn diagram_stage_visibility(
+pub(crate) fn diagram_stage_visibility(
     mesh: &crate::mesh::Mesh,
     scene: &Value,
     stage: Option<BuildStage>,
@@ -1436,7 +1518,7 @@ fn diagram_stage_visibility(
     Ok(Some(visible))
 }
 
-fn diagram_panel_scene(scene: &Value, camera: &Value) -> Value {
+pub(crate) fn diagram_panel_scene(scene: &Value, camera: &Value) -> Value {
     let mut panel = scene.clone();
     panel["display_rotation_degrees"] = json!([0., 0., 0.]);
     panel["camera"] = camera.clone();
@@ -1515,7 +1597,7 @@ fn render_diagram(
         });
         render_or_reuse(
             worker,
-            json!({"request_id":format!("diagram-{index}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":"still","engine":request.engine,"size":request.size,"width":layout.panel_width,"height":layout.panel_height,"samples":request.samples,"frame_count":1,"build_stage":request.build_stage,"transparent":true,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),
+            json!({"request_id":format!("diagram-{index}"),"scene_revision":1,"kind":"render","scene_path":scene_path,"output_dir":frames,"mode":"still","engine":request.selection.backend.legacy_blender_engine()?,"size":request.size,"width":layout.panel_width,"height":layout.panel_height,"samples":request.selection.blender_samples()?,"frame_count":1,"build_stage":request.build_stage,"transparent":true,"reuse_verified_frames":frames.join("render-manifest.json").exists()}),
             storage,
             |e| {
                 if e["kind"] == "log"
@@ -1601,7 +1683,11 @@ fn dimension_line(image: &mut image::RgbaImage, a: [i32; 2], b: [i32; 2]) {
     }
 }
 
-fn draw_dimension(panel: &mut image::RgbaImage, dimension: DiagramDimension, span_mm: f64) {
+pub(crate) fn draw_dimension(
+    panel: &mut image::RgbaImage,
+    dimension: DiagramDimension,
+    span_mm: f64,
+) {
     let pixels_per_mm = panel.height() as f64 / span_mm;
     let left = (panel.width() as f64 * 0.5 + dimension.min_mm[0] * pixels_per_mm).round() as i32;
     let right = (panel.width() as f64 * 0.5 + dimension.max_mm[0] * pixels_per_mm).round() as i32;
@@ -1667,7 +1753,14 @@ fn draw_dimension(panel: &mut image::RgbaImage, dimension: DiagramDimension, spa
     image::imageops::overlay(panel, &label, i64::from(x), i64::from(y));
 }
 
-fn draw_label(image: &mut image::RgbaImage, text: &str, x: u32, y: u32, width: u32, height: u32) {
+pub(crate) fn draw_label(
+    image: &mut image::RgbaImage,
+    text: &str,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
     let scale = (height / 11).max(1);
     let text_width = text.len() as u32 * 6 * scale;
     let left = x + (width.saturating_sub(text_width)) / 2;

@@ -7,6 +7,7 @@ pub(super) struct Panes {
     pub playback: Option<egui::Rect>,
 }
 
+#[cfg(test)]
 pub(super) fn layout(
     ui: &mut egui::Ui,
     preview_title: &str,
@@ -14,8 +15,26 @@ pub(super) fn layout(
     image_size: egui::Vec2,
     animated: bool,
 ) -> Panes {
+    layout_renderer(
+        ui,
+        "Native inspection",
+        preview_title,
+        status,
+        image_size,
+        animated,
+    )
+}
+
+pub(super) fn layout_renderer(
+    ui: &mut egui::Ui,
+    native_title: &str,
+    preview_title: &str,
+    status: Option<&str>,
+    image_size: egui::Vec2,
+    animated: bool,
+) -> Panes {
     ui.columns(2, |columns| {
-        columns[0].heading("Native inspection");
+        columns[0].heading(native_title);
         columns[1].horizontal_wrapped(|ui| {
             ui.heading(preview_title);
             if let Some(status) = status {

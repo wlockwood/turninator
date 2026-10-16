@@ -79,7 +79,7 @@ fn prove_repeated_turns(frame_rate: u32) {
         kind: ExportKind::Gif,
         size: 128,
         frame_rate,
-        samples: 8,
+        selection: turninator::render::RenderSelection::from_legacy("eevee", 8).unwrap(),
         turntable_timing: Some(TurntableTiming {
             seconds_per_turn: 0.2,
             duration_seconds: 0.6,

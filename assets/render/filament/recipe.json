@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "recipe": "turninator-filament-native-v1",
+  "sdk": "1.78.0+c1dc4e444784850d6dc891a1fb38747c30b85463",
+  "api": "Vulkan",
+  "units": "build millimetres to SDK metres, right-handed Z up",
+  "quality": {
+    "aa": {
+      "low": {"msaa_samples": 1, "fxaa": false, "custom_resolve": false},
+      "medium": {"msaa_samples": 4, "fxaa": false, "custom_resolve": false},
+      "high": {"msaa_samples": 4, "fxaa": true, "custom_resolve": false}
+    },
+    "shadows": {
+      "low": {"type": "PCF", "map_size": 1024, "sao_quality": "LOW"},
+      "medium": {"type": "PCF", "map_size": 2048, "sao_quality": "MEDIUM"},
+      "high": {"type": "PCF", "map_size": 4096, "sao_quality": "HIGH"}
+    },
+    "taa": false,
+    "dithering": false,
+    "history": "fresh View per frame, no temporal accumulation",
+    "sao": {"resolution": 1, "radius_m": 0.002, "bias_m": 0.00001}
+  },
+  "color": {"tone_map": "filament-agx-v1", "look": "NONE", "exposure_ev": 0, "camera_exposure": 1, "color_grading_quality": "HIGH", "output": "Rec709-sRGB-D65 straight RGBA8 top-first"},
+  "studio": {
+    "source": "studio.py analytic HDR, no external photography",
+    "source_dimensions": [256, 128],
+    "prefilter_tool": "pinned SDK cmgen",
+    "prefilter_arguments": ["--format=ktx", "--size=64", "--ibl-samples=256", "--ibl-min-lod-size=1", "--sh=3", "--sh-irradiance"],
+    "reflection_faces": 6,
+    "reflection_mips": 7,
+    "reflection_format": "linear R11F_G11F_B10F",
+    "sh_coefficients": 9,
+    "environment_intensity": {"light": 0.35, "dark": 0.12, "diagram": 0.35},
+    "directional_intensities": [5.5, 1.8, 4.0],
+    "multiple_directional_lights": true,
+    "shadow_casting_light": "dominant key",
+    "floor": "fixed full-source bounds; excluded for transparent output and diagram"
+  },
+  "layers": {"origin": "fixed reference_bounds_mm.min.z", "position": "preserved build mm after pose", "original_only": true, "fade_pixels": [2, 4], "diagonal_factor": 1.4142135623730951},
+  "resin": {"support": "approximate", "reason": "Screen-space refraction, fixed smallest full-bounds optical thickness, scattering as isotropic extinction; no offscreen or multiple volume transport."},
+  "resource_bounds": {"gpu_bytes_per_pixel": 160, "gpu_msaa_bytes_per_pixel_sample": 12, "gpu_shadow_bytes_per_texel": 8, "retained_target_configurations": 3, "gpu_baseline_mib": 64, "gpu_geometry_overhead_mib": 16, "host_output_bytes_per_pixel": 12, "host_baseline_mib": 256, "host_snapshot_bytes_per_vertex": 72, "host_snapshot_bytes_per_triangle": 32, "host_realization_staging_bytes_per_vertex": 88, "host_realization_staging_bytes_per_triangle": 24, "host_driver_backing": "reserve current and retained GPU allocation bound again as host commitment; compose live upload staging before allocation"},
+  "unqualified": "MSAA8 fails this pinned SDK/device readback path despite combined sampled HDR/depth support mask15; not attempted by this recipe. Vulkan frame-buffer-fetch MSAA is false, so custom resolve is unavailable."
+}

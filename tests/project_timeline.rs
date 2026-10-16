@@ -29,16 +29,24 @@ fn fixture() -> (PathBuf, Value) {
     let source = root.join("part.stl");
     fs::write(&source, b"original source").unwrap();
     let project = ProjectFile {
-        schema_version: 1,
+        schema_version: 2,
         source_path: source,
         source_hash: format!("{:x}", Sha256::digest(b"original source")),
         scene: SceneSettings::default(),
         camera: OrbitCamera::default(),
         export_size: 960,
-        engine: "eevee".into(),
+        renderers: Default::default(),
         output_options: Default::default(),
     };
-    (root, serde_json::to_value(project).unwrap())
+    let mut value = serde_json::to_value(project).unwrap();
+    // Keep the original legacy fixture: the public model is now schema 2.
+    value["schema_version"] = json!(1);
+    value.as_object_mut().unwrap().remove("renderers");
+    value["engine"] = json!("eevee");
+    value["output_options"]["samples"] = json!(32);
+    value["output_options"]["still_engine"] = json!("cycles");
+    value["output_options"]["still_samples"] = json!(64);
+    (root, value)
 }
 
 fn timeline() -> Value {
@@ -169,7 +177,10 @@ fn project_restores_selected_output_without_losing_hidden_preferences() {
     let mut project: ProjectFile = serde_json::from_value(value.clone()).unwrap();
     project.output_options.video_codec = VideoCodec::Av1;
     project.output_options.transparent = true;
-    project.output_options.still_samples = 128;
+    project.renderers.still.quality = turninator::render::BackendQuality::Cycles {
+        samples: 128,
+        denoise: true,
+    };
     for format in [
         OutputFormat::Gif,
         OutputFormat::Png,
@@ -182,7 +193,7 @@ fn project_restores_selected_output_without_losing_hidden_preferences() {
         assert_eq!(restored.output_options.output_format, format);
         assert_eq!(restored.output_options.video_codec, VideoCodec::Av1);
         assert!(restored.output_options.transparent);
-        assert_eq!(restored.output_options.still_samples, 128);
+        assert_eq!(restored.renderers.still.quality.samples(), Some(128));
     }
     let mut legacy = value;
     legacy["output_options"]

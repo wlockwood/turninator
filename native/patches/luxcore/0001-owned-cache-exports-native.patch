@@ -1,0 +1,516 @@
+--- a/include/luxrays/utils/cudacache.h
++++ b/include/luxrays/utils/cudacache.h
+@@ -23,6 +23,7 @@
+ #include <filesystem>
+ 
+ #include "luxrays/utils/cuda.h"
++#include "luxrays/utils/owned_ptx_cache.h"
+ 
+ #if !defined(LUXRAYS_DISABLE_CUDA)
+ 
+@@ -45,7 +46,8 @@
+ // WARNING: this class is not thread safe !
+ class cudaKernelPersistentCache : public cudaKernelCache {
+ public:
+-	cudaKernelPersistentCache(const std::string &applicationName);
++	cudaKernelPersistentCache(const std::string &applicationName, const std::string &root,
++        const std::string &compilerIdentity, const std::string &sdkIdentity);
+ 	~cudaKernelPersistentCache();
+ 
+ 	bool CompilePTX(const std::vector<std::string> &kernelsParameters,
+@@ -56,13 +58,14 @@
+ 		const std::string &kernelSource, const std::string &programName,
+ 		bool *cached, std::string *error);
+ 
+-	static std::filesystem::path GetCacheDir(const std::string &applicationName);
++	std::string GetCacheDir() const { const auto u = ownedCache.Directory().u8string(); return std::string(u.begin(), u.end()); }
+ 
+ 	std::string GetApplicationName() {
+ 		return appName;
+ 	}
+ private:
+ 	std::string appName;
++    turninator_luxcore::OwnedPtxCache ownedCache;
+ };
+ 
+ }
+--- a/src/luxrays/devices/cudadevice.cpp
++++ b/src/luxrays/devices/cudadevice.cpp
+@@ -153,7 +153,10 @@
+ 		cudaContext(nullptr), optixContext(nullptr) {
+ 	deviceName = (desc->GetName() + " CUDAIntersect").c_str();
+ 
+-	kernelCache = new cudaKernelPersistentCache("LUXRAYS_" LUXRAYS_VERSION);
++	kernelCache = new cudaKernelPersistentCache("LUXRAYS_" LUXRAYS_VERSION,
++        context.GetConfig().Get(Property("context.cuda.cache.directory")(" ")).Get<string>(),
++        context.GetConfig().Get(Property("context.cuda.cache.compiler_identity")(" ")).Get<string>(),
++        context.GetConfig().Get(Property("context.cuda.cache.sdk_identity")(" ")).Get<string>());
+ 
+ 	CHECK_CUDA_ERROR(cuCtxCreate(&cudaContext, CU_CTX_SCHED_YIELD, deviceDesc->GetCUDADevice()));
+ 
+@@ -246,7 +249,7 @@
+ 
+ 	LR_LOG(deviceContext, "[" << programName << "] Compiler options: " << oclKernelPersistentCache::ToOptsString(cudaProgramParameters));
+ 	LR_LOG(deviceContext, "[" << programName << "] Compiling kernels");
+-	LR_LOG(deviceContext, "[" << programName << "] Cache directory: " << kernelCache->GetCacheDir(kernelCache->GetApplicationName()));
++	LR_LOG(deviceContext, "[" << programName << "] Cache directory: " << kernelCache->GetCacheDir());
+ 
+ 	const string cudaProgramSource = GetKernelSource(programSource);
+ 
+--- a/src/luxrays/utils/cuda.cpp
++++ b/src/luxrays/utils/cuda.cpp
+@@ -64,21 +64,14 @@
+ // cudaKernelCache
+ //------------------------------------------------------------------------------
+ 
+-bool cudaKernelCache::ForcedCompilePTX(const vector<string> &kernelsParameters, const string &kernelSource,
+-		 const string &programName, char **ptx, size_t *ptxSize, string *error) {
+-	if (error)
+-		*error = "";
+-
+-	nvrtcProgram prog;
+-	CHECK_NVRTC_ERROR(nvrtcCreateProgram(&prog, kernelSource.c_str(), programName.c_str(), 0, nullptr, nullptr));
+-  
+-	vector<const char *> cudaOpts;
++static vector<string> EffectiveCudaOptions(const vector<string> &kernelsParameters) {
++	vector<string> cudaOpts;
+ 	cudaOpts.push_back("--device-as-default-execution-space");
+ 	//cudaOpts.push_back("--disable-warnings");
+        
+         // Set target architecture, based on current device's capability
+         string targetArch = "--gpu-architecture=compute_" + GetCuda10Architecture();
+-        cudaOpts.push_back(targetArch.c_str());
++        cudaOpts.push_back(targetArch);
+ 
+ 	// To display warning numbers
+ 	cudaOpts.push_back("-Xcudafe");
+@@ -109,7 +102,23 @@
+ 	//cudaOpts.push_back("--generate-line-info");
+ 
+ 	for	(auto const &p : kernelsParameters)
+-		cudaOpts.push_back(p.c_str());
++		cudaOpts.push_back(p);
++
++    return cudaOpts;
++}
++
++bool cudaKernelCache::ForcedCompilePTX(const vector<string> &kernelsParameters, const string &kernelSource,
++		 const string &programName, char **ptx, size_t *ptxSize, string *error) {
++	if (error)
++		*error = "";
++
++	nvrtcProgram prog;
++	CHECK_NVRTC_ERROR(nvrtcCreateProgram(&prog, kernelSource.c_str(), programName.c_str(), 0, nullptr, nullptr));
++    struct ProgramGuard { nvrtcProgram *p; ~ProgramGuard() { if (*p) nvrtcDestroyProgram(p); } } programGuard{&prog};
++
++    const auto options = EffectiveCudaOptions(kernelsParameters);
++	vector<const char *> cudaOpts;
++    for (const auto &option : options) cudaOpts.push_back(option.c_str());
+ 
+ 	// For some debug
+ 	//for (uint i = 0; i < cudaOpts.size(); ++i)
+@@ -124,17 +133,19 @@
+ 	auto log = std::make_unique<char[]>(logSize);
+ 	CHECK_NVRTC_ERROR(nvrtcGetProgramLog(prog, log.get()));
+ 
+-	*error = string(log.get());
++	if (error) *error = string(log.get());
+ 
+ 	if (compilationResult != NVRTC_SUCCESS)
+ 		return false;
+ 
+ 	// Obtain PTX from the program.
+ 	CHECK_NVRTC_ERROR(nvrtcGetPTXSize(prog, ptxSize));
+-	*ptx = new char[*ptxSize];
+-	CHECK_NVRTC_ERROR(nvrtcGetPTX(prog, *ptx));
+-
+-	CHECK_NVRTC_ERROR(nvrtcDestroyProgram(&prog));
++	if (!*ptxSize || *ptxSize > turninator_luxcore::OwnedPtxCache::MaxBytes)
++        throw runtime_error("CUDA compiler PTX exceeds cache bound");
++    auto data = std::make_unique<char[]>(*ptxSize);
++    CHECK_NVRTC_ERROR(nvrtcGetPTX(prog, data.get()));
++    *ptx = data.release();
++
+ 
+ 	return true;
+ }
+@@ -143,113 +154,41 @@
+ // cudaKernelPersistentCache
+ //------------------------------------------------------------------------------
+ 
+-std::filesystem::path cudaKernelPersistentCache::GetCacheDir(const string &applicationName) {
+-	return luxrays::GetCacheDir() / "cuda_kernel_cache" / SanitizeFileName(applicationName);
+-}
+-
+-cudaKernelPersistentCache::cudaKernelPersistentCache(const string &applicationName) {
+-	appName = applicationName;
+-
+-	// Crate the cache directory
+-	std::filesystem::create_directories(GetCacheDir(appName));
+-}
+-
+-cudaKernelPersistentCache::~cudaKernelPersistentCache() {
+-}
++cudaKernelPersistentCache::cudaKernelPersistentCache(const string &applicationName,
++        const string &root, const string &compilerIdentity, const string &sdkIdentity)
++    : appName(applicationName), ownedCache(root, compilerIdentity, sdkIdentity) { }
++
++cudaKernelPersistentCache::~cudaKernelPersistentCache() { }
+ 
+ bool cudaKernelPersistentCache::CompilePTX(const vector<string> &kernelsParameters,
+-		const string &kernelSource, const string &programName,
+-		char **ptx, size_t *ptxSize, bool *cached, string *error) {
+-	if (error)
+-		*error = "";
+-
+-	// Check if the kernel is available in the cache
+-
+-	const string kernelName =
+-			oclKernelPersistentCache::HashString(oclKernelPersistentCache::ToOptsString(kernelsParameters))
+-			+ "-" +
+-			oclKernelPersistentCache::HashString(kernelSource) +
+-                        "_compute_" + GetCuda10Architecture() + ".ptx";
+-	const std::filesystem::path dirPath = GetCacheDir(appName);
+-	const std::filesystem::path filePath = dirPath / kernelName;
+-	const string fileName = filePath.generic_string();
+-
+-	*cached = false;
+-	if (!std::filesystem::exists(filePath)) {
+-		// It isn't available, compile the source
+-
+-		// Create the file only if the binaries include something
+-		if (ForcedCompilePTX(kernelsParameters, kernelSource, programName, ptx, ptxSize, error)) {
+-			// Add the kernel to the cache
+-			std::filesystem::create_directories(dirPath);
+-
+-			// The use of std::filesystem::path is required for UNICODE support: fileName
+-			// is supposed to be UTF-8 encoded.
+-			std::ofstream file(std::filesystem::path(fileName),
+-					std::ofstream::out |
+-					std::ofstream::binary |
+-					std::ofstream::trunc);
+-
+-			// Write the binary hash
+-			const u_int hashBin = oclKernelPersistentCache::HashBin(*ptx, *ptxSize);
+-			file.write((char *)&hashBin, sizeof(int));
+-
+-			file.write(*ptx, *ptxSize);
+-			// Check for errors
+-			char buf[512];
+-			if (file.fail()) {
+-				sprintf(buf, "Unable to write kernel file cache %s", fileName.c_str());
+-				throw runtime_error(buf);
+-			}
+-
+-			file.close();
+-
+-			return true;
+-		} else
+-			return false;
+-	} else {
+-		const size_t fileSize = std::filesystem::file_size(filePath);
+-
+-		if (fileSize > 4) {
+-			*ptxSize = fileSize - 4;
+-
+-			*ptx = new char[*ptxSize];
+-
+-			// The use of std::filesystem::path is required for UNICODE support: fileName
+-			// is supposed to be UTF-8 encoded.
+-			std::ifstream file(std::filesystem::path(fileName),
+-					std::ifstream::in | std::ifstream::binary);
+-
+-			// Read the binary hash
+-			u_int hashBin;
+-			file.read((char *)&hashBin, sizeof(int));
+-
+-			file.read(*ptx, *ptxSize);
+-			// Check for errors
+-			char buf[512];
+-			if (file.fail()) {
+-				sprintf(buf, "Unable to read kernel file cache %s", fileName.c_str());
+-				throw runtime_error(buf);
+-			}
+-
+-			file.close();
+-
+-			// Check the binary hash
+-			if (hashBin != oclKernelPersistentCache::HashBin(*ptx, *ptxSize)) {
+-				// Something wrong in the file, remove the file and retry
+-				std::filesystem::remove(filePath);
+-				return CompilePTX(kernelsParameters, kernelSource, programName, ptx, ptxSize, cached, error);
+-			} else {
+-				*cached = true;
+-
+-				return true;
+-			}
+-		} else {
+-			// Something wrong in the file, remove the file and retry
+-			std::filesystem::remove(filePath);
+-			return CompilePTX(kernelsParameters, kernelSource, programName, ptx, ptxSize, cached, error);
+-		}
+-	}
++        const string &kernelSource, const string &programName,
++        char **ptx, size_t *ptxSize, bool *cached, string *error) {
++    if (error) *error = "";
++    *ptx = nullptr; *ptxSize = 0; *cached = false;
++    const auto effectiveOptions = EffectiveCudaOptions(kernelsParameters);
++    const string architecture = GetCuda10Architecture();
++    const string key = turninator_luxcore::OwnedPtxCache::Key(
++        effectiveOptions, kernelSource, programName, architecture);
++    cout << "[Owned CUDA cache] key=" << key << " program=" << programName
++         << " compute=" << architecture << " source_sha256="
++         << turninator_luxcore::OwnedPtxCache::Sha256(kernelSource.data(), kernelSource.size()) << endl;
++    cout << "[Owned CUDA cache] effective_options";
++    for (const auto &option : effectiveOptions) cout << " [" << option << "]";
++    cout << endl;
++    string stored;
++    if (ownedCache.Load(key, stored)) {
++        auto data = std::make_unique<char[]>(stored.size());
++        memcpy(data.get(), stored.data(), stored.size());
++        *ptxSize = stored.size(); *ptx = data.release(); *cached = true;
++        return true;
++    }
++    if (!ForcedCompilePTX(kernelsParameters, kernelSource, programName, ptx, ptxSize, error))
++        return false;
++    // Keep allocation ownership local until publication succeeds, including IO errors.
++    std::unique_ptr<char[]> data(*ptx); *ptx = nullptr;
++    ownedCache.Store(key, data.get(), *ptxSize);
++    *ptx = data.release();
++    return true;
+ }
+ 
+ CUmodule cudaKernelPersistentCache::Compile(const vector<string> &kernelsParameters,
+@@ -258,10 +197,10 @@
+ 	char *ptx;
+ 	size_t ptxSize;
+ 	if (CompilePTX(kernelsParameters, kernelSource, programName, &ptx, &ptxSize, cached, error)) {
++		std::unique_ptr<char[]> data(ptx);
+ 		CUmodule module;
+ 		CHECK_CUDA_ERROR(cuModuleLoadDataEx(&module, ptx, 0, 0, 0));
+ 
+-		delete[] ptx;
+ 
+ 		return module;
+ 	} else
+--- a/src/slg/engines/pathoclbase/pathoclbase.cpp
++++ b/src/slg/engines/pathoclbase/pathoclbase.cpp
+@@ -235,36 +235,10 @@
+ 	return oclKernelPersistentCache::HashString(ssParams.str()) + "-" + oclKernelPersistentCache::HashString(kernelSource);
+ }
+ 
+-void PathOCLBaseRenderEngine::SetCachedKernels(const RenderConfig &renderConfig) {
+-	const string kernelHash = GetCachedKernelsHash(renderConfig);
+-
+-	const std::filesystem::path dirPath = oclKernelPersistentCache::GetCacheDir("LUXCORE_" LUXCORE_VERSION);
+-	const std::filesystem::path filePath = dirPath / (kernelHash + ".ck");
+-	const string fileName = filePath.generic_string();
+-
+-	if (!std::filesystem::exists(filePath)) {
+-		// Create an empty file
+-		std::filesystem::create_directories(dirPath);
+-
+-		// The use of std::filesystem::path is required for UNICODE support: fileName
+-		// is supposed to be UTF-8 encoded.
+-		std::ofstream file(std::filesystem::path(fileName),
+-				std::ofstream::out |
+-				std::ofstream::binary |
+-				std::ofstream::trunc);
+-
+-		file.close();
+-	}
+-}
+-
+-bool PathOCLBaseRenderEngine::HasCachedKernels(const RenderConfig &renderConfig) {
+-	const string kernelHash = GetCachedKernelsHash(renderConfig);
+-
+-	const std::filesystem::path dirPath = oclKernelPersistentCache::GetCacheDir("LUXCORE_" LUXCORE_VERSION);
+-	const std::filesystem::path filePath = dirPath / (kernelHash + ".ck");
+-
+-	return std::filesystem::exists(filePath);
+-}
++// Turninator qualified SDK: disable the optional global .ck readiness hint.
++// Actual per-context CUDA PTX caching remains enabled and provenance checked.
++void PathOCLBaseRenderEngine::SetCachedKernels(const RenderConfig &) { }
++bool PathOCLBaseRenderEngine::HasCachedKernels(const RenderConfig &) { return false; }
+ 
+ void PathOCLBaseRenderEngine::StartLockLess() {
+ 	auto& cfg = renderConfig.GetConfig();
+--- a/src/slg/renderconfig.cpp
++++ b/src/slg/renderconfig.cpp
+@@ -418,6 +418,10 @@
+ 
+ 	// LuxRays context
+ 	props << cfg.Get(Property("context.verbose")(true));
++    // Preserve only the private cache fields through normalized context forwarding.
++    for (const char *name : {"context.cuda.cache.directory",
++            "context.cuda.cache.compiler_identity", "context.cuda.cache.sdk_identity"})
++        if (cfg.IsDefined(name)) props << cfg.Get(name);
+ 
+ 	// Ray intersection accelerators
+ 	props << cfg.Get(Property("accelerator.type")("AUTO"));
+--- a/include/luxrays/core/geometry/matrix4x4.h
++++ b/include/luxrays/core/geometry/matrix4x4.h
+@@ -20,6 +20,7 @@
+ #define _LUXRAYS_MATRIX4X4_H
+ 
+ #include <ostream>
++#include "luxrays/utils/exportdefs.h"
+ 
+ #include "luxrays/utils/strutils.h"
+ #include "luxrays/utils/serializationutils.h"
+@@ -31,7 +32,7 @@
+ #include "luxrays/core/geometry/matrix4x4_types.cl"
+ }
+ 
+-class Matrix4x4 {
++class CPP_API Matrix4x4 {
+ public:
+ 	// Matrix4x4 Public Methods
+ 	Matrix4x4() {
+--- a/src/luxrays/CMakeLists.txt
++++ b/src/luxrays/CMakeLists.txt
+@@ -252,3 +252,11 @@
+ ################################################################################
+ 
+ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "../lib")
++
++# Narrow utility exports for the shared Windows SDK, retaining the pinned CRT.
++if(MSVC)
++  set_source_files_properties(
++    ${PROJECT_SOURCE_DIR}/src/luxrays/utils/properties.cpp
++    ${PROJECT_SOURCE_DIR}/src/luxrays/core/geometry/matrix4x4.cpp
++    PROPERTIES COMPILE_DEFINITIONS "LUXCORE_DLL;CPP_API_EXPORTS")
++endif()
+--- a/src/luxcore/CMakeLists.txt
++++ b/src/luxcore/CMakeLists.txt
+@@ -237,3 +237,7 @@
+ ################################################################################
+ 
+ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "../lib")
++
++if(MSVC)
++  target_link_libraries(luxcore PRIVATE bcrypt)
++endif()
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -78,6 +78,7 @@
+ ENDIF()
+ 
+ # Options
++OPTION(TURNINATOR_NATIVE_ONLY "Build qualified native SDK only" OFF)
+ OPTION(LUXCORE_DEMOS "Enable to build LuxCore demos" OFF)
+ OPTION(LUXCORE_TESTS "Enable to build tests" OFF)
+ OPTION(LUXRAYS_ENABLE_OPENCL "Enable to use OpenCL" ON)
+@@ -210,8 +211,12 @@
+ find_package(FLEX REQUIRED)
+ 
+ # Additional dependencies for pyluxcore
+-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+-find_package(pybind11 CONFIG REQUIRED)
++if(TURNINATOR_NATIVE_ONLY)
++  find_package(Python COMPONENTS Interpreter REQUIRED)
++else()
++  find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
++  find_package(pybind11 CONFIG REQUIRED)
++endif()
+ 
+ # Additional dependencies for luxcoreui
+ find_package(imgui)
+@@ -325,7 +330,9 @@
+ add_subdirectory(src/luxrays)
+ add_subdirectory(src/slg)
+ add_subdirectory(src/luxcore)
+-add_subdirectory(src/pyluxcore)
++if(NOT TURNINATOR_NATIVE_ONLY)
++  add_subdirectory(src/pyluxcore)
++endif()
+ 
+ ################################################################################
+ #
+@@ -345,9 +352,13 @@
+   endif()
+ endif()
+ 
+-add_subdirectory(samples/luxcoreconsole)
+-
+-add_subdirectory(samples/luxcoreui)
++if(NOT TURNINATOR_NATIVE_ONLY)
++  add_subdirectory(samples/luxcoreconsole)
++endif()
++
++if(NOT TURNINATOR_NATIVE_ONLY)
++  add_subdirectory(samples/luxcoreui)
++endif()
+ 
+ 
+ ################################################################################
+--- a/deps/cuew/src/cuew.cpp
++++ b/deps/cuew/src/cuew.cpp
+@@ -69,10 +69,16 @@
+ struct Libs {
+   DynamicLibrary cuda_lib = nullptr;
+   DynamicLibrary nvrtc_lib = nullptr;
++#ifdef _WIN32
++  DynamicLibrary nvrtc_builtins_lib = nullptr;
++#endif
+ 
+   ~Libs() {
+     if (cuda_lib) dynamic_library_close(cuda_lib);
+     if (nvrtc_lib) dynamic_library_close(nvrtc_lib);
++#ifdef _WIN32
++    if (nvrtc_builtins_lib) dynamic_library_close(nvrtc_builtins_lib);
++#endif
+   }
+ 
+ };
+@@ -620,16 +626,7 @@
+ static int cuewNvrtcInit(void) {
+   /* Library paths. */
+ #ifdef _WIN32
+-  /* Expected in c:/windows/system or similar, no path needed. */
+-  const char *nvrtc_paths[] = {
+-    "nvrtc64_130_0.dll",
+-    "nvrtc64_120_0.dll",
+-    "nvrtc64_101_0.dll",
+-    "nvrtc64_100_0.dll",
+-    "nvrtc64_91.dll",
+-    "nvrtc64_90.dll",
+-    "nvrtc64_80.dll",
+-    NULL};
++  // The caller must preload and hash-verify the qualified compiler pair.
+ #elif defined(__APPLE__)
+   /* Default installation path. */
+   const char *nvrtc_paths[] = {"@executable_path/libnvrtc.dylib", "../Resources/libs/libnvrtc.dylib", "@loader_path/libnvrtc.dylib", NULL};
+@@ -656,7 +653,17 @@
+   initialized = 1;
+ 
+   /* Load library. */
++#ifdef _WIN32
++  // Never search PATH or silently select another installed CUDA toolkit.
++  // References remain owned until SDK teardown; names/version are not hash attestation.
++  if (!GetModuleHandleExW(0, L"nvrtc64_120_0.dll", &nvrtc_lib) ||
++      !GetModuleHandleExW(0, L"nvrtc-builtins64_128.dll", &libs.nvrtc_builtins_lib)) {
++    result = CUEW_ERROR_OPEN_FAILED;
++    return result;
++  }
++#else
+   nvrtc_lib = dynamic_library_open_find(nvrtc_paths);
++#endif
+ 
+   if (nvrtc_lib == NULL) {
+     result = CUEW_ERROR_OPEN_FAILED;
+@@ -665,6 +672,13 @@
+ 
+   NVRTC_LIBRARY_FIND(nvrtcGetErrorString);
+   NVRTC_LIBRARY_FIND(nvrtcVersion);
++#ifdef _WIN32
++  int major = 0, minor = 0;
++  if (!nvrtcVersion || nvrtcVersion(&major, &minor) != NVRTC_SUCCESS || major != 12 || minor != 8) {
++    result = CUEW_ERROR_OPEN_FAILED;
++    return result;
++  }
++#endif
+   NVRTC_LIBRARY_FIND(nvrtcCreateProgram);
+   NVRTC_LIBRARY_FIND(nvrtcDestroyProgram);
+   NVRTC_LIBRARY_FIND(nvrtcCompileProgram);

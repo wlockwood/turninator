@@ -1,0 +1,12 @@
+material {
+    name : TurninatorDiagramV1,
+    shadingModel : unlit,
+    parameters : [ { type : float4, name : baseColor } ],
+    doubleSided : true
+}
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        material.baseColor = materialParams.baseColor;
+    }
+}

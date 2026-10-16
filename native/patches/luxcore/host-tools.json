@@ -1,0 +1,22 @@
+[
+  {
+    "name": "cmake.exe",
+    "file_version": "4.2.3",
+    "sha256": "daae341e73330c9c5bf391f22d10510c0f70e5f01d2b61b0fd256cd9edd28379"
+  },
+  {
+    "name": "python.exe",
+    "file_version": "3.10.11",
+    "sha256": "3cce33d75d6fdae4e004d0bdf149320b3147482a9caf370079dcb9c191a1b260"
+  },
+  {
+    "name": "cl.exe",
+    "file_version": "19.44.35215.0",
+    "sha256": "a9a3a13e4d019cfc0a9d823b3ee0cc383c6f3f86b00f861ac066032d869997e5"
+  },
+  {
+    "name": "link.exe",
+    "file_version": "14.44.35215.0",
+    "sha256": "f5950d9bd30d14a003747dd5359fc53b5c852a2271c5ea5855e4ae44ba5b86c1"
+  }
+]

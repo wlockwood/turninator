@@ -3,7 +3,7 @@ use super::*;
 
 impl Studio {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let preview_options_before = (self.preview_engine().to_owned(), self.transparent);
+        let preview_options_before = (self.preview_selection().clone(), self.transparent);
         let before = serde_json::to_string(&self.scene).unwrap_or_default();
         let import_before = serde_json::to_string(&self.scene.import).unwrap_or_default();
         let was_stepped = self.scene.import.stepped_envelope;
@@ -37,8 +37,10 @@ impl Studio {
             self.importing = true;
             self.gate.advance();
         }
-        if (self.preview_engine().to_owned(), self.transparent) != preview_options_before {
+        if (self.preview_selection().clone(), self.transparent) != preview_options_before {
             self.changed();
+            self.render.release_idle();
+            self.save_prefs();
         }
     }
 
@@ -207,13 +209,14 @@ impl Studio {
                     for value in ["matte_pla", "silk_pla", "glossy_plastic", "clay", "resin"] {
                         ui.selectable_value(&mut material, value.into(), material_name(value)).help(help::material(value));
                     }
-                }).help("Choose a surface finish. Explicitly edited layer settings are preserved; choosing Resin selects Cycles for rendering.");
+                }).help("Choose a surface finish. Explicitly edited layer settings and your renderer choice are preserved.");
             if material != self.scene.material_preset {
                 self.scene.select_material(&material);
-                if material == "resin" {
-                    self.engine = "cycles".into();
-                    self.still_engine = "cycles".into();
-                }
+            }
+            if let Some(notice) =
+                renderers::material_notice(&material, self.preview_selection().backend)
+            {
+                ui.small(notice);
             }
             if !beads || self.scene.color_mode == "uniform" {
                 ui.label("Base color");
@@ -294,7 +297,7 @@ impl Studio {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.scene.studio_preset, "light".into(), "Light").help("Use a lighter rendered studio floor, background and ambient illumination.");
                     ui.selectable_value(&mut self.scene.studio_preset, "dark".into(), "Dark").help("Use a darker rendered studio floor, background and ambient illumination, with the same arranged studio lights.");
-                }).help("Choose the rendered background, floor and ambient illumination. Native lighting is approximate; Render preview shows the Blender result.");
+                }).help("Choose the rendered background, floor and ambient illumination. Native lighting is approximate; Render preview shows the selected renderer result.");
         }
     }
 
@@ -306,6 +309,29 @@ impl Studio {
             .is_some_and(|model| !model.layer_tops_mm.is_empty());
         let sheet = self.output_format == OutputFormat::FourView;
         if has_model {
+            ui.label("Viewport renderer");
+            let before = self.renderers.viewport;
+            egui::ComboBox::from_id_salt("viewport_renderer")
+                .width(ui.available_width())
+                .selected_text(match before {
+                    crate::render::selection::ViewportRenderer::Wgpu => "Native wgpu",
+                    crate::render::selection::ViewportRenderer::Filament => "Filament",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.renderers.viewport,
+                        crate::render::selection::ViewportRenderer::Wgpu,
+                        "Native wgpu",
+                    );
+                    ui.selectable_value(
+                        &mut self.renderers.viewport,
+                        crate::render::selection::ViewportRenderer::Filament,
+                        "Filament",
+                    );
+                });
+            if before != self.renderers.viewport {
+                self.save_prefs();
+            }
             ui.heading(if sheet { "Inspection camera" } else { "Camera" });
             ui.horizontal(|ui| {
                 if ui.button("Fit").help("Center and zoom the inspection camera so the current displayed model fits. This changes the view, not the physical model size.").clicked() {
@@ -393,7 +419,7 @@ impl Studio {
             ui.horizontal(|ui| { ui.label("Build axis"); for (axis, label) in [(0, "X"), (1, "Y"), (2, "Z")] { ui.selectable_value(&mut self.section_axis, axis, label).help(format!("Cut perpendicular to the {label} build axis. Plane position is measured before presentation rotation.")); } });
             ui.horizontal(|ui| { ui.label("Position (mm)"); ui.add(egui::DragValue::new(&mut self.section_position).speed(0.1)).help("Cut-plane position in millimetres along the selected build axis, before presentation rotation. Place it inside the part to expose its interior."); });
             ui.checkbox(&mut self.section_positive, "Keep positive side").help("Keep material at coordinates greater than the cut-plane position along the selected build axis. Turn off to keep the lower-coordinate side.");
-            ui.checkbox(&mut self.section_cap, "Cap closed geometry").help("Fill the cut face when the input is closed and consistently wound. Native cutaways stay uncapped; Blender computes rendered caps and section statistics. Open geometry remains uncapped with an explanation.");
+            ui.checkbox(&mut self.section_cap, "Cap closed geometry").help("Fill the cut face when the input is closed and consistently wound. Native cutaways stay uncapped; The selected renderer computes rendered caps and section statistics. Open geometry remains uncapped with an explanation.");
             ui.checkbox(&mut self.side_by_side, "Full model beside section").help("Place the uncut model beside the cutaway at the same scale. Both panels share animation and deposited stage; output width doubles while height stays the selected pixel size.");
             ui.small("STL sections show the modeled solid. G-code sections preserve deposited beads and voids.");
             ui.small("Native cutaway is uncapped. Reliable caps and area/volume metrics are computed during export.");
@@ -422,12 +448,10 @@ impl Studio {
             format: &mut self.output_format,
             codec: &mut self.codec,
             frame_rate: &mut self.frame_rate,
-            animation_engine: &mut self.engine,
+            renderers: &mut self.renderers,
+            statuses: &self.renderer_statuses,
             animation_size: &mut self.size,
-            animation_samples: &mut self.samples,
-            still_engine: &mut self.still_engine,
             still_size: &mut self.still_size,
-            still_samples: &mut self.still_samples,
             transparent: &mut self.transparent,
         })
         .show(ui)
@@ -435,6 +459,17 @@ impl Studio {
             self.timeline_playing = false;
             self.settle_face = false;
             self.changed();
+        }
+        if self.output_format != OutputFormat::FourView
+            && let Some(notice) = renderers::material_notice(
+                &self.scene.material_preset,
+                self.preview_selection().backend,
+            )
+        {
+            ui.small(notice);
+        }
+        for warning in &self.renderer_warnings {
+            ui.small(warning);
         }
         let animated = self.output_format.animated();
         if has_model && animated {
@@ -510,7 +545,7 @@ impl Studio {
                 }
             },
         );
-        if ui.checkbox(&mut self.prefs.auto_preview, "Auto-update preview").help("Refresh the Blender preview after editing pauses. Disable this during many changes if rendering is slow. The selected output renderer is used.").changed() {
+        if ui.checkbox(&mut self.prefs.auto_preview, "Auto-update preview").help("Refresh the rendered preview after editing pauses. Disable this during many changes if rendering is slow. The selected output renderer is used.").changed() {
             self.save_prefs();
         }
         if self.model.is_none() {

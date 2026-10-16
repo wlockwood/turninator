@@ -3,6 +3,9 @@ mod build_orientation;
 mod comparison;
 mod controls;
 mod help;
+mod renderer_smoke;
+pub mod renderer_view;
+pub mod renderers;
 mod sidebar;
 mod workspace;
 use crate::{
@@ -18,6 +21,7 @@ use crate::{
         load_model, model_scene,
     },
     project::{OutputPreferences, ProjectFile, SourceStatus, load_project, save_project},
+    render::{BackendId, RenderSelection, RendererPreferences},
     session::{RenderEvent, RenderService, RenderTask, default_request},
     settings::{AppSettings, default_data_directory},
     viewport::{
@@ -95,6 +99,8 @@ enum Message {
     Image {
         id: u64,
         revision: u64,
+        engine: BackendId,
+        generation: u64,
         preview: bool,
         result: std::result::Result<Vec<PlaybackFrame>, String>,
     },
@@ -181,10 +187,25 @@ pub struct Studio {
     selected_source: Option<PathBuf>,
     model: Option<ImportedModel>,
     revision: u64,
+    view_generation: u64,
+    preview_identity: Option<renderer_view::FrameIdentity>,
+    output_identity: Option<renderer_view::FrameIdentity>,
+    partial_image: Option<(renderer_view::FrameIdentity, egui::TextureHandle)>,
     changed_at: Instant,
     render: RenderService,
+    interactive: renderer_view::LatestFrameWorker<
+        renderer_view::InteractiveRequest,
+        renderer_view::InteractiveFrame,
+    >,
+    interactive_signature: Option<String>,
+    interactive_generation: u64,
+    interactive_requested: Option<renderer_view::FrameIdentity>,
+    interactive_displayed: Option<renderer_view::FrameIdentity>,
+    interactive_texture: Option<egui::TextureHandle>,
+    interactive_error: Option<String>,
     next_job: u64,
     busy: Option<u64>,
+    queued_render: Option<(RenderTask, bool)>,
     progress: (u32, u32, String),
     last_task: Option<(
         ExportRequest,
@@ -207,12 +228,13 @@ pub struct Studio {
     restore_camera: bool,
     unresolved_project: Option<(ProjectFile, SourceStatus)>,
     project_path: Option<PathBuf>,
-    engine: String,
+    renderers: RendererPreferences,
+    renderer_statuses: Vec<crate::render::capabilities::BackendStatus>,
+    renderer_identities:
+        std::collections::BTreeMap<BackendId, crate::render::contract::BackendIdentity>,
+    renderer_warnings: Vec<String>,
     size: u32,
     still_size: u32,
-    still_engine: String,
-    still_samples: u32,
-    samples: u32,
     transparent: bool,
     show_edges: bool,
     show_tools: bool,
@@ -283,6 +305,13 @@ impl Studio {
             ),
             camera: OrbitCamera::default(),
             scene: SceneSettings::default(),
+            renderers: prefs.renderers.clone(),
+            renderer_statuses: BackendId::ALL
+                .into_iter()
+                .map(|id| crate::render::registry::BackendRegistry::default().status(id))
+                .collect(),
+            renderer_identities: Default::default(),
+            renderer_warnings: Vec::new(),
             prefs,
             data_dir,
             sender,
@@ -296,10 +325,22 @@ impl Studio {
             selected_source: None,
             model: None,
             revision: 0,
+            view_generation: 0,
+            preview_identity: None,
+            output_identity: None,
+            partial_image: None,
             changed_at: Instant::now(),
             render: RenderService::new(),
+            interactive: renderer_view::interactive_worker(),
+            interactive_signature: None,
+            interactive_generation: 0,
+            interactive_requested: None,
+            interactive_displayed: None,
+            interactive_texture: None,
+            interactive_error: None,
             next_job: 0,
             busy: None,
+            queued_render: None,
             progress: (0, 1, String::new()),
             last_task: None,
             last_output: None,
@@ -316,12 +357,8 @@ impl Studio {
             restore_camera: false,
             unresolved_project: None,
             project_path: None,
-            engine: "eevee".into(),
             size: 960,
             still_size: 4096,
-            still_engine: "cycles".into(),
-            still_samples: 64,
-            samples: 32,
             transparent: false,
             show_edges: false,
             show_tools: false,
@@ -420,8 +457,34 @@ impl Studio {
             turntable_angle_degrees: if sheet { 0. } else { self.timeline_angle },
         }
     }
+    fn render_event_matches(
+        &self,
+        id: u64,
+        revision: u64,
+        engine: crate::render::BackendId,
+        generation: u64,
+    ) -> bool {
+        self.busy == Some(id)
+            && revision == self.revision
+            && generation == self.view_generation
+            && self
+                .last_task
+                .as_ref()
+                .is_some_and(|(request, _, _, _, _)| request.selection.backend == engine)
+    }
     fn changed(&mut self) {
+        self.render.cancel_preview();
+        if self
+            .queued_render
+            .as_ref()
+            .is_some_and(|(task, _)| task.preview)
+        {
+            self.queued_render = None;
+            self.busy = None;
+        }
         self.revision += 1;
+        self.view_generation += 1;
+        self.renderer_warnings.clear();
         self.changed_at = Instant::now();
     }
     fn import(&mut self, path: PathBuf) {
@@ -559,6 +622,7 @@ impl Studio {
         }
     }
     fn save_prefs(&mut self) {
+        self.prefs.renderers = self.renderers.clone();
         if let Err(error) = self.prefs.save(&self.data_dir.join("settings.json")) {
             self.error = Some(format!("Could not save settings: {error}"));
         }
@@ -573,12 +637,8 @@ impl Studio {
         )?;
         Ok(scene)
     }
-    fn preview_engine(&self) -> &str {
-        if self.output_format.animated() {
-            &self.engine
-        } else {
-            &self.still_engine
-        }
+    fn preview_selection(&self) -> &RenderSelection {
+        renderers::preview_selection(&self.renderers, self.output_format)
     }
     fn preview_kind(&self) -> ExportKind {
         if self.output_format == OutputFormat::FourView {
@@ -593,7 +653,6 @@ impl Studio {
         }
         let kind = if preview { self.preview_kind() } else { kind };
         let result = (|| -> Result<()> {
-            self.prefs.tools.validate()?;
             self.next_job += 1;
             let cache = CacheStore::new(self.data_dir.join("jobs"))?;
             let render_size = if preview {
@@ -636,25 +695,29 @@ impl Studio {
                 job,
                 destination,
                 kind,
-                if preview {
-                    self.preview_engine().to_owned()
-                } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
-                    self.still_engine.clone()
-                } else {
-                    self.engine.clone()
+                {
+                    let mut selection = if preview {
+                        self.preview_selection().clone()
+                    } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
+                        self.renderers.still.clone()
+                    } else {
+                        self.renderers.animation.clone()
+                    };
+                    if preview && let Some(samples) = selection.quality.samples_mut() {
+                        *samples = (*samples).min(16);
+                    }
+                    selection
                 },
                 render_size,
-                if preview {
-                    16
-                } else if matches!(kind, ExportKind::Still | ExportKind::Diagram) {
-                    self.still_samples
-                } else {
-                    self.samples
-                },
                 self.transparent
                     && kind == ExportKind::Still
                     && (!preview || self.output_format.supports_transparency()),
             );
+            crate::render::requirements::validate_requirements(
+                &self.prefs.tools,
+                &crate::render::requirements::requirements_for(&request.selection, kind, false),
+            )?;
+            request.selection.validate()?;
             request.timeline = timeline;
             request.turntable_timing = turntable_timing;
             request.frame_count = frames;
@@ -713,6 +776,16 @@ impl Studio {
             }
             let mut scene = self.snapshot(&request)?;
             let model = self.model.as_ref().ok_or("open a model first")?;
+            let assessment = renderers::assess_selection(
+                &request.selection,
+                &crate::render::contract::snapshot_scene(model.mesh.clone(), scene.clone())?,
+                &request,
+                &self.renderer_statuses,
+            );
+            if !assessment.errors.is_empty() {
+                return Err(assessment.errors.join("; ").into());
+            }
+            self.renderer_warnings = assessment.warnings;
             let key = crate::export::identity::retained_render_key(
                 &scene,
                 &model.snapshot_hash,
@@ -734,8 +807,8 @@ impl Studio {
                 preview,
                 self.revision,
             ));
-            self.render
-                .submit(RenderTask {
+            self.submit_when_viewport_released(
+                RenderTask {
                     id: self.next_job,
                     revision: self.revision,
                     mesh,
@@ -744,8 +817,12 @@ impl Studio {
                     preview,
                     tools: self.prefs.tools.clone(),
                     cache_budget_bytes: self.prefs.cache_budget_bytes,
-                })
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                    memory: self.prefs.render_memory,
+                    generation: self.view_generation,
+                },
+                false,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             self.busy = Some(self.next_job);
             self.display_job = self.next_job;
             if preview {
@@ -770,16 +847,21 @@ impl Studio {
         }
         if let Some((request, scene, mesh, preview, revision)) = self.last_task.clone() {
             self.next_job += 1;
-            match self.render.submit(RenderTask {
-                id: self.next_job,
-                revision,
-                mesh,
-                scene,
-                request,
-                preview,
-                tools: self.prefs.tools.clone(),
-                cache_budget_bytes: self.prefs.cache_budget_bytes,
-            }) {
+            match self.submit_when_viewport_released(
+                RenderTask {
+                    id: self.next_job,
+                    revision,
+                    mesh,
+                    scene,
+                    request,
+                    preview,
+                    tools: self.prefs.tools.clone(),
+                    cache_budget_bytes: self.prefs.cache_budget_bytes,
+                    memory: self.prefs.render_memory,
+                    generation: self.view_generation,
+                },
+                true,
+            ) {
                 Ok(()) => {
                     self.busy = Some(self.next_job);
                     self.display_job = self.next_job;
@@ -914,6 +996,18 @@ impl Studio {
         });
     }
     fn receive(&mut self, ctx: &egui::Context) {
+        if self.queued_render.is_some() && self.interactive.is_released() {
+            let (task, recovery) = self.queued_render.take().unwrap();
+            let result = if recovery {
+                self.render.submit_recovery(task)
+            } else {
+                self.render.submit(task)
+            };
+            if let Err(error) = result {
+                self.busy = None;
+                self.error = Some(error);
+            }
+        }
         while let Ok(message) = self.messages.try_recv() {
             if matches!(&message, Message::Imported { .. }) {
                 self.import_active = false;
@@ -1127,13 +1221,13 @@ impl Studio {
                     }
                     if let Some(model) = &self.model {
                         let project = ProjectFile {
-                            schema_version: 1,
+                            schema_version: 2,
                             source_path: model.path.clone(),
                             source_hash: model.source_hash.clone(),
                             scene: self.scene.clone(),
                             camera: self.camera.clone(),
                             export_size: self.size,
-                            engine: self.engine.clone(),
+                            renderers: self.renderers.clone(),
                             output_options: self.output_preferences(),
                         };
                         match save_project(&path, &project) {
@@ -1161,13 +1255,19 @@ impl Studio {
                 Message::Image {
                     id,
                     revision,
+                    engine,
+                    generation,
                     preview,
                     result,
                 } => {
                     if preview && self.preview_decode_pending == Some(id) {
                         self.preview_decode_pending = None;
                     }
-                    if (preview && (revision != self.revision || id != self.latest_preview_job))
+                    if generation != self.view_generation
+                        || revision != self.revision
+                        || (preview
+                            && (engine != self.preview_selection().backend
+                                || id != self.latest_preview_job))
                         || (!preview && id != self.latest_output_job)
                     {
                         continue;
@@ -1178,9 +1278,21 @@ impl Studio {
                                 if revision == self.revision {
                                     self.preview = Playback::new(ctx, frames);
                                     self.preview_revision = Some(revision);
+                                    self.preview_identity = Some(renderer_view::FrameIdentity {
+                                        job: id,
+                                        revision,
+                                        backend: engine,
+                                        generation,
+                                    });
                                 }
                             } else {
                                 self.output = Playback::new(ctx, frames);
+                                self.output_identity = Some(renderer_view::FrameIdentity {
+                                    job: id,
+                                    revision,
+                                    backend: engine,
+                                    generation,
+                                });
                                 if id == self.display_job {
                                     self.show_output = true;
                                 }
@@ -1195,7 +1307,40 @@ impl Studio {
         }
         while let Ok(event) = self.render.events.try_recv() {
             match event {
-                RenderEvent::Progress { id, event } if self.busy == Some(id) => match event {
+                RenderEvent::Prepared {
+                    id,
+                    revision,
+                    generation,
+                    engine,
+                    identity,
+                    assessment,
+                } if self.render_event_matches(id, revision, engine, generation) => {
+                    self.renderer_identities.insert(engine, identity);
+                    self.renderer_warnings = assessment
+                        .into_iter()
+                        .filter_map(|support| match support {
+                            crate::render::capabilities::FeatureSupport::Approximate { reason } => {
+                                Some(reason)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(status) = self
+                        .renderer_statuses
+                        .iter_mut()
+                        .find(|s| s.backend == engine)
+                    {
+                        status.availability =
+                            crate::render::capabilities::BackendAvailability::Available;
+                    }
+                }
+                RenderEvent::Progress {
+                    id,
+                    revision,
+                    event,
+                    engine,
+                    generation,
+                } if self.render_event_matches(id, revision, engine, generation) => match event {
                     JobEvent::Progress {
                         completed,
                         total,
@@ -1210,7 +1355,9 @@ impl Studio {
                     revision,
                     preview,
                     result,
-                } if self.busy == Some(id) => {
+                    engine,
+                    generation,
+                } if self.render_event_matches(id, revision, engine, generation) => {
                     self.busy = None;
                     self.record_result("completed", None);
                     self.status = format!(
@@ -1238,17 +1385,63 @@ impl Studio {
                         let _ = sender.send(Message::Image {
                             id,
                             revision,
+                            engine,
+                            generation,
                             preview,
                             result: decoded,
                         });
                     });
                 }
-                RenderEvent::Failed { id, message } if self.busy == Some(id) => {
+                RenderEvent::Failed {
+                    id,
+                    message,
+                    revision,
+                    engine,
+                    generation,
+                } if self.render_event_matches(id, revision, engine, generation) => {
                     self.busy = None;
                     self.record_result("failed", Some(message.clone()));
                     self.error = Some(message);
                 }
+                RenderEvent::Completed { id, .. } | RenderEvent::Failed { id, .. }
+                    if self.busy == Some(id) =>
+                {
+                    self.busy = None;
+                }
                 _ => {}
+            }
+        }
+        if let Some((ticket, image)) = self.render.take_partial()
+            && self.render_event_matches(
+                ticket.id,
+                ticket.revision,
+                ticket.engine,
+                ticket.generation,
+            )
+            && image.width > 0
+            && image.height > 0
+            && image.width <= 16000
+            && image.height <= 8000
+            && image.bytes.len() as u64 == u64::from(image.width) * u64::from(image.height) * 4
+        {
+            let identity = renderer_view::FrameIdentity {
+                job: ticket.id,
+                revision: ticket.revision,
+                backend: ticket.engine,
+                generation: ticket.generation,
+            };
+            let pixels = egui::ColorImage::from_rgba_unmultiplied(
+                [image.width as usize, image.height as usize],
+                &image.bytes,
+            );
+            if let Some((tag, texture)) = &mut self.partial_image {
+                texture.set(pixels, egui::TextureOptions::LINEAR);
+                *tag = identity;
+            } else {
+                self.partial_image = Some((
+                    identity,
+                    ctx.load_texture("render-progress", pixels, egui::TextureOptions::LINEAR),
+                ));
             }
         }
     }
@@ -1256,9 +1449,6 @@ impl Studio {
         self.pending_build_orientation = None;
         let options = project.output_options;
         self.still_size = options.still_size;
-        self.still_engine = options.still_engine;
-        self.still_samples = options.still_samples;
-        self.samples = options.samples;
         self.transparent = options.transparent;
         self.codec = options.video_codec;
         self.output_format = options.output_format;
@@ -1292,7 +1482,7 @@ impl Studio {
             .join(", ");
         self.camera = project.camera;
         self.size = project.export_size;
-        self.engine = project.engine;
+        self.renderers = project.renderers;
         self.restore_camera = true;
         self.unresolved_project = None;
         self.import(project.source_path);
@@ -1319,9 +1509,6 @@ impl Studio {
         OutputPreferences {
             output_format: self.output_format,
             still_size: self.still_size,
-            still_engine: self.still_engine.clone(),
-            still_samples: self.still_samples,
-            samples: self.samples,
             frame_rate: self.frame_rate,
             transparent: self.transparent,
             video_codec: self.codec,
@@ -1474,10 +1661,37 @@ impl Studio {
         }
         egui::Window::new("Settings").open(&mut open).default_width(620.).default_height(540.).resizable(true).vscroll(true).show(ctx, |ui| {
             ui.heading("Rendering tools");
-            ui.label("Native inspection works without these tools. Blender renders images; FFmpeg encodes video and GIF output.");
+            ui.label("Native renderers work without Blender. Blender is used by Eevee and Cycles; FFmpeg encodes video and GIF output.");
             for (label, path) in [("Blender", &mut self.prefs.tools.blender), ("FFmpeg", &mut self.prefs.tools.ffmpeg), ("FFprobe", &mut self.prefs.tools.ffprobe)] {
                 let mut value = path.to_string_lossy().into_owned();
                 let label_response = ui.label(label); if ui.add(egui::TextEdit::singleline(&mut value).desired_width(f32::INFINITY)).labelled_by(label_response.id).help(format!("Full path to the {label} executable on this machine. Blender renders images; FFmpeg encodes animations/videos; FFprobe verifies video output. Save settings to keep this path.")).changed() { *path = PathBuf::from(value); }
+            }
+            ui.separator();
+            ui.heading("Render memory maximum");
+            ui.small("Maximum per render, not installed or free memory. These limits do not reserve memory. Larger renders can fail when the device cannot allocate the requested resources.");
+            ui.add(egui::DragValue::new(&mut self.prefs.render_memory.host_gib).range(1..=64).suffix(" GiB host maximum per render"));
+            ui.add(egui::DragValue::new(&mut self.prefs.render_memory.gpu_gib).range(1..=48).suffix(" GiB GPU maximum per render"));
+            ui.heading("Renderer details");
+            for backend in BackendId::ALL {
+                ui.collapsing(renderers::label(backend), |ui| {
+                    if let Some(identity) = self.renderer_identities.get(&backend) {
+                        if backend == BackendId::Filament { ui.label(format!("SDK: {}", crate::render::backends::filament::SDK_VERSION)); }
+                        ui.label(format!("Device: {}", identity.device));
+                        ui.label(format!("API: {}", identity.api));
+                        ui.label(format!("Driver: {}", identity.driver));
+                        ui.label(format!("Runtime: {}", identity.runtime_digest));
+                    } else if let Some(status) = self.renderer_statuses.iter().find(|s| s.backend == backend) {
+                        match &status.availability {
+                            crate::render::capabilities::BackendAvailability::Unavailable { reason } => { ui.label(reason); }
+                            _ => { ui.label("Details appear after the first successful render."); }
+                        }
+                    }
+                    if ui.button("Retry discovery").clicked()
+                        && let Some(status) = self.renderer_statuses.iter_mut().find(|s| s.backend == backend)
+                    {
+                        *status = crate::render::registry::BackendRegistry::default().status(backend);
+                    }
+                });
             }
             ui.separator();
             ui.heading("Retained frames and storage");
@@ -1546,6 +1760,10 @@ impl Studio {
         let Some(directory) = self.smoke_output.clone() else {
             return;
         };
+        if directory.join("renderer-cases.json").is_file() {
+            self.renderer_smoke(ctx, &directory);
+            return;
+        }
         if self.started.elapsed() > Duration::from_secs(180) {
             let _ = fs::create_dir_all(&directory);
             let _ = fs::write(
@@ -1634,7 +1852,8 @@ impl Studio {
                     .is_some_and(|m| ExportKind::Still.suggested_file_name(&m.path)
                         == "renamed-output-model.2.png")
             );
-            self.engine = "cycles".into();
+            self.renderers
+                .select_backend(false, BackendId::BlenderCycles);
             self.start_export(
                 ExportKind::Still,
                 directory.join("cancelled-preview.png"),
@@ -1667,11 +1886,14 @@ impl Studio {
                         .is_some_and(|model| model.import_settings == self.scene.import)
             );
             self.error = None;
-            self.engine = "eevee".into();
+            self.renderers
+                .select_backend(false, BackendId::BlenderEevee);
             self.fit();
             self.changed();
             self.size = 128;
-            self.samples = 4;
+            if let Some(samples) = self.renderers.animation.quality.samples_mut() {
+                *samples = 4;
+            }
             self.turntable_timing = TurntableTiming {
                 seconds_per_turn: 0.2,
                 duration_seconds: 0.6,
@@ -1778,13 +2000,13 @@ impl Studio {
             self.section_position = 0.75;
             if let Some(model) = &self.model {
                 let project = ProjectFile {
-                    schema_version: 1,
+                    schema_version: 2,
                     source_path: model.path.clone(),
                     source_hash: model.source_hash.clone(),
                     scene: self.scene.clone(),
                     camera: self.camera.clone(),
                     export_size: self.size,
-                    engine: self.engine.clone(),
+                    renderers: self.renderers.clone(),
                     output_options: self.output_preferences(),
                 };
                 let project_path = directory.join("smoke.turninator");
@@ -1898,7 +2120,9 @@ impl Studio {
                 "rendered",
             )));
             self.size = 128;
-            self.samples = 4;
+            if let Some(samples) = self.renderers.animation.quality.samples_mut() {
+                *samples = 4;
+            }
             if let Some(model) = self.model.as_ref().filter(|m| !m.groups.is_empty()) {
                 self.section_axis = 0;
                 self.section_position = (model.bounds_mm.min[0] + model.bounds_mm.max[0]) / 2.;
@@ -1909,7 +2133,8 @@ impl Studio {
                 self.scene.select_material("resin");
                 self.scene.color_mode = "tool".into();
                 self.scene.studio_preset = "dark".into();
-                self.engine = "cycles".into();
+                self.renderers
+                    .select_backend(false, BackendId::BlenderCycles);
                 self.changed();
             }
             self.start_export(
@@ -1987,13 +2212,15 @@ impl Studio {
             self.smoke_checks["mp4_preview_uses_animation_renderer"] = serde_json::json!(
                 self.last_task
                     .as_ref()
-                    .is_some_and(|task| task.0.engine == self.engine && !task.0.transparent)
+                    .is_some_and(|task| task.0.selection.backend
+                        == self.renderers.animation.backend
+                        && !task.0.transparent)
             );
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "format-mp4",
             )));
             self.output_format = OutputFormat::Png;
-            self.still_engine = "eevee".into();
+            self.renderers.select_backend(true, BackendId::BlenderEevee);
             self.transparent = true;
             self.changed();
             self.start_export(
@@ -2004,11 +2231,10 @@ impl Studio {
             self.smoke_stage = 92;
         }
         if self.smoke_stage == 92 && self.preview_revision == Some(self.revision) {
-            self.smoke_checks["png_preview_uses_png_renderer_and_alpha"] = serde_json::json!(
-                self.last_task
-                    .as_ref()
-                    .is_some_and(|task| task.0.engine == self.still_engine && task.0.transparent)
-            );
+            self.smoke_checks["png_preview_uses_png_renderer_and_alpha"] =
+                serde_json::json!(self.last_task.as_ref().is_some_and(|task| {
+                    task.0.selection.backend == self.renderers.still.backend && task.0.transparent
+                }));
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 "format-png",
             )));
@@ -2026,7 +2252,7 @@ impl Studio {
                 self.last_task
                     .as_ref()
                     .is_some_and(|task| task.0.kind == ExportKind::Diagram
-                        && task.0.engine == self.still_engine
+                        && task.0.selection.backend == self.renderers.still.backend
                         && task.0.section.is_none()
                         && !task.0.transparent)
                     && self.viewport_settings().section.is_none()
@@ -2036,7 +2262,9 @@ impl Studio {
                 "format-sheet",
             )));
             self.still_size = 512;
-            self.still_samples = 4;
+            if let Some(samples) = self.renderers.still.quality.samples_mut() {
+                *samples = 4;
+            }
             self.start_export(
                 ExportKind::Diagram,
                 directory.join("selected-sheet.png"),
@@ -2056,11 +2284,12 @@ impl Studio {
                 .is_some_and(|output| output.frames.len() == 1)
         {
             self.smoke_checks["sheet_export_uses_visible_quality"] =
-                serde_json::json!(self.last_task.as_ref().is_some_and(|task| task.0.engine
-                    == self.still_engine
-                    && task.0.size == 512
-                    && task.0.samples == 4
-                    && task.0.kind == ExportKind::Diagram));
+                serde_json::json!(self.last_task.as_ref().is_some_and(|task| {
+                    task.0.selection.backend == self.renderers.still.backend
+                        && task.0.size == 512
+                        && task.0.selection.quality.samples() == Some(4)
+                        && task.0.kind == ExportKind::Diagram
+                }));
             self.output_format = OutputFormat::Gif;
             self.show_output = false;
             self.changed();
@@ -2077,7 +2306,8 @@ impl Studio {
                     && self
                         .last_task
                         .as_ref()
-                        .is_some_and(|task| !task.0.transparent && task.0.engine == self.engine)
+                        .is_some_and(|task| !task.0.transparent
+                            && task.0.selection.backend == self.renderers.animation.backend)
                     && self.output_format.supports_section()
                     && self.timeline_enabled
             );
@@ -2448,7 +2678,7 @@ impl eframe::App for Studio {
                         .text(&self.progress.2),
                     ).help("Progress through the current job. Reused frames advance the count without rendering again; encoding and validation happen after rendering.");
                     if ui.button("Cancel").help("Stop the active render or encode job. Verified frames already written are retained for Retry; existing published output is preserved on failure.").clicked() {
-                        self.render.cancel();
+                        self.cancel_render();
                         self.progress.2 = "Cancelling owned render job…".into();
                     }
                 });
@@ -2534,17 +2764,27 @@ impl eframe::App for Studio {
                 }
             });
         egui::CentralPanel::default().show(ui, |ui| {
+            let route = self.interactive_route();
+            if let Some(badge) = route.badge { ui.label(badge); }
+            let displayed_identity = if self.show_output { self.output_identity } else { self.preview_identity };
+            if let Some(identity) = displayed_identity {
+                ui.small(format!("{} · job {} · scene {}{}", renderers::label(identity.backend), identity.job, identity.revision,
+                    if identity.revision != self.revision || identity.generation != self.view_generation { " · previous result" } else { " · completed" }));
+            }
             let display = if self.show_output { &self.output } else { &self.preview };
-            let image_size = display.as_ref().map_or(egui::vec2(1.,1.),|p| p.texture.size_vec2());
+            let partial = self.partial_image.as_ref().filter(|(tag,_)| self.render_event_matches(tag.job,tag.revision,tag.backend,tag.generation)).map(|(_,texture)|texture.clone());
+            let image_size = partial.as_ref().map(|texture| texture.size_vec2()).unwrap_or_else(|| display.as_ref().map_or(egui::vec2(1.,1.),|p| p.texture.size_vec2()));
             let animated = display.as_ref().is_some_and(|p| p.frames.len()>1);
             let status = (!self.show_output && self.model.is_some() && self.preview_revision != Some(self.revision))
                 .then_some(if self.busy.is_some() { "Updating…" } else if self.preview.is_none() { "Not rendered" } else { "Needs refresh" });
-            let panes = comparison::layout(ui,if self.show_output { "Encoded output" } else { "Rendered preview" },status,image_size,animated);
+            let panes = comparison::layout_renderer(ui, if route.backend == BackendId::Filament { "Filament viewport" } else { "Native inspection" },if self.show_output { "Encoded output" } else { "Rendered preview" },status,image_size,animated);
             let before = self.camera.camera_spec();
             let settings = self.viewport_settings();
             let mut native_ui = ui.new_child(egui::UiBuilder::new()
                 .id_salt("native_canvas").max_rect(panes.native));
-            let response = self.viewport.show(&mut native_ui,&mut self.camera,&settings)
+            let response = (if route.backend == BackendId::Filament {
+                crate::viewport::gpu::viewport_interaction(&mut native_ui, &mut self.camera)
+            } else { self.viewport.show(&mut native_ui,&mut self.camera,&settings) })
                 .help(if self.settle_face {
                     "Click a visible triangle to align that face downward while keeping the print layers attached. Use Cancel face selection to leave this mode. This aligns the selected face; it does not calculate a stable resting position."
                 } else { help::NATIVE_VIEW });
@@ -2553,6 +2793,20 @@ impl eframe::App for Studio {
                 self.timeline_playing = false;
                 self.changed();
             }
+            self.update_interactive(&ctx, response.rect);
+            if route.backend == BackendId::Filament {
+                if let Some(texture) = &self.interactive_texture {
+                    native_ui.painter().image(texture.id(), response.rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.,1.)), egui::Color32::WHITE);
+                }
+                let message = self.interactive_error.as_deref().or_else(|| {
+                    if self.busy.is_some() { Some("Viewport paused during render") }
+                    else if self.interactive_requested != self.interactive_displayed { Some("Updating Filament · previous frame retained") }
+                    else { None }
+                });
+                if let Some(message) = message {
+                    native_ui.painter().text(response.rect.left_top() + egui::vec2(8., 8.), egui::Align2::LEFT_TOP, message, egui::FontId::proportional(13.), egui::Color32::YELLOW);
+                }
+            }
             if self.settle_face && !self.importing && response.clicked()
                 && let Some(pointer) = response.interact_pointer_pos()
                 && self.settle_pointer(response.rect,pointer).is_none()
@@ -2560,7 +2814,10 @@ impl eframe::App for Studio {
                 self.status = "No visible face under that point; click the model surface.".into();
             }
             let display = if self.show_output { &mut self.output } else { &mut self.preview };
-            if let Some(playback) = display {
+            if let Some(texture) = partial {
+                ui.put(panes.preview,egui::Image::new(&texture).fit_to_exact_size(panes.preview.size()));
+                ui.painter().text(panes.preview.left_top()+egui::vec2(8.,8.),egui::Align2::LEFT_TOP,"Rendering · partial image",egui::FontId::proportional(13.),egui::Color32::YELLOW);
+            } else if let Some(playback) = display {
                 playback.advance(&ctx);
                 let image = ui.put(panes.preview,egui::Image::new(&playback.texture)
                     .fit_to_exact_size(panes.preview.size()))

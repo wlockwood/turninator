@@ -1,0 +1,4 @@
+# Preserve the exact official bytes used by sdk-lock.json on Windows checkouts.
+json.hpp -text
+# Upstream's first notice line has a trailing space; retain its pinned bytes.
+LICENSE.MIT -text whitespace=-blank-at-eol

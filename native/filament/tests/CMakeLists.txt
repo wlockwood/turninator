@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.22)
+project(filament_native_cpu_tests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+enable_testing()
+add_executable(filament_cpu_tests cpu_tests.cpp)
+target_compile_options(filament_cpu_tests PRIVATE /W4 /WX /EHsc)
+add_test(NAME filament_peak_budget_and_readback COMMAND filament_cpu_tests)

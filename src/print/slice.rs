@@ -43,6 +43,12 @@ impl BuildUpSolid {
     /// Empty and completed builds need no added face. Exact vertex-plane contacts
     /// use the section approached from below, without displacing the cut plane.
     pub fn cap(&self, height_mm: f64) -> Result<Mesh> {
+        Ok(native_cap(self.cap_precise(height_mm)?))
+    }
+
+    /// Same validated section at f64 build precision for shared scene clipping.
+    /// This does not quantize coordinates to the native viewport vertex format.
+    pub fn cap_precise(&self, height_mm: f64) -> Result<Mesh> {
         if !height_mm.is_finite() || height_mm < 0. {
             return Err("invalid solid build-up height".into());
         }
@@ -86,7 +92,7 @@ impl BuildUpSolid {
         }
         let mut builder = Builder::default();
         cap(&mut builder, &shapes, z, true)?;
-        Ok(native_cap(builder.mesh))
+        Ok(builder.mesh)
     }
 }
 

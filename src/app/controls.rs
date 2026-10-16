@@ -1,5 +1,10 @@
 use super::help::{self, HelpResponse};
 use crate::export::{OutputFormat, VideoCodec};
+use crate::render::{
+    BackendQuality, RendererPreferences,
+    capabilities::BackendStatus,
+    selection::{AaQuality, RenderUsage, ShadowQuality},
+};
 use eframe::egui;
 
 pub(super) fn build_up_checkbox(
@@ -104,12 +109,10 @@ pub(super) struct OutputEditor<'a> {
     pub format: &'a mut OutputFormat,
     pub codec: &'a mut VideoCodec,
     pub frame_rate: &'a mut u32,
-    pub animation_engine: &'a mut String,
+    pub renderers: &'a mut RendererPreferences,
+    pub statuses: &'a [BackendStatus],
     pub animation_size: &'a mut u32,
-    pub animation_samples: &'a mut u32,
-    pub still_engine: &'a mut String,
     pub still_size: &'a mut u32,
-    pub still_samples: &'a mut u32,
     pub transparent: &'a mut bool,
 }
 impl OutputEditor<'_> {
@@ -151,23 +154,45 @@ impl OutputEditor<'_> {
         if self.format.animated() {
             frame_rate_control(ui, self.frame_rate);
         }
-        let (engine, size, samples) = if self.format.animated() {
-            (
-                self.animation_engine,
-                self.animation_size,
-                self.animation_samples,
-            )
+        let still = !self.format.animated();
+        let selection = if still {
+            &self.renderers.still
         } else {
-            (self.still_engine, self.still_size, self.still_samples)
+            &self.renderers.animation
         };
+        let mut backend = selection.backend;
         let renderer_label = ui.label("Renderer").help(help::RENDERER);
         egui::ComboBox::from_id_salt(("output_renderer", self.format.animated()))
             .width(ui.available_width())
-            .selected_text(if engine == "cycles" { "Cycles / OptiX" } else { "EEVEE (fast)" })
+            .selected_text(super::renderers::label(backend))
             .show_ui(ui, |ui| {
-                ui.selectable_value(engine, "eevee".into(), "EEVEE (fast)").help("Fast Blender rendering for lighting, color and layer-detail checks. Transmission and fine shadows are approximate.");
-                ui.selectable_value(engine, "cycles".into(), "Cycles / OptiX").help("Trace light for more realistic reflections, shadows and resin. Requires a supported NVIDIA OptiX GPU; there is no silent CPU fallback.");
-            }).response.labelled_by(renderer_label.id).help(help::RENDERER);
+                let usage = if still {
+                    RenderUsage::Still
+                } else {
+                    RenderUsage::Animation
+                };
+                for option in super::renderers::renderer_options(self.statuses, usage) {
+                    ui.selectable_value(&mut backend, option.backend, option.label)
+                        .help(option.reason.as_deref().unwrap_or("Ready to render"));
+                }
+            })
+            .response
+            .labelled_by(renderer_label.id)
+            .help(help::RENDERER);
+        self.renderers.select_backend(still, backend);
+        if let Some(reason) =
+            super::renderers::renderer_options(self.statuses, RenderUsage::Preview)
+                .into_iter()
+                .find(|o| o.backend == backend)
+                .and_then(|o| o.reason)
+        {
+            ui.small(reason);
+        }
+        let size = if still {
+            self.still_size
+        } else {
+            self.animation_size
+        };
         let size_help = if *self.format == OutputFormat::FourView {
             "Width and height of the complete sheet, in pixels, from 256 to 8000. More pixels make small labels and edges clearer, but use more render time and storage."
         } else {
@@ -201,19 +226,56 @@ impl OutputEditor<'_> {
         )
         .labelled_by(size_label.id)
         .help(size_help);
-        let samples_label = ui.label("Samples").help(help::SAMPLES);
-        let quality_id = if self.format.animated() {
-            "animation_samples"
+        let selection = if still {
+            &mut self.renderers.still
         } else {
-            "still_samples"
+            &mut self.renderers.animation
         };
-        numeric_field(
-            ui,
-            quality_id,
-            egui::DragValue::new(samples).range(1..=4096),
-        )
-        .labelled_by(samples_label.id)
-        .help(help::SAMPLES);
+        if let Some(samples) = selection.quality.samples_mut() {
+            let samples_label = ui.label("Samples").help(help::SAMPLES);
+            let quality_id = if self.format.animated() {
+                "animation_samples"
+            } else {
+                "still_samples"
+            };
+            numeric_field(
+                ui,
+                quality_id,
+                egui::DragValue::new(samples).range(1..=4096),
+            )
+            .labelled_by(samples_label.id)
+            .help(help::SAMPLES);
+        }
+        match &mut selection.quality {
+            BackendQuality::Wgpu { aa, shadows } | BackendQuality::Filament { aa, shadows } => {
+                ui.label("Anti-aliasing");
+                egui::ComboBox::from_id_salt("renderer_aa")
+                    .width(ui.available_width())
+                    .selected_text(format!("{aa:?}"))
+                    .show_ui(ui, |ui| {
+                        for value in [AaQuality::Low, AaQuality::Medium, AaQuality::High] {
+                            ui.selectable_value(aa, value, format!("{value:?}"));
+                        }
+                    });
+                ui.label("Shadows");
+                egui::ComboBox::from_id_salt("renderer_shadows")
+                    .width(ui.available_width())
+                    .selected_text(format!("{shadows:?}"))
+                    .show_ui(ui, |ui| {
+                        for value in [
+                            ShadowQuality::Low,
+                            ShadowQuality::Medium,
+                            ShadowQuality::High,
+                        ] {
+                            ui.selectable_value(shadows, value, format!("{value:?}"));
+                        }
+                    });
+            }
+            BackendQuality::LuxCore { denoise, .. } | BackendQuality::Cycles { denoise, .. } => {
+                ui.checkbox(denoise, "Denoise");
+            }
+            _ => {}
+        }
         if self.format.supports_transparency() {
             ui.checkbox(self.transparent, "Transparent background").help("Save empty background pixels with an alpha channel instead of a studio floor. Useful for placing the PNG over another background. Material transparency is controlled separately by Resin clarity.");
         }
@@ -331,9 +393,12 @@ mod tests {
     ) -> egui::FullOutput {
         let ctx = egui::Context::default();
         let mut format = format;
-        let mut engine = "eevee".into();
+        let mut renderers = RendererPreferences {
+            animation: crate::render::RenderSelection::from_legacy("eevee", 7).unwrap(),
+            still: crate::render::RenderSelection::from_legacy("cycles", 128).unwrap(),
+            ..Default::default()
+        };
         let mut size = 960;
-        let mut samples = 7;
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -349,12 +414,10 @@ mod tests {
                         format: &mut format,
                         codec: &mut options.video_codec,
                         frame_rate: &mut options.frame_rate,
-                        animation_engine: &mut engine,
+                        renderers: &mut renderers,
+                        statuses: &[],
                         animation_size: &mut size,
-                        animation_samples: &mut samples,
-                        still_engine: &mut options.still_engine,
                         still_size: &mut options.still_size,
-                        still_samples: &mut options.still_samples,
                         transparent: &mut options.transparent,
                     }
                     .show(ui);
@@ -362,6 +425,8 @@ mod tests {
             },
         );
         output.textures_delta.clear();
+        assert_eq!(renderers.still.quality.samples(), Some(128));
+        assert_eq!(renderers.animation.quality.samples(), Some(7));
         output
     }
 
@@ -401,7 +466,7 @@ mod tests {
                 ("Encoding", "MP4 video"),
                 ("MP4 codec", "H.264"),
                 ("Framerate (fps)", "20"),
-                ("Renderer", "EEVEE (fast)"),
+                ("Renderer", "Blender Eevee"),
                 ("Output pixels", "960"),
                 ("Samples", "7"),
             ] {
@@ -441,7 +506,7 @@ mod tests {
             for shape in &output.shapes {
                 collect(&shape.shape, &mut boxes);
             }
-            for value in ["MP4 video", "H.264", "EEVEE (fast)"] {
+            for value in ["MP4 video", "H.264", "Blender Eevee"] {
                 let text_rect = texts.iter().find(|(text, _)| text == value).unwrap().1;
                 let control = boxes
                     .iter()
@@ -654,10 +719,7 @@ mod tests {
 
     #[test]
     fn visible_quality_belongs_to_the_selected_output() {
-        let mut options = OutputPreferences {
-            still_samples: 128,
-            ..Default::default()
-        };
+        let mut options = OutputPreferences::default();
         for format in [
             OutputFormat::Gif,
             OutputFormat::Mp4,
@@ -666,7 +728,9 @@ mod tests {
         ] {
             let texts = rendered_text(format, &mut options);
             assert_eq!(
-                texts.iter().any(|(text, _)| text == "Cycles / OptiX"),
+                texts
+                    .iter()
+                    .any(|(text, _)| text == "Blender Cycles / OptiX"),
                 !format.animated()
             );
             assert_eq!(
@@ -674,7 +738,6 @@ mod tests {
                 !format.animated()
             );
             assert_eq!(texts.iter().any(|(text, _)| text == "7"), format.animated());
-            assert_eq!(options.still_samples, 128);
         }
         options.still_size = 64;
         rendered_text(OutputFormat::FourView, &mut options);

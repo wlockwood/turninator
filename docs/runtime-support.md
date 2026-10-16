@@ -1,5 +1,10 @@
 # Runtime support and pinned identities
 
+The selectable-renderer rollout has a separate [native package qualification
+matrix](renderers/qualification-matrix.md). Its staged full/core packaging and
+runtime gates are explicit; the existing Blender evidence below does not certify
+the complete five-engine portable package.
+
 Verified on 2026-10-14. Turninator uses explicitly configured local executables. It does not download, replace or automatically update Blender or FFmpeg. A newer version is a compatibility candidate until the same application/runtime checks have passed against its actual binaries.
 
 ## Tested configuration
@@ -64,3 +69,14 @@ Native inspection and rendered/encoded preview share the visible image aspect ra
 Enabling Experimental STL stepped solid uses the model's current down, composing its presentation pose with the physical build rotation before slicing. Settle on face rebuilds active stepped layers automatically. After manual presentation changes, **Use current down for layers** applies that pose as a new print direction; ordinary display rotation keeps existing layers attached. Pose transfer commits only after successful import and preserves intervening pose edits; failure retains the accepted geometry and current pose. Fixed four-view sheets instead use the explicit Build rotation because they omit presentation pose. Original STL files are unchanged.
 
 The workspace organizes settings into Model, Appearance, View and Export tabs with separate scroll positions. Preview/export actions remain visible below the scrolling content. Physical layer heights live in Model; layer shading and material controls live in Appearance; fixed printed stage and cutaway controls live in View. Export keeps the format-specific codec, FPS, quality and alpha fields together. File provides model/project actions and Ctrl+O / Ctrl+Shift+O / Ctrl+S shortcuts. Settings configures rendering tools and retained-frame storage. Changing tabs preserves the camera, scene revision and retained-frame identity; color controls commit only actual edits.
+
+
+## Selectable desktop renderers
+
+The desktop app has independent animation and still/sheet selections for Native wgpu, Filament, LuxCore, Blender Eevee and Blender Cycles / OptiX. The browser app is unchanged. Full packages contain optional Filament Vulkan and LuxCore CUDA/OptiX runtimes plus their exact redistributables, receipts, full notices and source availability. Core packages omit both SDKs and retain unavailable selections with an explanation. Discovery alone never initializes an SDK; preparation resolves the actual device and validates its runtime before pixel reuse.
+
+Native preview, PNG and sheets launch no renderer helper. GIF needs FFmpeg; MP4 needs FFmpeg and ffprobe. Blender renders remain explicitly external. Raster resin and LuxCore transparent resin RGBA are approximate. LuxCore denoised fine-layer animation can vary contrast; disable denoising when stable layer detail is required. Opaque LuxCore resin traces absorption and scattering in millimeters. Current native qualification is Windows x64 on the recorded RTX4070 Ti/driver; other machines remain unqualified until exercised.
+
+The native inspection viewport stays available; preferred Filament resumes after inspection and export context teardown. Renderer/material changes preserve camera and independent export preferences. Expensive export/interactive contexts hand off on owner threads with cancellation drain and a release acknowledgement. LuxCore retains a scene-free SDK owner/library lease until the export actor shuts down, avoiding measured SDK unload retention across jobs. It releases each job's GPU context on switching; a changed runtime requires restarting the application.
+
+For4096 LuxCore OIDN output, raise the host allocation maximum from the default8 GiB to16 GiB in Tools / storage. The ceiling is not installed/free memory. Native compiler caches are application-owned; tools are neither downloaded nor found through ambient PATH. [Host integration](renderers/luxcore.md), [native implementation](renderers/luxcore-native.md), and [qualification matrix](renderers/qualification-matrix.md) separate source, backend, desktop, extracted-package and performance evidence.

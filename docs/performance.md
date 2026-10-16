@@ -51,3 +51,17 @@ Reproduce the comparison inside the configured Blender, writing to a fresh direc
 ```
 
 Use any prepared scene JSON in place of the local axolotl snapshot. The tool records input/script hashes, settings, warm-up, process CPU time and retained PNGs. Evidence: [final comparison](../artifacts/render-performance/axolotl-pipeline-final/results.json), [initial native-animation comparison](../artifacts/render-performance/axolotl-baseline/results.json), [busy comparison](../artifacts/render-performance/axolotl-pipeline/results.json). The serial cases in the final tool use the new streaming PNG validator; the initial baseline used Blender image loading, so those independent runs are not a pure thread-pool comparison.
+
+
+## Five-renderer native desktop qualification
+
+The completed 40-case synthetic matrix, exact profiles, timings, hashes and
+measurement limits are in [the renderer qualification report](renderers/qualification-matrix.md#observed-performance).
+Native wgpu and Filament complete the 80-frame 960-square jobs in roughly 3–7 s
+at their declared Medium profiles. LuxCore is a functional in-process path
+tracer, but this adapter's observed ray-tracing cost exceeds Cycles on these
+fixtures. Renderer settings and noise are not equivalent quality measures.
+GPU jobs were serialized; some CPU verification/package work overlapped LuxCore.
+Detailed cold/startup, warm, transfer, validation, encoding and whole-process
+observations remain in the JSON/CSV evidence. Do not reuse older debug-build
+numbers as production throughput.

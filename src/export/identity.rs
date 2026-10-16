@@ -4,6 +4,33 @@ use crate::Result;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+/// Concrete pixel compatibility, independent of encoders and destination paths.
+pub fn pixel_recipe_key(
+    scene: &Value,
+    mesh_hash: &str,
+    request: &ExportRequest,
+    identity: &crate::render::contract::BackendIdentity,
+) -> Result<String> {
+    if identity.backend != request.selection.backend
+        || identity.device.is_empty()
+        || identity.api.is_empty()
+        || identity.driver.is_empty()
+        || request
+            .selection
+            .device
+            .as_ref()
+            .is_some_and(|d| d != &identity.device)
+    {
+        return Err("pixel identity differs from requested renderer/device".into());
+    }
+    let (geometry_recipe, frame_plan_recipe) = crate::render::prepared::recipe_versions(identity)?;
+    let recipe = json!({"schema_version":3,"intent":retained_render_key(scene, mesh_hash, request)?,"identity":identity,"geometry_recipe":geometry_recipe,"frame_plan_recipe":frame_plan_recipe,"composition_recipe":2});
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&recipe)?)
+    ))
+}
+
 /// Identify rendered pixels independently of their output filename or encoding.
 ///
 /// The mesh hash must describe the exact binary snapshot, rather than the source
@@ -14,6 +41,7 @@ pub fn retained_render_key(
     mesh_hash: &str,
     request: &ExportRequest,
 ) -> Result<String> {
+    request.selection.validate()?;
     if mesh_hash.len() != 64 || !mesh_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("retained render requires a SHA-256 mesh snapshot hash".into());
     }
@@ -57,13 +85,12 @@ pub fn retained_render_key(
         Value::Null
     };
     let recipe = json!({
-        "retained_render_version":1,
+        "retained_render_version":2,
         "scene":scene,
         "mesh_hash":mesh_hash.to_ascii_lowercase(),
         "kind":if animated { "animation" } else if diagram { "diagram" } else { "still" },
-        "engine":request.engine,
+        "selection":request.selection,
         "size":request.size,
-        "samples":request.samples,
         "frame_count":frame_count,
         "transparent":if diagram { true } else { request.transparent && !animated },
         "section":request.section,
